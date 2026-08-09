@@ -1,0 +1,10 @@
+playwright>=1.60.0
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+# lxml — scelto al posto di beautifulsoup4 perché:
+# (1) parsing di DOM reali (spesso malformati/non-XHTML) a velocità C,
+# (2) piu leggero in dipendenze, senza il layer BeautifulSoup sopra,
+# (3) supporto XPath nativo per query complesse sugli alberi (selector extraction).
+lxml>=5.1.0
+pytest
+pytest-asyncio
