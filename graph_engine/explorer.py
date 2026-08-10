@@ -23,6 +23,7 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from graph_engine.actions import enumerate_actionable
 from graph_engine.budget import Budget
 from graph_engine.dom_hash import normalise_and_hash
+from graph_engine.gate_solver import detect_captcha, try_pass_gate
 from graph_engine.models import (
     AnalysisTarget,
     Evidence,
@@ -156,6 +157,7 @@ class StateGraphExplorer:
         profile: Optional[dict] = None,
         capture_artifacts: bool = True,
         top_n_actions: int = 3,
+        captcha_wait_s: int = 8,
     ) -> AnalysisTarget:
         """Explore *start_url* passively and return the populated AnalysisTarget.
 
@@ -168,10 +170,14 @@ class StateGraphExplorer:
 
         *top_n_actions* limits how many scored click candidates are attempted
         per state (default 3). Set to 0 to disable click exploration entirely.
+
+        *captcha_wait_s* is the max wait time for invisible gate auto-resolve
+        (default 8).  Set to 0 to skip gate detection entirely.
         """
         budget = budget or Budget()
         self._capture_artifacts_flag = capture_artifacts
         self._top_n_actions = top_n_actions
+        self._captcha_wait_s = captcha_wait_s
         if profile is not None:
             self._profile = profile
 
@@ -240,6 +246,59 @@ class StateGraphExplorer:
                         # Replay fell back to goto(state.url) — the DOM may
                         # differ from the original exploration; treat as leaf.
                         continue
+
+                # ---- gate detection / solving --------------------------------
+                if self._captcha_wait_s > 0:
+                    captcha = await detect_captcha(page)
+                    if captcha is not None:
+                        gate_passed = await try_pass_gate(
+                            page, self._captcha_wait_s
+                        )
+                        if gate_passed:
+                            # The DOM changed (gate iframe gone / replaced) —
+                            # record a new State + Transition.
+                            post_html = await page.content()
+                            post_hash = normalise_and_hash(post_html)
+                            post_url = page.url
+
+                            if post_hash != state.dom_hash:
+                                gate_state = State(
+                                    target_id=self.target.id,  # type: ignore[union-attr]
+                                    url=post_url,
+                                    dom_hash=post_hash,
+                                    depth=state.depth + 1,
+                                )
+                                if self._capture_artifacts_flag:
+                                    await self._save_artifacts(
+                                        gate_state, page, post_html, []
+                                    )
+                                gate_transition = Transition(
+                                    target_id=self.target.id,  # type: ignore[union-attr]
+                                    from_state=state.id,
+                                    to_state=gate_state.id,
+                                    kind=TransitionKind.gate_solved,
+                                    trigger={
+                                        "provider": captcha,
+                                        "wait_s": self._captcha_wait_s,
+                                    },
+                                )
+                                self.states.append(gate_state)
+                                self.transitions.append(gate_transition)
+                                self._node_count += 1
+                                if gate_state.dom_hash not in self._visited:
+                                    await frontier.put(gate_state)
+                        else:
+                            # Gate still present — record and treat as leaf.
+                            self._record_error(
+                                scope=EvidenceScope.state,
+                                scope_id=state.id,
+                                key="blocked_by_gate",
+                                message=(
+                                    f"Gate not passed after "
+                                    f"{self._captcha_wait_s}s: {captcha}"
+                                ),
+                            )
+                            continue
 
                 # Enumerate *passive* actions from this state
                 actions = await self._enumerate_passive_actions(page, state)
