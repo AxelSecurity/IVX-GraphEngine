@@ -141,6 +141,10 @@ class StateGraphExplorer:
         self._network_captures: dict[int, list[dict]] = {}
         self._page_listeners: dict[int, list[tuple]] = {}
 
+        # Replay guard — when True, suppress side-effects (no new states,
+        # transitions, or intercepted-urls leakage during path replay).
+        self._replaying: bool = False
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -231,7 +235,11 @@ class StateGraphExplorer:
                 # Replay the transition path so *page* shows this state's DOM
                 # (critical for SPA / multi-step forms where URL doesn't change).
                 if state.depth > 0:
-                    await self._replay_to_state(page, state)
+                    replay_ok = await self._replay_to_state(page, state)
+                    if not replay_ok:
+                        # Replay fell back to goto(state.url) — the DOM may
+                        # differ from the original exploration; treat as leaf.
+                        continue
 
                 # Enumerate *passive* actions from this state
                 actions = await self._enumerate_passive_actions(page, state)
@@ -304,14 +312,35 @@ class StateGraphExplorer:
         rev.reverse()
         return rev
 
-    async def _replay_to_state(self, page: Page, state: State) -> None:
+    async def _replay_to_state(self, page: Page, state: State) -> bool:
         """Bring *page* to the same DOM as *state* by replaying the transition path.
 
-        For the root state this is a simple ``page.goto(start_url)``.  For
-        deeper states it replays every click transition on top of the root
-        URL, reproducing the exact interaction sequence that was originally
-        recorded.
+        Returns ``True`` if the replay completed cleanly.  Returns ``False``
+        when a click replay failed and we fell back to ``goto(state.url)`` —
+        in that case the caller **must not** enumerate new actions from this
+        state (it is a leaf).
+
+        The ``_replaying`` flag suppresses leak of intercepted navigations
+        into the exploration accumulators.
         """
+        was_replaying = self._replaying
+        self._replaying = True
+        try:
+            return await self._replay_to_state_impl(page, state)
+        finally:
+            self._replaying = was_replaying
+            # Discard any navigation intercepts that fired during replay —
+            # they belong to the original exploration, not new discovery.
+            self._intercepted_urls.clear()
+            try:
+                await page.evaluate(
+                    "() => { window.__ge_js_locations = []; }"
+                )
+            except Exception:
+                pass
+
+    async def _replay_to_state_impl(self, page: Page, state: State) -> bool:
+        """Inner implementation — see ``_replay_to_state``."""
         path = self._build_transition_path(state)
 
         if not path:
@@ -322,7 +351,7 @@ class StateGraphExplorer:
             finally:
                 self._our_goto_active = False
             await asyncio.sleep(1.5)
-            return
+            return True
 
         # Navigate to the root state's URL first.
         root_state = self._find_state_by_id(path[0].from_state)
@@ -343,8 +372,16 @@ class StateGraphExplorer:
                 try:
                     await page.click(selector, timeout=5000)
                 except Exception:
-                    # If a replay click fails the path is broken —
-                    # fall back to a direct URL navigation as best-effort.
+                    # Path broken — fall back to URL navigation.
+                    self._record_error(
+                        scope=EvidenceScope.state,
+                        scope_id=state.id,
+                        message=(
+                            f"Replay fallback: click on '{selector}' failed "
+                            f"for state {state.id} — fell back to "
+                            f"goto({state.url})"
+                        ),
+                    )
                     self._our_goto_active = True
                     try:
                         await page.goto(
@@ -353,7 +390,7 @@ class StateGraphExplorer:
                     finally:
                         self._our_goto_active = False
                     await asyncio.sleep(1.5)
-                    return
+                    return False
                 # Wait for potential navigation or DOM mutation.
                 try:
                     await page.wait_for_load_state(
@@ -365,6 +402,7 @@ class StateGraphExplorer:
             # URL-based transitions (http_3xx, meta_refresh, js_location) are
             # already reflected in the current page URL — the browser followed
             # them automatically.  No explicit replay needed.
+        return True
 
     # ------------------------------------------------------------------
     # Navigation + state creation
@@ -380,6 +418,11 @@ class StateGraphExplorer:
 
         Returns ``None`` on navigation error (error logged as Evidence).
         """
+        # Belt-and-suspenders: during replay we must never create new State
+        # objects — the replay's job is only to position the page.
+        if self._replaying:
+            return None
+
         network_entries: list[dict] = []
 
         try:
@@ -471,6 +514,11 @@ class StateGraphExplorer:
         self._intercepted_urls.clear()
 
         async def _guard(route):
+            if self._replaying:
+                # During replay, let all navigations through — we are only
+                # positioning the page and already clear intercepts afterwards.
+                await route.continue_()
+                return
             if route.request.is_navigation_request():
                 if not self._our_goto_active:
                     self._intercepted_urls.append(
@@ -616,6 +664,11 @@ class StateGraphExplorer:
                 return None
 
             # --- build the new State from the current page state --------------
+            # Belt-and-suspenders: during replay the flag is True and we must
+            # never create State / Transition objects.
+            if self._replaying:
+                return None
+
             new_state = State(
                 target_id=self.target.id,  # type: ignore[union-attr]
                 url=post_url,

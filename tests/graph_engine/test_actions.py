@@ -413,3 +413,68 @@ class TestDepth2ClickChain:
                     await browser.close()
         finally:
             server.shutdown()
+
+    async def test_replay_does_not_pollute_graph(self):
+        """Replay must not create spurious State / Transition entries.
+
+        The two-level SPA yields exactly 3 unique DOMs (root, step1,
+        step2) and 2 click transitions.  If replay machinery creates
+        extra entries the counts will exceed these expectations.
+        """
+        from playwright.async_api import async_playwright
+
+        from graph_engine.budget import Budget
+        from graph_engine.explorer import StateGraphExplorer
+
+        server = HTTPServer(("127.0.0.1", 0), _FixtureHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        import time
+        time.sleep(0.1)
+
+        start_url = f"http://127.0.0.1:{port}/"
+
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    explorer = StateGraphExplorer(browser)
+                    await explorer.run(
+                        start_url,
+                        budget=Budget(max_depth=3, max_nodes=10, timeout_s=60),
+                        capture_artifacts=False,
+                        top_n_actions=3,
+                    )
+
+                    n_states = len(explorer.states)
+                    n_transitions = len(explorer.transitions)
+
+                    # The fixture has 3 distinct DOMs (root → step1 → step2).
+                    # Replay must not inflate these numbers.
+                    assert n_states == 3, (
+                        f"Replay pollution? Expected exactly 3 states, "
+                        f"got {n_states}"
+                    )
+                    assert n_transitions == 2, (
+                        f"Replay pollution? Expected exactly 2 transitions, "
+                        f"got {n_transitions}"
+                    )
+
+                    # Depth distribution — must include all three levels.
+                    depths = {s.depth for s in explorer.states}
+                    assert depths == {0, 1, 2}, (
+                        f"Expected depths {{0,1,2}}, got {depths}"
+                    )
+
+                    # All transitions must be 'click' type.
+                    from graph_engine.models import TransitionKind
+                    assert all(
+                        t.kind == TransitionKind.click
+                        for t in explorer.transitions
+                    ), "All transitions must be click kind in this SPA"
+
+                finally:
+                    await browser.close()
+        finally:
+            server.shutdown()
