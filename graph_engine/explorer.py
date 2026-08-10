@@ -376,6 +376,7 @@ class StateGraphExplorer:
                     self._record_error(
                         scope=EvidenceScope.state,
                         scope_id=state.id,
+                        key="replay_fallback_used",
                         message=(
                             f"Replay fallback: click on '{selector}' failed "
                             f"for state {state.id} — fell back to "
@@ -775,6 +776,7 @@ class StateGraphExplorer:
         scope: EvidenceScope,
         scope_id: uuid.UUID,
         message: str,
+        key: str = "navigation_error",
     ) -> None:
         self.evidence.append(
             Evidence(
@@ -782,7 +784,7 @@ class StateGraphExplorer:
                 scope=scope,
                 scope_id=scope_id,
                 layer="L4",
-                key="navigation_error",
+                key=key,
                 value=message,
                 weight=1.0,
                 produced_by="StateGraphExplorer",
