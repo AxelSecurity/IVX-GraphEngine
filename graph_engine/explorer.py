@@ -7,9 +7,12 @@ This phase handles only *passive* transitions: no click / form_submit.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin, urlparse
 
@@ -114,6 +117,8 @@ class StateGraphExplorer:
         self._profile: dict = profile or {}
         self._page_timeout_ms = page_timeout_ms
 
+        self._artifact_base: Path = Path("data") / "graph_artifacts"
+
         # Accumulators — populated during run()
         self.target: Optional[AnalysisTarget] = None
         self.states: list[State] = []
@@ -129,6 +134,11 @@ class StateGraphExplorer:
         self._our_goto_active: bool = False
         self._intercepted_urls: list[dict] = []
 
+        # Artifact capture
+        self._capture_artifacts_flag: bool = True
+        self._network_captures: dict[int, list[dict]] = {}
+        self._page_listeners: dict[int, list[tuple]] = {}
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -138,13 +148,19 @@ class StateGraphExplorer:
         start_url: str,
         budget: Optional[Budget] = None,
         profile: Optional[dict] = None,
+        capture_artifacts: bool = True,
     ) -> AnalysisTarget:
         """Explore *start_url* passively and return the populated AnalysisTarget.
 
         The BFS respects *budget* limits and collects every State, Transition,
         and Evidence in ``self.states``, ``self.transitions``, ``self.evidence``.
+
+        When *capture_artifacts* is True (default), a HAR file, PNG screenshot,
+        and DOM snapshot are saved to ``data/graph_artifacts/<target_id>/<state_id>/``
+        for every visited state.
         """
         budget = budget or Budget()
+        self._capture_artifacts_flag = capture_artifacts
         if profile is not None:
             self._profile = profile
 
@@ -252,7 +268,13 @@ class StateGraphExplorer:
 
         Returns ``None`` on navigation error (error logged as Evidence).
         """
+        network_entries: list[dict] = []
+
         try:
+            # --- start network capture (before navigation) -----------------
+            if self._capture_artifacts_flag:
+                self._start_network_capture(page)
+
             # Install the navigation guard *before* goto so we can tell our
             # own navigations apart from JS-initiated ones.
             await self._install_navigation_guard(page)
@@ -278,12 +300,18 @@ class StateGraphExplorer:
             await page.evaluate("() => { window.__ge_js_locations = []; }")
 
         except Exception as exc:
+            if self._capture_artifacts_flag:
+                self._stop_network_capture(page)
             self._record_error(
                 scope=EvidenceScope.target,
                 scope_id=self.target.id if self.target else uuid.uuid4(),
                 message=f"Navigation error for {url}: {exc}",
             )
             return None
+
+        # --- stop network capture ------------------------------------------
+        if self._capture_artifacts_flag:
+            network_entries = self._stop_network_capture(page)
 
         # --- determine final URL and any HTTP-redirect chain ----------------
         final_url = page.url
@@ -310,6 +338,11 @@ class StateGraphExplorer:
             dom_hash=dom_hash,
             depth=depth,
         )
+
+        # --- save artifacts --------------------------------------------------
+        if self._capture_artifacts_flag:
+            await self._save_artifacts(state, page, html_str, network_entries)
+
         return state
 
     # ------------------------------------------------------------------
@@ -442,6 +475,10 @@ class StateGraphExplorer:
     # Error recording
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Error recording
+    # ------------------------------------------------------------------
+
     def _record_error(
         self,
         scope: EvidenceScope,
@@ -460,3 +497,163 @@ class StateGraphExplorer:
                 produced_by="StateGraphExplorer",
             )
         )
+
+    # ------------------------------------------------------------------
+    # Artifact capture
+    # ------------------------------------------------------------------
+
+    def _start_network_capture(self, page: Page) -> None:
+        """Register request/response listeners on *page* to collect HAR entries."""
+        page_id = id(page)
+        entries: list[dict] = []
+        self._network_captures[page_id] = entries
+
+        async def _on_request(request):
+            entries.append({
+                "url": request.url,
+                "method": request.method,
+                "headers": dict(request.headers),
+                "postData": request.post_data,
+                "startedDateTime": datetime.now(timezone.utc).isoformat(),
+                "_start_ms": time.monotonic(),
+            })
+
+        async def _on_response(response):
+            t = time.monotonic()
+            for entry in reversed(entries):
+                if entry["url"] == response.url and "response_status" not in entry:
+                    entry.update({
+                        "response_status": response.status,
+                        "response_statusText": response.status_text,
+                        "response_headers": dict(response.headers),
+                        "time_ms": int((t - entry["_start_ms"]) * 1000),
+                    })
+                    del entry["_start_ms"]
+                    break
+
+        # Clean up stale listener records for this page id if any.
+        self._page_listeners.pop(page_id, None)
+
+        page.on("request", _on_request)
+        page.on("response", _on_response)
+        self._page_listeners[page_id] = [
+            ("request", _on_request),
+            ("response", _on_response),
+        ]
+
+    def _stop_network_capture(self, page: Page) -> list[dict]:
+        """Remove page listeners and return the collected entries."""
+        page_id = id(page)
+        for event, handler in self._page_listeners.pop(page_id, []):
+            page.remove_listener(event, handler)
+        return self._network_captures.pop(page_id, [])
+
+    def _build_har(self, page_url: str, entries: list[dict]) -> dict:
+        """Build a minimal HAR 1.2-compliant dictionary from captured entries."""
+        har_entries = []
+        for e in entries:
+            request = {
+                "method": e.get("method", "GET"),
+                "url": e.get("url", ""),
+                "headers": [
+                    {"name": k, "value": v}
+                    for k, v in e.get("headers", {}).items()
+                ],
+                "cookies": [],
+                "queryString": [],
+                "headersSize": -1,
+                "bodySize": -1,
+            }
+            if e.get("postData"):
+                request["postData"] = {"text": e["postData"], "mimeType": "application/x-www-form-urlencoded"}
+
+            response = {
+                "status": e.get("response_status", 0),
+                "statusText": e.get("response_statusText", ""),
+                "headers": [
+                    {"name": k, "value": v}
+                    for k, v in e.get("response_headers", {}).items()
+                ],
+                "cookies": [],
+                "content": {"size": -1, "mimeType": "unknown"},
+                "redirectURL": "",
+                "headersSize": -1,
+                "bodySize": -1,
+            }
+
+            har_entries.append({
+                "startedDateTime": e.get("startedDateTime", ""),
+                "time": e.get("time_ms", -1),
+                "request": request,
+                "response": response,
+                "cache": {},
+                "timings": {"send": -1, "wait": -1, "receive": -1},
+            })
+
+        return {
+            "log": {
+                "version": "1.2",
+                "creator": {"name": "IVX-GraphEngine", "version": "0.1.0"},
+                "pages": [{
+                    "id": "page_1",
+                    "title": page_url,
+                    "startedDateTime": har_entries[0]["startedDateTime"] if har_entries else datetime.now(timezone.utc).isoformat(),
+                }],
+                "entries": har_entries,
+            }
+        }
+
+    async def _save_artifacts(
+        self,
+        state: State,
+        page: Page,
+        html_str: str,
+        network_entries: list[dict],
+    ) -> None:
+        """Save screenshot, DOM snapshot, and HAR for *state* to disk.
+
+        Each artifact is saved independently — a single failure does not
+        prevent the others from being written.
+        """
+        target_id = self.target.id  # type: ignore[union-attr]
+        base_dir = self._artifact_base / str(target_id) / str(state.id)
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- screenshot ------------------------------------------------------
+        try:
+            screenshot_path = base_dir / "screenshot.png"
+            await page.screenshot(path=str(screenshot_path), full_page=True)
+            state.screenshot_ref = str(screenshot_path)
+        except Exception as exc:
+            self._record_error(
+                scope=EvidenceScope.state,
+                scope_id=state.id,
+                message=f"Artifact error — screenshot: {exc}",
+            )
+
+        # --- DOM snapshot ----------------------------------------------------
+        try:
+            dom_path = base_dir / "dom.html"
+            dom_path.write_text(html_str, encoding="utf-8")
+        except Exception as exc:
+            self._record_error(
+                scope=EvidenceScope.state,
+                scope_id=state.id,
+                message=f"Artifact error — dom.html: {exc}",
+            )
+
+        # --- HAR -------------------------------------------------------------
+        try:
+            har_path = base_dir / "snapshot.har"
+            har_data = self._build_har(state.url, network_entries)
+            har_path.write_text(
+                json.dumps(har_data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            state.har_ref = str(har_path)
+        except Exception as exc:
+            self._record_error(
+                scope=EvidenceScope.state,
+                scope_id=state.id,
+                message=f"Artifact error — snapshot.har: {exc}",
+            )

@@ -43,7 +43,11 @@ async def _main(args: argparse.Namespace) -> None:
         browser = await pw.chromium.launch(headless=True)
         try:
             explorer = StateGraphExplorer(browser)
-            target = await explorer.run(args.url, budget=budget)
+            target = await explorer.run(
+                args.url,
+                budget=budget,
+                capture_artifacts=not args.no_artifacts,
+            )
             print(_serialise(target, explorer.states, explorer.transitions,
                              explorer.evidence))
         finally:
@@ -75,6 +79,11 @@ def main() -> None:
         type=int,
         default=180,
         help="Wall-clock timeout in seconds (default: 180)",
+    )
+    parser.add_argument(
+        "--no-artifacts",
+        action="store_true",
+        help="Disable per-state artifact capture (HAR, screenshot, DOM)",
     )
 
     args = parser.parse_args()
