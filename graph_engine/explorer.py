@@ -228,6 +228,11 @@ class StateGraphExplorer:
                 if state.depth >= budget.max_depth:
                     continue
 
+                # Replay the transition path so *page* shows this state's DOM
+                # (critical for SPA / multi-step forms where URL doesn't change).
+                if state.depth > 0:
+                    await self._replay_to_state(page, state)
+
                 # Enumerate *passive* actions from this state
                 actions = await self._enumerate_passive_actions(page, state)
 
@@ -267,6 +272,99 @@ class StateGraphExplorer:
         if (time.monotonic() - self._start_ts) >= budget.timeout_s:
             return False
         return True
+
+    # ------------------------------------------------------------------
+    # Transition path reconstruction
+    # ------------------------------------------------------------------
+
+    def _find_state_by_id(self, state_id: uuid.UUID) -> Optional[State]:
+        """Look up a State by its id in ``self.states``."""
+        for s in self.states:
+            if s.id == state_id:
+                return s
+        return None
+
+    def _build_transition_path(self, state: State) -> list[Transition]:
+        """Walk backwards from *state* to root and return the ordered path.
+
+        The returned list is empty for the root state.  For every other state
+        it contains the Transitions that were traversed from root → *state*,
+        in chronological order.
+        """
+        rev: list[Transition] = []
+        current_id: uuid.UUID = state.id
+        while True:
+            t = next(
+                (t for t in self.transitions if t.to_state == current_id), None
+            )
+            if t is None:
+                break
+            rev.append(t)
+            current_id = t.from_state
+        rev.reverse()
+        return rev
+
+    async def _replay_to_state(self, page: Page, state: State) -> None:
+        """Bring *page* to the same DOM as *state* by replaying the transition path.
+
+        For the root state this is a simple ``page.goto(start_url)``.  For
+        deeper states it replays every click transition on top of the root
+        URL, reproducing the exact interaction sequence that was originally
+        recorded.
+        """
+        path = self._build_transition_path(state)
+
+        if not path:
+            # Root — simple navigation.
+            self._our_goto_active = True
+            try:
+                await page.goto(state.url, wait_until="domcontentloaded")
+            finally:
+                self._our_goto_active = False
+            await asyncio.sleep(1.5)
+            return
+
+        # Navigate to the root state's URL first.
+        root_state = self._find_state_by_id(path[0].from_state)
+        root_url = root_state.url if root_state else state.url
+        self._our_goto_active = True
+        try:
+            await page.goto(root_url, wait_until="domcontentloaded")
+        finally:
+            self._our_goto_active = False
+        await asyncio.sleep(1.0)
+
+        # Replay click transitions in order.
+        for t in path:
+            if t.kind == TransitionKind.click and t.trigger:
+                selector = t.trigger.get("selector", "")
+                if not selector:
+                    continue
+                try:
+                    await page.click(selector, timeout=5000)
+                except Exception:
+                    # If a replay click fails the path is broken —
+                    # fall back to a direct URL navigation as best-effort.
+                    self._our_goto_active = True
+                    try:
+                        await page.goto(
+                            state.url, wait_until="domcontentloaded"
+                        )
+                    finally:
+                        self._our_goto_active = False
+                    await asyncio.sleep(1.5)
+                    return
+                # Wait for potential navigation or DOM mutation.
+                try:
+                    await page.wait_for_load_state(
+                        "networkidle", timeout=3000
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+            # URL-based transitions (http_3xx, meta_refresh, js_location) are
+            # already reflected in the current page URL — the browser followed
+            # them automatically.  No explicit replay needed.
 
     # ------------------------------------------------------------------
     # Navigation + state creation
@@ -464,10 +562,12 @@ class StateGraphExplorer:
         from_state: State,
         action: dict,
     ) -> Optional[State]:
-        """Click *action*'s element on a fresh page and detect navigation/DOM change.
+        """Click *action*'s element and detect navigation/DOM change.
 
-        Strategy:
-        1. Open a fresh page and navigate to *from_state.url* (replay the page).
+        Strategy (revised — replay-full-path):
+        1. Open a fresh page and replay the transition path to *from_state*
+           (not just ``goto(url)`` — that fails for click-reached states where
+           the URL never changed).
         2. Click the target element.
         3. Wait for ``networkidle`` (catches navigations) with a short timeout.
         4. If the URL changed → new state.
@@ -480,9 +580,10 @@ class StateGraphExplorer:
         new_page.set_default_timeout(self._page_timeout_ms)
 
         try:
-            # Replay: load the same page the element was found on.
-            await new_page.goto(from_state.url, wait_until="domcontentloaded")
-            await asyncio.sleep(0.8)
+            # Replay the full transition path to reach *from_state*'s DOM.
+            # This correctly handles states reached via click where the URL
+            # never changed (SPA, multi-step forms).
+            await self._replay_to_state(new_page, from_state)
 
             # Pre-click snapshot.
             pre_html = await new_page.content()

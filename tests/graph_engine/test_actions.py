@@ -2,11 +2,55 @@
 
 from __future__ import annotations
 
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from graph_engine.actions import ActionCandidate, enumerate_actionable
+
+
+# ---------------------------------------------------------------------------
+# HTML fixture — two-level SPA: first button reveals second button
+# ---------------------------------------------------------------------------
+
+_TWO_LEVEL_SPA = """\
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Two-Level SPA</title></head>
+<body style="margin:0; padding:16px;">
+
+  <!-- Level 0: always visible, central, large, keyword "Verify"        -->
+  <button id="btn-step1"
+          style="position:absolute; left:480px; top:280px;
+                 width:320px; height:80px; font-size:22px;
+                 background:#0070f3; color:#fff; border:none;
+                 border-radius:8px; cursor:pointer;"
+          onclick="document.getElementById('btn-step2').style.display='block';
+                   this.style.display='none';">
+    Verify your account
+  </button>
+
+  <!-- Level 1: hidden until btn-step1 is clicked — keyword "Continue"  -->
+  <button id="btn-step2"
+          style="display:none;
+                 position:absolute; left:480px; top:380px;
+                 width:320px; height:64px; font-size:18px;
+                 background:#0a0; color:#fff; border:none;
+                 border-radius:8px; cursor:pointer;"
+          onclick="this.textContent='Done';">
+    Continue to dashboard
+  </button>
+
+  <!-- Distractor: small text at bottom, NOT actionable (no href, not a button) -->
+  <span style="position:absolute; left:10px; top:660px;
+               font-size:11px; color:#999;">
+    Privacy Policy
+  </span>
+
+</body>
+</html>"""
 
 
 # ---------------------------------------------------------------------------
@@ -273,3 +317,99 @@ class TestExplorerClickEnumeration:
             "ge_js_locations" in str(c) or "ge_js_locations" in str(c)
             for c in page.evaluate.call_args_list
         )
+
+
+# ---------------------------------------------------------------------------
+# Depth-2 click-chain integration test
+# ---------------------------------------------------------------------------
+
+
+class _FixtureHandler(BaseHTTPRequestHandler):
+    """Serve _TWO_LEVEL_SPA for every GET request."""
+
+    _html: str = _TWO_LEVEL_SPA
+
+    def do_GET(self) -> None:
+        body = self._html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass  # silence HTTP server logs
+
+
+@pytest.mark.integration
+class TestDepth2ClickChain:
+    """Full BFS exploration through two DOM-only click levels at the same URL."""
+
+    async def test_two_level_click_chain(self):
+        """Explorer must find both btn-step1 and btn-step2 via click replay."""
+        from playwright.async_api import async_playwright
+
+        from graph_engine.budget import Budget
+        from graph_engine.explorer import StateGraphExplorer
+        from graph_engine.models import TransitionKind
+
+        # Start a local HTTP server on a random port.
+        server = HTTPServer(("127.0.0.1", 0), _FixtureHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        import time
+        time.sleep(0.1)  # let the server bind before first navigation
+
+        start_url = f"http://127.0.0.1:{port}/"
+
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    explorer = StateGraphExplorer(browser)
+                    target = await explorer.run(
+                        start_url,
+                        budget=Budget(max_depth=3, max_nodes=10, timeout_s=60),
+                        capture_artifacts=False,
+                        top_n_actions=3,
+                    )
+
+                    # We expect at least 3 states:
+                    #   depth 0: root page (btn-step1 visible)
+                    #   depth 1: after clicking btn-step1 (btn-step2 visible)
+                    #   depth 2: after clicking btn-step2 (textContent="Done")
+                    assert len(explorer.states) >= 3, (
+                        f"Expected >= 3 states (depth 0,1,2), "
+                        f"got {len(explorer.states)}"
+                    )
+
+                    # All states should share the same URL (SPA, no navigation).
+                    urls = {s.url.rstrip("/") for s in explorer.states}
+                    assert len(urls) == 1, (
+                        f"All states should have the same URL, got {urls}"
+                    )
+
+                    # Depth distribution
+                    depths = {s.depth for s in explorer.states}
+                    assert 0 in depths
+                    assert 1 in depths
+                    assert 2 in depths, (
+                        f"Missing depth-2 state — click chain broken at "
+                        f"depth 1. Depths found: {depths}"
+                    )
+
+                    # All non-root transitions should be 'click'
+                    click_transitions = [
+                        t for t in explorer.transitions
+                        if t.kind == TransitionKind.click
+                    ]
+                    assert len(click_transitions) >= 2, (
+                        f"Expected >= 2 click transitions, "
+                        f"got {len(click_transitions)}"
+                    )
+
+                finally:
+                    await browser.close()
+        finally:
+            server.shutdown()
