@@ -1,7 +1,8 @@
-"""BFS state-graph explorer — passive redirects (http_3xx, meta_refresh, js_location).
+"""BFS state-graph explorer — passive redirects + click interactions.
 
 Implements the BFS loop from ARCHITECTURE_L4.md using Playwright async API.
-This phase handles only *passive* transitions: no click / form_submit.
+Handles passive transitions (http_3xx, meta_refresh, js_location) and the
+first interactive transition: click on scored actionable elements.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from urllib.parse import urljoin, urlparse
 from lxml import html as lxml_html
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
+from graph_engine.actions import enumerate_actionable
 from graph_engine.budget import Budget
 from graph_engine.dom_hash import normalise_and_hash
 from graph_engine.models import (
@@ -149,6 +151,7 @@ class StateGraphExplorer:
         budget: Optional[Budget] = None,
         profile: Optional[dict] = None,
         capture_artifacts: bool = True,
+        top_n_actions: int = 3,
     ) -> AnalysisTarget:
         """Explore *start_url* passively and return the populated AnalysisTarget.
 
@@ -158,9 +161,13 @@ class StateGraphExplorer:
         When *capture_artifacts* is True (default), a HAR file, PNG screenshot,
         and DOM snapshot are saved to ``data/graph_artifacts/<target_id>/<state_id>/``
         for every visited state.
+
+        *top_n_actions* limits how many scored click candidates are attempted
+        per state (default 3). Set to 0 to disable click exploration entirely.
         """
         budget = budget or Budget()
         self._capture_artifacts_flag = capture_artifacts
+        self._top_n_actions = top_n_actions
         if profile is not None:
             self._profile = profile
 
@@ -223,6 +230,13 @@ class StateGraphExplorer:
 
                 # Enumerate *passive* actions from this state
                 actions = await self._enumerate_passive_actions(page, state)
+
+                # Enumerate *click* actions if enabled
+                if self._top_n_actions > 0:
+                    click_actions = await self._enumerate_click_actions(
+                        page, state
+                    )
+                    actions.extend(click_actions)
 
                 for action in actions:
                     if not self._within_budget(budget):
@@ -417,6 +431,126 @@ class StateGraphExplorer:
         return None
 
     # ------------------------------------------------------------------
+    # Click-action enumeration
+    # ------------------------------------------------------------------
+
+    async def _enumerate_click_actions(
+        self, page: Page, state: State
+    ) -> list[dict]:
+        """Score and return the top-N click candidates for *state*."""
+        try:
+            candidates = await enumerate_actionable(page)
+        except Exception:
+            return []
+
+        actions: list[dict] = []
+        for c in candidates[: self._top_n_actions]:
+            actions.append({
+                "kind": "click",
+                "selector": c.selector,
+                "text": c.text,
+                "combined_score": c.combined_score,
+                "bounding_box": c.bounding_box,
+            })
+        return actions
+
+    # ------------------------------------------------------------------
+    # Click-action execution
+    # ------------------------------------------------------------------
+
+    async def _execute_click_action(
+        self,
+        context: BrowserContext,
+        from_state: State,
+        action: dict,
+    ) -> Optional[State]:
+        """Click *action*'s element on a fresh page and detect navigation/DOM change.
+
+        Strategy:
+        1. Open a fresh page and navigate to *from_state.url* (replay the page).
+        2. Click the target element.
+        3. Wait for ``networkidle`` (catches navigations) with a short timeout.
+        4. If the URL changed → new state.
+        5. If not, compare before/after ``dom_hash`` — mutation without navigation
+           still produces a new state.
+        6. If nothing changed, discard the branch (return ``None``).
+        """
+        selector = action["selector"]
+        new_page = await context.new_page()
+        new_page.set_default_timeout(self._page_timeout_ms)
+
+        try:
+            # Replay: load the same page the element was found on.
+            await new_page.goto(from_state.url, wait_until="domcontentloaded")
+            await asyncio.sleep(0.8)
+
+            # Pre-click snapshot.
+            pre_html = await new_page.content()
+            pre_hash = normalise_and_hash(pre_html)
+            pre_url = new_page.url
+
+            # Click.
+            try:
+                await new_page.click(selector, timeout=5000)
+            except Exception:
+                # Element not found / not clickable — not an error, just skip.
+                return None
+
+            # Wait for potential navigation.
+            try:
+                await new_page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass  # timeout is expected for pages that don't navigate
+
+            # Let any in-flight DOM mutations settle.
+            await asyncio.sleep(0.5)
+
+            # Post-click snapshot.
+            post_url = new_page.url
+            post_html = await new_page.content()
+            post_hash = normalise_and_hash(post_html)
+
+            # --- no observable change → discard branch -----------------------
+            if post_url.rstrip("/") == pre_url.rstrip("/") and post_hash == pre_hash:
+                return None
+
+            # --- build the new State from the current page state --------------
+            new_state = State(
+                target_id=self.target.id,  # type: ignore[union-attr]
+                url=post_url,
+                dom_hash=post_hash,
+                depth=from_state.depth + 1,
+            )
+
+            # Capture artifacts using the current page (no re-navigation).
+            if self._capture_artifacts_flag:
+                await self._save_artifacts(new_state, new_page, post_html, [])
+
+            transition = Transition(
+                target_id=self.target.id,  # type: ignore[union-attr]
+                from_state=from_state.id,
+                to_state=new_state.id,
+                kind=TransitionKind.click,
+                trigger={
+                    "selector": selector,
+                    "text": action.get("text", ""),
+                    "combined_score": action.get("combined_score", 0.0),
+                },
+            )
+            self.transitions.append(transition)
+            return new_state
+
+        except Exception as exc:
+            self._record_error(
+                scope=EvidenceScope.state,
+                scope_id=from_state.id,
+                message=f"Click action error ({selector}): {exc}",
+            )
+            return None
+        finally:
+            await new_page.close()
+
+    # ------------------------------------------------------------------
     # Action execution
     # ------------------------------------------------------------------
 
@@ -427,11 +561,14 @@ class StateGraphExplorer:
         from_state: State,
         action: dict,
     ) -> Optional[State]:
-        """Navigate to *action*'s URL, record a Transition, return new State."""
+        """Execute *action*, record a Transition, return the new State (if any)."""
         kind_str = action["kind"]
+        if kind_str == "click":
+            return await self._execute_click_action(context, from_state, action)
+
+        # --- URL-based (passive) actions ------------------------------------
         target_url = action["url"]
 
-        # Map string kind to TransitionKind enum
         kind_map = {
             "http_3xx": TransitionKind.http_3xx,
             "meta_refresh": TransitionKind.meta_refresh,

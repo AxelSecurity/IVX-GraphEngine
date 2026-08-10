@@ -3,6 +3,7 @@
 Usage::
 
     python -m graph_engine.cli <url> [--max-depth N] [--max-nodes N] [--timeout N]
+                                     [--no-artifacts] [--top-n-actions N]
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ async def _main(args: argparse.Namespace) -> None:
                 args.url,
                 budget=budget,
                 capture_artifacts=not args.no_artifacts,
+                top_n_actions=args.top_n_actions,
             )
             print(_serialise(target, explorer.states, explorer.transitions,
                              explorer.evidence))
@@ -56,7 +58,7 @@ async def _main(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="IVX GraphEngine — passive BFS explorer",
+        description="IVX GraphEngine — BFS state-graph explorer",
     )
     parser.add_argument(
         "url",
@@ -84,6 +86,12 @@ def main() -> None:
         "--no-artifacts",
         action="store_true",
         help="Disable per-state artifact capture (HAR, screenshot, DOM)",
+    )
+    parser.add_argument(
+        "--top-n-actions",
+        type=int,
+        default=3,
+        help="Max click candidates attempted per state (default: 3, 0 = disable)",
     )
 
     args = parser.parse_args()
