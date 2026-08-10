@@ -70,6 +70,40 @@ _PERSISTENT_GATE_PAGE = """\
 </body>
 </html>"""
 
+# Gate that auto-resolves (iframe removed after 3 s), followed by a button
+# that is clickable once the gate is gone.  Used to verify that replay
+# correctly re-solves gate_solved transitions.
+_GATE_THEN_BUTTON_PAGE = """\
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Gate + Button</title></head>
+<body>
+  <h1>Landing</h1>
+  <iframe id="cf-challenge"
+          src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/if/ov/av0/rcv0/0x4AAAAAAADn7ROdM5XFV5/0/light/normal"
+          width="300" height="65"
+          style="border:0;"></iframe>
+  <p id="status">Verifying...</p>
+  <button id="btn-dashboard"
+          style="position:absolute; left:480px; top:400px;
+                 width:240px; height:52px; font-size:16px;
+                 background:#0070f3; color:#fff; border:none;
+                 border-radius:8px; cursor:pointer;"
+          onclick="this.textContent='Done';">
+    Continue to dashboard
+  </button>
+  <script>
+    // Delay must be longer than _navigate_and_create_state's 1.5 s settle
+    // so the iframe is still present when gate detection runs.
+    setTimeout(() => {
+      const f = document.getElementById('cf-challenge');
+      if (f) f.remove();
+      document.getElementById('status').textContent = 'Ready';
+    }, 3000);
+  </script>
+</body>
+</html>"""
+
 
 # ---------------------------------------------------------------------------
 # HTTP request handler
@@ -79,6 +113,23 @@ class _FixtureHandler(BaseHTTPRequestHandler):
     """Serve a single HTML page for every GET request."""
 
     _html: str = _PERSISTENT_GATE_PAGE
+
+    def do_GET(self) -> None:
+        body = self._html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class _GateThenButtonHandler(BaseHTTPRequestHandler):
+    """Serve the gate-then-button page."""
+
+    _html: str = _GATE_THEN_BUTTON_PAGE
 
     def do_GET(self) -> None:
         body = self._html.encode("utf-8")
@@ -291,6 +342,104 @@ class TestExplorerBlockedByGate:
                     assert len(explorer.states) == 1, (
                         f"Expected exactly 1 state (root), "
                         f"got {len(explorer.states)}"
+                    )
+
+                finally:
+                    await browser.close()
+        finally:
+            server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# 4 — Explorer with gate that auto-resolves: verify replay re-solves gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestGateThenButtonChain:
+    """Gate auto-resolves, exposing a button at depth 2.
+
+    The explorer must first solve the gate (creating a gate_solved
+    transition), then discover and click the button.  When the BFS
+    replays the path to explore further from the post-gate state, it
+    must re-solve the gate (not try a click — there is no click
+    selector for a gate_solved transition).
+    """
+
+    async def test_gate_then_button_reaches_depth_2(self):
+        """Full chain: root → gate_solved → button click → depth 2."""
+        from playwright.async_api import async_playwright
+
+        from graph_engine.budget import Budget
+        from graph_engine.explorer import StateGraphExplorer
+        from graph_engine.models import TransitionKind
+
+        server = HTTPServer(("127.0.0.1", 0), _GateThenButtonHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        import time
+        time.sleep(0.1)
+
+        start_url = f"http://127.0.0.1:{port}/"
+
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    explorer = StateGraphExplorer(browser)
+                    await explorer.run(
+                        start_url,
+                        budget=Budget(
+                            max_depth=3, max_nodes=10, timeout_s=60
+                        ),
+                        capture_artifacts=False,
+                        top_n_actions=3,
+                        captcha_wait_s=5,
+                    )
+
+                    # ---- gate_solved transition must exist -----------------
+                    gate_transitions = [
+                        t for t in explorer.transitions
+                        if t.kind == TransitionKind.gate_solved
+                    ]
+                    assert len(gate_transitions) >= 1, (
+                        "Expected at least one gate_solved transition, "
+                        f"got {[t.kind.value for t in explorer.transitions]}"
+                    )
+                    gate_t = gate_transitions[0]
+                    assert gate_t.trigger is not None
+                    assert gate_t.trigger.get("provider") == "cloudflare_turnstile"
+
+                    # ---- click transition must exist (button after gate) ---
+                    click_transitions = [
+                        t for t in explorer.transitions
+                        if t.kind == TransitionKind.click
+                    ]
+                    assert len(click_transitions) >= 1, (
+                        "Expected at least one click transition after gate, "
+                        f"got {[t.kind.value for t in explorer.transitions]}"
+                    )
+
+                    # ---- depth distribution --------------------------------
+                    depths = {s.depth for s in explorer.states}
+                    assert 0 in depths, f"Missing depth 0: {depths}"
+                    assert 1 in depths, (
+                        f"Missing depth 1 (post-gate state): {depths}"
+                    )
+                    assert 2 in depths, (
+                        f"Missing depth 2 (post-click state): {depths}. "
+                        "Replay likely failed to re-solve the gate."
+                    )
+
+                    # ---- no replay-fallback evidence -----------------------
+                    fallback_evidence = [
+                        e for e in explorer.evidence
+                        if e.key == "replay_fallback_used"
+                    ]
+                    assert len(fallback_evidence) == 0, (
+                        f"Replay fallback should not have triggered; "
+                        f"got {len(fallback_evidence)} entry(s)"
                     )
 
                 finally:

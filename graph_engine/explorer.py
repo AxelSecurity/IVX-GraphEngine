@@ -422,9 +422,44 @@ class StateGraphExplorer:
             self._our_goto_active = False
         await asyncio.sleep(1.0)
 
-        # Replay click transitions in order.
+        # Replay transitions in chronological order.
         for t in path:
-            if t.kind == TransitionKind.click and t.trigger:
+            if t.kind == TransitionKind.gate_solved and t.trigger:
+                # Re-solve the gate with the same logic used during original
+                # exploration — not a simple click.
+                provider = t.trigger.get("provider", "")
+                wait_s = int(t.trigger.get("wait_s", self._captcha_wait_s))
+
+                captcha = await detect_captcha(page)
+                if captcha is not None:
+                    gate_passed = await try_pass_gate(
+                        page, wait_seconds=wait_s
+                    )
+                    if not gate_passed:
+                        self._record_error(
+                            scope=EvidenceScope.state,
+                            scope_id=state.id,
+                            key="replay_fallback_used",
+                            message=(
+                                f"Replay fallback: gate_solved for "
+                                f"'{provider}' failed on replay for "
+                                f"state {state.id} — fell back to "
+                                f"goto({state.url})"
+                            ),
+                        )
+                        self._our_goto_active = True
+                        try:
+                            await page.goto(
+                                state.url, wait_until="domcontentloaded"
+                            )
+                        finally:
+                            self._our_goto_active = False
+                        await asyncio.sleep(1.5)
+                        return False
+                # Let the page settle after gate resolution.
+                await asyncio.sleep(1.0)
+
+            elif t.kind == TransitionKind.click and t.trigger:
                 selector = t.trigger.get("selector", "")
                 if not selector:
                     continue
