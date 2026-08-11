@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from graph_engine.lexical.typosquat import (
     _registrable_domain,
     check_typosquat,
@@ -45,6 +47,61 @@ class TestRegistrableDomain:
 
     def test_italian_pa_domain(self):
         assert _registrable_domain("cittadino.inps.it") == "inps.it"
+
+    def test_gov_it_correctly_resolved(self):
+        """.gov.it è un TLD a due componenti nella PSL ufficiale.
+        Era assente dalla lista manuale _TWO_PART_TLDS — bug corretto con tldextract."""
+        assert _registrable_domain("login.inps.gov.it") == "inps.gov.it"
+        assert _registrable_domain("www.agenziaentrate.gov.it") == "agenziaentrate.gov.it"
+
+    def test_com_mx_two_part_tld(self):
+        """com.mx è nella PSL ufficiale — non era nella lista manuale."""
+        assert _registrable_domain("www.example.com.mx") == "example.com.mx"
+        assert _registrable_domain("example.com.mx") == "example.com.mx"
+
+    def test_co_in_two_part_tld(self):
+        """co.in è nella PSL ufficiale — non era nella lista manuale."""
+        assert _registrable_domain("phish.example.co.in") == "example.co.in"
+
+    def test_tld_not_in_old_manual_list(self):
+        """Verifica che TLD assenti dalla vecchia lista manuale funzionino.
+        Vecchia _TWO_PART_TLDS NON conteneva: gov.it, com.mx, co.in"""
+        # Questi tre TLD erano assenti — ora risolti correttamente
+        assert _registrable_domain("login.inps.gov.it") == "inps.gov.it"
+        assert _registrable_domain("www.example.com.mx") == "example.com.mx"
+        assert _registrable_domain("phish.example.co.in") == "example.co.in"
+
+
+class TestNetworkIsolation:
+    """Verifica che tldextract NON faccia richieste di rete."""
+
+    def test_tldextract_never_fetches_urls(self):
+        """L'estrattore è configurato con suffix_list_urls=None → zero rete."""
+        from graph_engine.lexical import typosquat as ts
+
+        # L'estrattore deve esistere ed essere un TLDExtract
+        assert ts._extractor is not None
+        # suffix_list_urls deve essere una tupla vuota (None → ())
+        assert ts._extractor.suffix_list_urls == ()
+
+    def test_extract_works_offline(self):
+        """Verifica che l'estrazione funzioni senza alcuna richiesta di rete."""
+        # Basta chiamare _registrable_domain su una varietà di TLD —
+        # se tldextract tentasse di fare rete, il test fallirebbe in timeout
+        # o con un errore di connessione.
+        cases = [
+            ("login.inps.gov.it", "inps.gov.it"),
+            ("evil.example.com", "example.com"),
+            ("phish.example.co.uk", "example.co.uk"),
+            ("www.example.com.mx", "example.com.mx"),
+            ("sub.example.co.in", "example.co.in"),
+            ("keyimportacao.com.br", "keyimportacao.com.br"),
+            ("cittadino.inps.it", "inps.it"),
+        ]
+        for hostname, expected in cases:
+            assert _registrable_domain(hostname) == expected, (
+                f"Failed: _registrable_domain({hostname!r}) should be {expected!r}"
+            )
 
 
 class TestTyposquatCheck:

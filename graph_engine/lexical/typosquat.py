@@ -10,7 +10,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+import tldextract
 import yaml
+
+# ---------------------------------------------------------------------------
+# Public Suffix List extractor — offline, nessuna richiesta di rete
+# ---------------------------------------------------------------------------
+
+_extractor = tldextract.TLDExtract(
+    suffix_list_urls=None,         # no network — usa solo snapshot PSL incluso
+    include_psl_private_domains=True,  # include gov.it, com.mx, co.in, ecc.
+    fallback_to_snapshot=True,
+    cache_dir=None,                # nessuna cache su disco
+)
 
 # ---------------------------------------------------------------------------
 # Damerau-Levenshtein (Optimal String Alignment)
@@ -56,40 +68,25 @@ def damerau_levenshtein(a: str, b: str) -> int:
 # Estrazione dominio registrabile
 # ---------------------------------------------------------------------------
 
-# TLD a due componenti comuni: il dominio registrabile richiede 3 label
-_TWO_PART_TLDS = frozenset({
-    "co.uk", "ac.uk", "gov.uk", "org.uk", "net.uk", "me.uk", "ltd.uk", "plc.uk",
-    "com.au", "net.au", "org.au", "gov.au",
-    "co.nz", "net.nz", "org.nz",
-    "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp",
-    "com.br", "org.br", "net.br", "gov.br",
-})
-
-
 def _registrable_domain(hostname: str) -> str:
     """Restituisce il dominio registrabile (eTLD+1) da un hostname.
 
-    Esempi:
-        login.inps.gov.it  →  inps.gov.it
-        evil.example.com   →  example.com
-        example.com        →  example.com
+    Usa tldextract con la Public Suffix List ufficiale, senza richieste
+    di rete — solo lo snapshot PSL incluso nel pacchetto.
 
-    Per TLD semplici (.com, .it, …) prende le ultime 2 label;
-    per TLD a due componenti noti (.co.uk, …) prende le ultime 3.
+    Esempi:
+        login.inps.gov.it   →  inps.gov.it
+        evil.example.com    →  example.com
+        example.com         →  example.com
+        example.co.uk       →  example.co.uk
+        keyimportacao.com.br → keyimportacao.com.br
     """
     hostname = hostname.strip(".").lower()
-    labels = hostname.split(".")
-    if len(labels) < 2:
-        return hostname
-
-    # TLD a due componenti → servono 3 label per il dominio registrabile
-    if len(labels) >= 3:
-        candidate_tld = f"{labels[-2]}.{labels[-1]}"
-        if candidate_tld in _TWO_PART_TLDS:
-            return f"{labels[-3]}.{candidate_tld}"
-
-    # TLD semplice: ultime 2 label
-    return f"{labels[-2]}.{labels[-1]}"
+    result = _extractor(hostname)
+    if result.suffix:
+        return f"{result.domain}.{result.suffix}"
+    # Fallback: hostname senza suffisso riconosciuto (es. IP, TLD sconosciuto)
+    return hostname
 
 
 # ---------------------------------------------------------------------------
