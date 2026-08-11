@@ -506,6 +506,42 @@ _OTP_SPLIT_BOXES_PAGE = """\
 </body>
 </html>"""
 
+# Scattered-inputs fixture: 3 maxlength=1 inputs in unrelated sections
+# of a long form — they do NOT share a parent or grandparent, so the
+# proximity check must prevent a false positive.
+_SCATTERED_SINGLE_CHAR_FIELDS = """\
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Long form</title></head>
+<body>
+  <h1>Registration</h1>
+  <form method="POST" action="/register">
+    <fieldset>
+      <legend>Personal info</legend>
+      <label>Middle initial:
+        <input type="text" maxlength="1" name="initial" id="initial"
+               placeholder="M">
+      </label>
+    </fieldset>
+    <fieldset>
+      <legend>Address</legend>
+      <label>Floor:
+        <input type="text" maxlength="1" name="floor" id="floor"
+               placeholder="3">
+      </label>
+    </fieldset>
+    <fieldset>
+      <legend>Preferences</legend>
+      <label>Favourite letter:
+        <input type="text" maxlength="1" name="letter" id="letter"
+               placeholder="A">
+      </label>
+    </fieldset>
+    <button type="submit">Register</button>
+  </form>
+</body>
+</html>"""
+
 
 class _SinglePageHandler(BaseHTTPRequestHandler):
     """Serve a fixed HTML page for every request."""
@@ -532,7 +568,6 @@ class _SinglePageHandler(BaseHTTPRequestHandler):
         pass
 
 
-@pytest.mark.integration
 class TestOtpDetectionPrecision:
     """OTP detection must NOT fire on surrounding text — only on the
     input's own attributes.  Split OTP digit boxes (maxlength=1, >=3)
@@ -606,6 +641,44 @@ class TestOtpDetectionPrecision:
                     assert result is True, (
                         f"OTP detection MUST fire on 4 split "
                         f"maxlength=1 digit boxes, got {result!r}"
+                    )
+                finally:
+                    await browser.close()
+        finally:
+            server.shutdown()
+
+    async def test_scattered_single_char_fields_do_not_trigger(self):
+        """Regression: 3 maxlength=1 inputs in unrelated form sections
+        (different parents AND grandparents) must NOT trigger OTP
+        detection — the proximity check must prevent it."""
+        from playwright.async_api import async_playwright
+
+        from graph_engine.credential_injection import detect_otp_field
+
+        _SinglePageHandler.page_html = _SCATTERED_SINGLE_CHAR_FIELDS
+
+        server = HTTPServer(("127.0.0.1", 0), _SinglePageHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        import time
+        time.sleep(0.1)
+
+        url = f"http://127.0.0.1:{port}/"
+
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page()
+                    await page.goto(url, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(500)
+
+                    result = await detect_otp_field(page)
+                    assert result is False, (
+                        f"OTP detection must NOT fire on scattered "
+                        f"maxlength=1 fields in unrelated sections, "
+                        f"got {result!r}"
                     )
                 finally:
                     await browser.close()

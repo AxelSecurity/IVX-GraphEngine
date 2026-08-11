@@ -109,16 +109,43 @@ _DETECT_OTP_JS = """() => {
     }
     // ---- pattern B: group of single-digit input boxes (split OTP) ---------
     // Only maxlength=1 (exactly one character).  CAP (maxlength=5) and
-    // province codes (maxlength=2) are intentionally excluded.  Requires
-    // at least 3 such inputs on the page — the real split-OTP pattern.
-    const maybeOtp = [];
+    // province codes (maxlength=2) are intentionally excluded.
+    //
+    // Proximity check: the inputs must share the same parent or grandparent
+    // DOM element — real OTP digit boxes sit together in one container.
+    // Scattered single-char fields (e.g. initials, apartment numbers) in
+    // unrelated parts of a form are NOT flagged.  Requires at least 3
+    // grouped inputs.
+    const candidates = [];
     for (const el of document.querySelectorAll('input[maxlength="1"]')) {
         if (el.offsetParent === null) continue;
         const t = (el.getAttribute('type') || 'text').toLowerCase();
         if (!FIELD_TYPES.has(t)) continue;
-        maybeOtp.push(el);
+        candidates.push(el);
     }
-    if (maybeOtp.length >= 3) return {found: true, kind: 'group', count: maybeOtp.length};
+    // Group by direct parent first.
+    const byParent = new Map();
+    for (const el of candidates) {
+        const p = el.parentElement;
+        if (!p) continue;
+        if (!byParent.has(p)) byParent.set(p, []);
+        byParent.get(p).push(el);
+    }
+    for (const group of byParent.values()) {
+        if (group.length >= 3) return {found: true, kind: 'group', count: group.length};
+    }
+    // No parent-level group — try grandparent (handles wrappers like
+    // <div.otp-digits><span><input maxlength="1">...</span></div>).
+    const byGrandparent = new Map();
+    for (const el of candidates) {
+        const gp = el.parentElement?.parentElement || el.parentElement;
+        if (!gp) continue;
+        if (!byGrandparent.has(gp)) byGrandparent.set(gp, []);
+        byGrandparent.get(gp).push(el);
+    }
+    for (const group of byGrandparent.values()) {
+        if (group.length >= 3) return {found: true, kind: 'group', count: group.length};
+    }
     return {found: false};
 }"""
 
