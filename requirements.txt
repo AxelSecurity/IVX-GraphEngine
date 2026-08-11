@@ -8,3 +8,7 @@ pydantic-settings>=2.2.0
 lxml>=5.1.0
 pytest
 pytest-asyncio
+# Azure AI Foundry Agents SDK — L5 classification.
+# Required only when --classify is used; the engine works without it.
+azure-ai-projects>=0.1.0
+azure-identity>=1.16.0

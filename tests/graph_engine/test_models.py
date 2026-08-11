@@ -185,4 +185,4 @@ def test_classification_enum_values():
     assert Classification.benign.value == "benign"
     assert Classification.suspicious.value == "suspicious"
     assert Classification.phishing.value == "phishing"
-    assert Classification.aitm.value == "aitm"
+    # aitm removed — classification is not concerned with exfiltration technique

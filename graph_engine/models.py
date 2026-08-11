@@ -52,7 +52,6 @@ class Classification(str, Enum):
     benign = "benign"
     suspicious = "suspicious"
     phishing = "phishing"
-    aitm = "aitm"
 
 
 # ---------------------------------------------------------------------------
