@@ -198,3 +198,97 @@ impone tre vincoli non negoziabili:
 2. **No invenzione**: se un'informazione non è nel bundle, non va assunta.
 3. **Dati insufficienti**: se il bundle è troppo scarso, restituire
    `suspicious` con confidence ≤ 0.3 esplicitamente.
+
+## L2 — Passivo / OSINT
+
+Il livello L2 raccoglie informazioni da fonti esterne senza interagire con
+il target. Tutte le query sono in **parallelo** (`asyncio.gather` con
+`return_exceptions=True`): un fallimento su una fonte non blocca mai le altre.
+
+### Fonti attive
+
+| Fonte | Tipo | Endpoint | Cache TTL |
+|---|---|---|---|
+| **crt.sh** | Certificate Transparency | `https://crt.sh/?q=<domain>&output=json` | 6 ore |
+| **RDAP** | WHOIS moderno (via bootstrap IANA) | `https://data.iana.org/rdap/dns.json` → server TLD-specifico | 24 ore |
+| **URLhaus** | Reputation / threat feed | `https://urlhaus-api.abuse.ch/v1/url/` | 1 ora |
+
+### Adapter predisposti (disabilitati di default)
+
+| Provider | Variabili d'ambiente richieste | Stato |
+|---|---|---|
+| **MISP** | `MISP_URL` + `MISP_API_KEY` | Disabilitato — si attiva automaticamente quando entrambe le variabili sono presenti |
+| **OpenCTI** | `OPENCTI_URL` + `OPENCTI_API_KEY` | Disabilitato — stessa logica |
+
+Per attivare MISP o OpenCTI, basta impostare le variabili d'ambiente
+corrispondenti. Nessuna modifica al codice necessaria: il `registry.py`
+rileva le variabili a runtime e istanzia i provider.
+
+### Segnali estratti
+
+- **Domini fratelli di campagna** (`sibling_domains`): dalla SAN list
+  aggregata di crt.sh, deduplicata, con il dominio interrogato escluso.
+  Limite 50 domini; se il numero reale è superiore, viene impostato
+  `truncated: true` con il conteggio reale in `total_siblings`.
+  Questo è il pivot a più alto valore secondo l'architettura originale.
+
+- **Età del dominio** (`domain_age_days`): dal record RDAP. Soglie:
+  < 30 giorni → peso 0.35 (sospetto), 30-90 giorni → peso 0.15 (moderato),
+  > 90 giorni → nessuna penalizzazione (dominio stagionato).
+
+- **Reputation hit** (`reputation_hit`): URL presente in un feed di
+  minacce (es. URLhaus). Peso 0.50 (il più alto).
+
+- **Provider unavailable** (`provider_unavailable`): per ogni fonte
+  che fallisce, evidenza con weight=0.0 (informativa, non contribuisce
+  al rischio).
+
+### Pesi del passive_risk_score
+
+| Peso | Valore | Condizione |
+|---|---|---|
+| `_W_DOMAIN_AGE_YOUNG` | 0.35 | Dominio < 30 giorni |
+| `_W_DOMAIN_AGE_MODERATE` | 0.15 | Dominio 30-90 giorni |
+| `_W_SIBLING_DOMAINS` | 0.30 | Presenza domini fratelli nella SAN list |
+| `_W_REPUTATION_HIT` | 0.50 | URL presente in feed di minacce |
+
+Il punteggio è clampato a [0, 1]. **MAI** penalizzare per l'assenza di
+segnale — solo per la presenza.
+
+### Cache
+
+Cache filesystem sotto `data/osint_cache/<provider>/<hash>.json`.
+TTL differenziati per tipo di dato:
+
+- RDAP: 24 ore (i dati WHOIS cambiano molto raramente)
+- crt.sh: 6 ore (nuovi certificati possono comparire)
+- URLhaus: 1 ora (feed di minacce, più dinamico)
+- IANA bootstrap: 30 giorni (la mappatura TLD→server RDAP è stabile)
+
+La cache non è mai bloccante: un fallimento di scrittura viene
+silenziosamente ignorato.
+
+### Bootstrap RDAP
+
+Il file IANA `https://data.iana.org/rdap/dns.json` viene scaricato (con
+cache lunga 30 giorni) per mappare ogni TLD al suo server RDAP. **Nessuna
+mappatura TLD→server è hardcodata** — stesso principio del fix tldextract
+per i TLD a due componenti.
+
+### Architettura del package
+
+```
+graph_engine/osint/
+    __init__.py
+    analyzer.py          — orchestratore parallelo
+    cache.py             — cache filesystem con TTL
+    certificate_transparency.py — crt.sh
+    rdap.py              — RDAP con bootstrap IANA
+    reputation/
+        __init__.py
+        base.py          — ReputationProvider (ABC)
+        urlhaus.py       — URLhaus (sempre attivo)
+        misp.py           — MISP adapter (disabilitato di default)
+        opencti.py        — OpenCTI adapter (disabilitato di default)
+        registry.py       — get_enabled_providers()
+```

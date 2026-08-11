@@ -1,0 +1,1 @@
+{"_cached_at": 1786488799.963639, "_payload": {"provider": "urlhaus", "listed": true, "details": {"query_status": "ok", "url": "http://evil.example/phish", "threat": "malware_download"}}}

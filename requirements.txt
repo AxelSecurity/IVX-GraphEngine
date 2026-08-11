@@ -14,3 +14,4 @@ azure-ai-projects>=0.1.0
 azure-identity>=1.16.0
 pyyaml>=6.0
 tldextract>=5.0  # Public Suffix List ufficiale — sostituisce lista TLD manuale incompleta
+httpx>=0.28.0  # HTTP client asincrono — L2 OSINT, coerenza con architettura async
