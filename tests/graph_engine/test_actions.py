@@ -121,7 +121,6 @@ _FIXTURE_HTML = """\
 class TestEnumerateActionable:
     """Score-and-sort behaviour verified with a real Chromium page."""
 
-    @pytest.mark.integration
     async def test_verify_your_account_ranks_first(self):
         """The 'Verify your account' button must be the top-ranked candidate."""
         from playwright.async_api import async_playwright
@@ -164,7 +163,6 @@ class TestEnumerateActionable:
             finally:
                 await browser.close()
 
-    @pytest.mark.integration
     async def test_scores_are_descending(self):
         """Candidate list must be sorted by combined_score descending."""
         from playwright.async_api import async_playwright
@@ -341,7 +339,6 @@ class _FixtureHandler(BaseHTTPRequestHandler):
         pass  # silence HTTP server logs
 
 
-@pytest.mark.integration
 class TestDepth2ClickChain:
     """Full BFS exploration through two DOM-only click levels at the same URL."""
 

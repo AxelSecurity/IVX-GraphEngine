@@ -148,7 +148,6 @@ class _GateThenButtonHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
 class TestDetectCaptcha:
     """detect_captcha must identify known CAPTCHA providers in iframes."""
 
@@ -226,7 +225,6 @@ class TestDetectCaptcha:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
 class TestTryPassGate:
     """try_pass_gate — wait + checkbox, no puzzle solving."""
 
@@ -280,7 +278,6 @@ class TestTryPassGate:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
 class TestExplorerBlockedByGate:
     """Explorer must detect gate, record Evidence, and skip action enumeration."""
 
@@ -355,7 +352,6 @@ class TestExplorerBlockedByGate:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
 class TestGateThenButtonChain:
     """Gate auto-resolves, exposing a button at depth 2.
 

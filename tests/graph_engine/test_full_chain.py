@@ -150,7 +150,6 @@ class _SimpleTwoPageHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
 class TestFullChainGateAndClickChain:
     """End-to-end: gate → click → click → leaf, with replay.
 
@@ -317,7 +316,6 @@ class TestFullChainGateAndClickChain:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
 class TestNodeFailureDoesNotCrashExploration:
     """A single node-level exception must be contained — no crash, Evidence
     recorded, already-discovered states preserved."""
@@ -411,7 +409,6 @@ class TestNodeFailureDoesNotCrashExploration:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
 class TestReplayGotoExceptionIsCaught:
     """When ``page.goto()`` itself raises inside ``_replay_to_state_impl``,
     the inner handler must record ``replay_fallback_used`` — not the
