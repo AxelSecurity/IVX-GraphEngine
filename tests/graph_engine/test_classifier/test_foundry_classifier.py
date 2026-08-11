@@ -8,14 +8,15 @@ All Azure API calls are mocked.  The primary concerns:
 
 from __future__ import annotations
 
+import sys
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 from graph_engine.classifier.foundry_classifier import (
     _FoundryNotConfigured,
-    _new_thread_id,
     classify,
     _call_foundry_agent,
     _heuristic_fallback,
@@ -63,6 +64,81 @@ def _sample_bundle() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Fake Azure SDK boundary — lets _call_foundry_agent run its REAL code
+# against a stub instead of importing the (uninstalled) azure-ai-projects.
+# ---------------------------------------------------------------------------
+
+
+def _register_fake_azure_modules(fake_client_class):
+    """Register fake ``azure.*`` modules in ``sys.modules`` so the
+    local imports inside ``_call_foundry_agent`` succeed without the
+    real SDK installed."""
+    saved = {}
+    for name in ("azure", "azure.ai", "azure.ai.projects", "azure.identity"):
+        saved[name] = sys.modules.get(name)
+        mod = ModuleType(name)
+        if name in ("azure", "azure.ai"):
+            mod.__path__ = []
+        sys.modules[name] = mod
+    sys.modules["azure.ai.projects"].AIProjectsClient = fake_client_class
+    sys.modules["azure.identity"].DefaultAzureCredential = lambda: None
+    return saved
+
+
+def _unregister_fake_azure_modules(saved):
+    """Restore ``sys.modules`` to its original state."""
+    for name, original in saved.items():
+        if original is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = original
+
+
+class _FakeAgents:
+    """Stub for ``client.agents`` — records every ``thread_id`` it sees.
+
+    A *single* instance is shared across all fake client instances so
+    the test can inspect the full call history across multiple
+    ``classify()`` invocations.
+    """
+
+    def __init__(self):
+        self._counter = 0
+        self.thread_ids_created: list[str] = []
+        self.thread_ids_message: list[str] = []
+        self.thread_ids_run: list[str] = []
+        self.thread_ids_list: list[str] = []
+        self.thread_ids_delete: list[str] = []
+
+    # -- methods called by _new_thread_id ---------------------------------
+    def create_thread(self):
+        self._counter += 1
+        tid = f"thread-{self._counter}"
+        self.thread_ids_created.append(tid)
+        return SimpleNamespace(id=tid)
+
+    # -- methods called by _call_foundry_agent ----------------------------
+    def create_message(self, thread_id, role, content, attachments=None):
+        self.thread_ids_message.append(thread_id)
+
+    def create_and_process_run(self, thread_id, agent_id, instructions):
+        self.thread_ids_run.append(thread_id)
+        return SimpleNamespace(status="completed")
+
+    def list_messages(self, thread_id):
+        self.thread_ids_list.append(thread_id)
+        block = SimpleNamespace()
+        block.text = SimpleNamespace(
+            value='{"classification":"phishing","confidence":0.92,"rationale":"mock"}'
+        )
+        msg = SimpleNamespace(role="agent", content=[block])
+        return SimpleNamespace(data=[msg])
+
+    def delete_thread(self, thread_id):
+        self.thread_ids_delete.append(thread_id)
+
+
+# ---------------------------------------------------------------------------
 # Tests — stateless constraint
 # ---------------------------------------------------------------------------
 
@@ -71,67 +147,91 @@ class TestStatelessThreadCreation:
     """Every classify() call MUST create a fresh thread."""
 
     @pytest.mark.asyncio
-    async def test_thread_created_fresh_for_each_classify_call(self):
-        """N calls → N distinct thread IDs, no reuse.  Verify the IDs
-        returned by _new_thread_id are the same ones passed downstream
-        (into the agent call), not ignored or overwritten."""
+    async def test_real_code_never_reuses_thread_across_classify_calls(self):
+        """Execute the REAL ``_new_thread_id`` and ``_call_foundry_agent``
+        code path, faking only the Azure SDK boundary (``sys.modules``).
 
-        from graph_engine.classifier import foundry_classifier as fcm
+        Every ``classify()`` invocation creates a fresh ``AIProjectsClient``,
+        so the fake client reuses a single shared ``_FakeAgents`` instance
+        to accumulate the full call history across all three calls.
 
-        # ── Track every ID that _new_thread_id produces ──────────────────
-        created_ids: list[str] = []
-        # ── Track every ID the agent call *receives* from _new_thread_id ─
-        downstream_ids: list[str] = []
+        Assertions verify that:
 
-        call_n = [0]
+        1. ``create_thread`` is called exactly once per ``classify()``.
+        2. Every ``thread_id`` returned by ``create_thread`` is distinct.
+        3. The SAME ``thread_id`` flows through the entire call chain
+           (create_message → create_and_process_run → list_messages →
+           delete_thread), in order, with no reuse or misalignment.
+        """
+        fake_agents = _FakeAgents()
 
-        def _fake_new_thread_id(client):
-            call_n[0] += 1
-            tid = f"thread-{call_n[0]}"
-            created_ids.append(tid)
-            return tid
+        # -- fake client constructor, captures the shared agents ----------
+        class _FakeClient:
+            def __init__(self, endpoint, credential):
+                self.agents = fake_agents
 
-        async def _fake_agent_call(prompt, screenshot_paths):
-            # Replicate the real flow: call _new_thread_id, capture its
-            # return value — this is the value the real code passes to
-            # client.agents.create_message(thread_id=…).
-            tid = fcm._new_thread_id(None)
-            downstream_ids.append(tid)
-            return (
-                '{"classification":"phishing","confidence":0.92,'
-                '"rationale":"mock"}'
+        saved = _register_fake_azure_modules(_FakeClient)
+        try:
+            with patch.dict("os.environ", {
+                "AZURE_FOUNDRY_ENDPOINT": "https://fake-fallback.openai.azure.com",
+                "AZURE_FOUNDRY_AGENT_ID": "fake-agent-id",
+            }):
+                v1 = await classify(_sample_bundle())
+                v2 = await classify(_sample_bundle())
+                v3 = await classify(_sample_bundle())
+
+            # ── Assertions ──────────────────────────────────────────────
+            # 1. create_thread called exactly 3 times
+            assert len(fake_agents.thread_ids_created) == 3, (
+                f"create_thread called {len(fake_agents.thread_ids_created)} "
+                f"times, expected 3"
             )
 
-        with patch.object(fcm, "_new_thread_id", _fake_new_thread_id), \
-             patch.object(fcm, "_call_foundry_agent", _fake_agent_call):
+            # 2. All 3 thread IDs are distinct
+            assert len(set(fake_agents.thread_ids_created)) == 3, (
+                f"Thread IDs not unique: {fake_agents.thread_ids_created}"
+            )
 
-            v1 = await classify(_sample_bundle())
-            v2 = await classify(_sample_bundle())
-            v3 = await classify(_sample_bundle())
+            # 3. create_message received the SAME IDs, in the SAME order
+            assert fake_agents.thread_ids_message == fake_agents.thread_ids_created, (
+                f"create_message IDs {fake_agents.thread_ids_message} "
+                f"≠ created IDs {fake_agents.thread_ids_created}"
+            )
 
-        # ── Assertions ───────────────────────────────────────────────────
-        # 1. _new_thread_id called exactly once per classify()
-        assert len(created_ids) == 3, (
-            f"_new_thread_id called {len(created_ids)} times, expected 3"
-        )
-        # 2. Every returned ID is unique
-        assert len(set(created_ids)) == 3, (
-            f"Thread IDs not unique across 3 calls: {created_ids}"
-        )
-        # 3. The IDs returned by _new_thread_id are the same ones
-        #    passed downstream (not ignored or overwritten)
-        assert downstream_ids == created_ids, (
-            f"Downstream received {downstream_ids}, "
-            f"but _new_thread_id created {created_ids}"
-        )
-        # 4. Explicit order — each call gets an incrementing fresh ID
-        assert created_ids == ["thread-1", "thread-2", "thread-3"]
+            # 4. create_and_process_run received the SAME IDs, in order
+            assert fake_agents.thread_ids_run == fake_agents.thread_ids_created, (
+                f"create_and_process_run IDs {fake_agents.thread_ids_run} "
+                f"≠ created IDs {fake_agents.thread_ids_created}"
+            )
 
-        # ── Verdict correctness (classify still works end-to-end) ────────
-        for v in (v1, v2, v3):
-            assert v is not None
-            assert v.classification == Classification.phishing
-            assert v.produced_by == "foundry"
+            # 5. list_messages received the SAME IDs, in order
+            assert fake_agents.thread_ids_list == fake_agents.thread_ids_created, (
+                f"list_messages IDs {fake_agents.thread_ids_list} "
+                f"≠ created IDs {fake_agents.thread_ids_created}"
+            )
+
+            # 6. delete_thread received the SAME IDs, in order
+            assert fake_agents.thread_ids_delete == fake_agents.thread_ids_created, (
+                f"delete_thread IDs {fake_agents.thread_ids_delete} "
+                f"≠ created IDs {fake_agents.thread_ids_created}"
+            )
+
+            # 7. Explicit values — each call gets a fresh, incrementing ID
+            assert fake_agents.thread_ids_created == [
+                "thread-1", "thread-2", "thread-3",
+            ], (
+                f"Expected ['thread-1', 'thread-2', 'thread-3'], "
+                f"got {fake_agents.thread_ids_created}"
+            )
+
+            # 8. Verdicts are correct
+            for v in (v1, v2, v3):
+                assert v is not None
+                assert v.classification == Classification.phishing
+                assert v.produced_by == "foundry"
+
+        finally:
+            _unregister_fake_azure_modules(saved)
 
     def test_classify_signature_has_no_thread_id_param(self):
         """classify() interface forbids thread_id/session_id — the
