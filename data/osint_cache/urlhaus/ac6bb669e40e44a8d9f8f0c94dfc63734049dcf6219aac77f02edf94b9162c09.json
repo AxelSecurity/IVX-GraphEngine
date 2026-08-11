@@ -1,1 +1,0 @@
-{"_cached_at": 1786489238.273303, "_payload": {"provider": "urlhaus", "listed": false, "details": {"error": "URLhaus query failed: Client error '401 Unauthorized' for url 'https://urlhaus-api.abuse.ch/v1/url/'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401"}}}
