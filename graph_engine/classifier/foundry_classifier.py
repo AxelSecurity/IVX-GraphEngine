@@ -110,6 +110,22 @@ async def classify(
 # ---------------------------------------------------------------------------
 
 
+def _new_thread_id(client) -> str:
+    """Create a NEW Foundry thread and return its ID.
+
+    CRITICAL: this function is called once per ``classify()`` invocation.
+    Thread IDs are NEVER cached, reused, or stored in module-level state.
+    See module-level docstring for the historical bug that motivates this
+    constraint (cross-session memory caused false positives when thread
+    state leaked between unrelated analyses).
+
+    Extracted as a separate function so tests can mock it directly and
+    verify that *every* call produces a fresh, distinct thread ID.
+    """
+    thread = client.agents.create_thread()
+    return thread.id
+
+
 def _build_user_message(bundle: dict) -> str:
     """Convert bundle to prompt text and wrap it for the agent."""
     from graph_engine.classifier.evidence_bundle import bundle_to_prompt_text
@@ -155,8 +171,7 @@ async def _call_foundry_agent(
 
     # ── CRITICAL: always create a NEW thread ─────────────────────────────
     # See module-level docstring for the rationale.
-    thread = client.agents.create_thread()  # no thread_id reuse!
-    thread_id = thread.id
+    thread_id = _new_thread_id(client)
     # ─────────────────────────────────────────────────────────────────────
 
     system_prompt = _load_system_prompt()

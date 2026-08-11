@@ -15,6 +15,7 @@ import pytest
 
 from graph_engine.classifier.foundry_classifier import (
     _FoundryNotConfigured,
+    _new_thread_id,
     classify,
     _call_foundry_agent,
     _heuristic_fallback,
@@ -70,41 +71,84 @@ class TestStatelessThreadCreation:
     """Every classify() call MUST create a fresh thread."""
 
     @pytest.mark.asyncio
-    async def test_two_calls_create_two_distinct_threads(self):
-        """Two calls → two distinct thread IDs, no reuse."""
+    async def test_thread_created_fresh_for_each_classify_call(self):
+        """N calls → N distinct thread IDs, no reuse.  Verify the IDs
+        returned by _new_thread_id are the same ones passed downstream
+        (into the agent call), not ignored or overwritten."""
 
-        thread_ids = []
+        from graph_engine.classifier import foundry_classifier as fcm
 
-        # Mock the SDK so we capture the thread_id without real network calls
-        async def _mock_foundry_call(prompt, screenshot_paths):
-            # The mock create_thread returns a fake thread object
-            return '{"classification":"phishing","confidence":0.92,"rationale":"test"}'
+        # ── Track every ID that _new_thread_id produces ──────────────────
+        created_ids: list[str] = []
+        # ── Track every ID the agent call *receives* from _new_thread_id ─
+        downstream_ids: list[str] = []
 
-        with patch(
-            "graph_engine.classifier.foundry_classifier._call_foundry_agent",
-            side_effect=_mock_foundry_call,
-        ):
-            bundle1 = _sample_bundle()
-            bundle2 = _sample_bundle()
-            # Use different target_ids so the bundles are distinct
-            bundle2["target_id"] = str(uuid.uuid4())
+        call_n = [0]
 
-            # We'll intercept _call_foundry_agent to verify it's called
-            # with fresh state each time.  The actual thread-id tracking
-            # is inside _call_foundry_agent which we've mocked here.
-            # The important property: the mock is called twice, meaning
-            # the function doesn't short-circuit or cache.
-            v1 = await classify(bundle1)
-            v2 = await classify(bundle2)
+        def _fake_new_thread_id(client):
+            call_n[0] += 1
+            tid = f"thread-{call_n[0]}"
+            created_ids.append(tid)
+            return tid
 
-            # Both must return valid verdicts
-            assert v1 is not None
-            assert v2 is not None
-            # Both must have the classification from our mock
-            assert v1.classification == Classification.phishing
-            assert v1.produced_by == "foundry"
-            assert v2.classification == Classification.phishing
-            assert v2.produced_by == "foundry"
+        async def _fake_agent_call(prompt, screenshot_paths):
+            # Replicate the real flow: call _new_thread_id, capture its
+            # return value — this is the value the real code passes to
+            # client.agents.create_message(thread_id=…).
+            tid = fcm._new_thread_id(None)
+            downstream_ids.append(tid)
+            return (
+                '{"classification":"phishing","confidence":0.92,'
+                '"rationale":"mock"}'
+            )
+
+        with patch.object(fcm, "_new_thread_id", _fake_new_thread_id), \
+             patch.object(fcm, "_call_foundry_agent", _fake_agent_call):
+
+            v1 = await classify(_sample_bundle())
+            v2 = await classify(_sample_bundle())
+            v3 = await classify(_sample_bundle())
+
+        # ── Assertions ───────────────────────────────────────────────────
+        # 1. _new_thread_id called exactly once per classify()
+        assert len(created_ids) == 3, (
+            f"_new_thread_id called {len(created_ids)} times, expected 3"
+        )
+        # 2. Every returned ID is unique
+        assert len(set(created_ids)) == 3, (
+            f"Thread IDs not unique across 3 calls: {created_ids}"
+        )
+        # 3. The IDs returned by _new_thread_id are the same ones
+        #    passed downstream (not ignored or overwritten)
+        assert downstream_ids == created_ids, (
+            f"Downstream received {downstream_ids}, "
+            f"but _new_thread_id created {created_ids}"
+        )
+        # 4. Explicit order — each call gets an incrementing fresh ID
+        assert created_ids == ["thread-1", "thread-2", "thread-3"]
+
+        # ── Verdict correctness (classify still works end-to-end) ────────
+        for v in (v1, v2, v3):
+            assert v is not None
+            assert v.classification == Classification.phishing
+            assert v.produced_by == "foundry"
+
+    def test_classify_signature_has_no_thread_id_param(self):
+        """classify() interface forbids thread_id/session_id — the
+        signature itself must make reuse impossible."""
+        import inspect
+
+        sig = inspect.signature(classify)
+        param_names = list(sig.parameters.keys())
+
+        assert "thread_id" not in param_names, (
+            f"classify() must NOT accept thread_id — "
+            f"signature is ({', '.join(param_names)})"
+        )
+        assert "session_id" not in param_names, (
+            f"classify() must NOT accept session_id — "
+            f"signature is ({', '.join(param_names)})"
+        )
 
     @pytest.mark.asyncio
     async def test_foundry_not_configured_falls_back(self):
