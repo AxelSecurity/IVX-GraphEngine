@@ -12,3 +12,4 @@ pytest-asyncio
 # Required only when --classify is used; the engine works without it.
 azure-ai-projects>=0.1.0
 azure-identity>=1.16.0
+pyyaml>=6.0

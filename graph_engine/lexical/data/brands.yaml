@@ -1,0 +1,73 @@
+# Brand target comuni con i loro domini legittimi.
+# Formato: lista di {brand, domains: [...]}.
+# Aggiungere nuove entry in fondo per estendere.
+
+- brand: "INPS"
+  domains:
+    - inps.it
+
+- brand: "SPID / AgID"
+  domains:
+    - spid.gov.it
+    - agid.gov.it
+
+- brand: "Poste Italiane"
+  domains:
+    - poste.it
+    - postepay.it
+    - posteitaliane.it
+
+- brand: "Agenzia delle Entrate"
+  domains:
+    - agenziaentrate.gov.it
+    - agenziaentrate.it
+
+- brand: "Intesa Sanpaolo"
+  domains:
+    - intesasanpaolo.com
+    - intesasanpaolo.it
+
+- brand: "UniCredit"
+  domains:
+    - unicredit.it
+    - unicredit.eu
+
+- brand: "Microsoft / Office365"
+  domains:
+    - microsoft.com
+    - office.com
+    - office365.com
+    - live.com
+    - outlook.com
+    - onedrive.com
+    - sharepoint.com
+    - azure.com
+    - microsoftonline.com
+
+- brand: "Google"
+  domains:
+    - google.com
+    - gmail.com
+    - googlemail.com
+    - youtube.com
+    - googleapis.com
+
+- brand: "Apple"
+  domains:
+    - apple.com
+    - icloud.com
+
+- brand: "PayPal"
+  domains:
+    - paypal.com
+    - paypal.it
+
+- brand: "Amazon"
+  domains:
+    - amazon.com
+    - amazon.it
+
+- brand: "DHL"
+  domains:
+    - dhl.com
+    - dhl.it

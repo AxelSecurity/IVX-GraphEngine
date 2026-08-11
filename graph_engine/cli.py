@@ -27,13 +27,15 @@ from graph_engine.models import AnalysisTarget, Evidence, EvidenceScope, State, 
 def _serialise(target: AnalysisTarget, states: list[State],
                transitions: list[Transition],
                evidence: list[Evidence],
-               verdict: Optional[Verdict] = None) -> str:
+               verdict: Optional[Verdict] = None,
+               lexical_risk_score: Optional[float] = None) -> str:
     """Produce an indented JSON representation of the full graph."""
     payload = {
         "target": target.model_dump(mode="json"),
         "states": [s.model_dump(mode="json") for s in states],
         "transitions": [t.model_dump(mode="json") for t in transitions],
         "evidence": [e.model_dump(mode="json") for e in evidence],
+        "lexical_risk_score": lexical_risk_score,
     }
     if verdict is not None:
         payload["verdict"] = verdict.model_dump(mode="json")
@@ -149,6 +151,14 @@ async def _main(args: argparse.Namespace) -> None:
 
     ingested = ingest(args.url)
 
+    # ── L1 lexical analysis (typosquat, DGA, infra, mixed-script, AiTM) ─
+    from graph_engine.lexical.analyzer import analyze as l1_analyze
+
+    l1_result = l1_analyze(
+        ingested["canonical_url"],
+        ingested["nested_payloads"],
+    )
+
     budget = Budget(
         max_depth=args.max_depth,
         max_nodes=args.max_nodes,
@@ -200,6 +210,19 @@ async def _main(args: argparse.Namespace) -> None:
                     produced_by="ingestion.payload_extraction",
                 ))
 
+            # ── Register L1 Evidence ─────────────────────────────────────
+            for ev in l1_result["evidence"]:
+                explorer.evidence.append(Evidence(
+                    target_id=tid,
+                    scope=EvidenceScope.target,
+                    scope_id=tid,
+                    layer=ev["layer"],
+                    key=ev["key"],
+                    value=ev["value"],
+                    weight=ev.get("weight", 1.0),
+                    produced_by=ev["produced_by"],
+                ))
+
             verdict: Optional[Verdict] = None
             if args.classify:
                 logging.info("Running L5 classification…")
@@ -217,7 +240,8 @@ async def _main(args: argparse.Namespace) -> None:
                     )
 
             print(_serialise(target, explorer.states, explorer.transitions,
-                             explorer.evidence, verdict))
+                             explorer.evidence, verdict,
+                             lexical_risk_score=l1_result["lexical_risk_score"]))
         finally:
             await browser.close()
 
