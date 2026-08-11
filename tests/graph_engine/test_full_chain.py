@@ -188,15 +188,39 @@ class TestFullChainGateEmailPasswordOtp:
                         f"Missing otp_stage_reached in {evidence_keys}"
                     )
 
-                    # ---- Transitions in order -----------------------------
-                    kind_sequence = [t.kind for t in explorer.transitions]
-                    # We expect at least: gate_solved, form_submit(email),
-                    # form_submit(password).  Order may vary slightly because
-                    # gate_solved and email-submit both originate from root
-                    # (same depth), but gate_solved is always created first.
-                    assert TransitionKind.gate_solved in kind_sequence, (
-                        f"Expected gate_solved in {kind_sequence}"
+                    # ---- Root must have exactly 1 outbound transition ----
+                    root_id = next(
+                        s.id for s in explorer.states if s.depth == 0
                     )
+                    outbound_from_root = [
+                        t for t in explorer.transitions
+                        if t.from_state == root_id
+                    ]
+                    assert len(outbound_from_root) == 1, (
+                        f"Root must have exactly 1 outbound transition "
+                        f"(gate_solved), got {len(outbound_from_root)}: "
+                        f"{[(t.kind.value, str(t.to_state)[:8]) for t in outbound_from_root]}"
+                    )
+                    assert outbound_from_root[0].kind == TransitionKind.gate_solved, (
+                        f"Root's only outbound must be gate_solved, "
+                        f"got {outbound_from_root[0].kind.value}"
+                    )
+
+                    # ---- gate_solved transition exists --------------------
+                    gate_transitions = [
+                        t for t in explorer.transitions
+                        if t.kind == TransitionKind.gate_solved
+                    ]
+                    assert len(gate_transitions) == 1, (
+                        f"Expected exactly 1 gate_solved, "
+                        f"got {len(gate_transitions)}"
+                    )
+                    gate_t = gate_transitions[0]
+                    assert gate_t.trigger is not None
+                    assert gate_t.trigger.get("provider") == "cloudflare_turnstile"
+                    post_gate_state_id = gate_t.to_state
+
+                    # ---- form_submit transitions --------------------------
                     form_transitions = [
                         t for t in explorer.transitions
                         if t.kind == TransitionKind.form_submit
@@ -213,20 +237,50 @@ class TestFullChainGateEmailPasswordOtp:
                         f"Expected {{email, password}}, got {field_kinds}"
                     )
 
-                    # ---- Depth distribution -------------------------------
+                    # ---- email form_submit must originate from post-gate state -
+                    email_transitions = [
+                        t for t in form_transitions
+                        if t.trigger and t.trigger.get("field_kind") == "email"
+                    ]
+                    assert len(email_transitions) >= 1
+                    email_t = email_transitions[0]
+                    assert email_t.from_state == post_gate_state_id, (
+                        f"form_submit(email).from_state must be "
+                        f"post-gate state ({post_gate_state_id}), "
+                        f"got {email_t.from_state}"
+                    )
+
+                    # ---- password form_submit must originate from email-dest ---
+                    password_transitions = [
+                        t for t in form_transitions
+                        if t.trigger and t.trigger.get("field_kind") == "password"
+                    ]
+                    assert len(password_transitions) >= 1
+                    password_t = password_transitions[0]
+                    assert password_t.from_state == email_t.to_state, (
+                        f"form_submit(password).from_state must be "
+                        f"post-email state ({email_t.to_state}), "
+                        f"got {password_t.from_state}"
+                    )
+
+                    # ---- Depth distribution: linear chain 0→1→2→3 ---------
                     depths = {s.depth for s in explorer.states}
                     assert 0 in depths, f"Missing depth 0: {depths}"
                     assert 1 in depths, (
-                        f"Missing depth 1 (post-gate / post-email): {depths}"
+                        f"Missing depth 1 (post-gate): {depths}"
                     )
                     assert 2 in depths, (
-                        f"Missing depth 2 (OTP stage): {depths}"
+                        f"Missing depth 2 (post-email): {depths}"
+                    )
+                    assert 3 in depths, (
+                        f"Missing depth 3 (post-password, OTP stage): {depths}"
                     )
 
-                    # ---- At least 4 states in the graph -------------------
-                    assert len(explorer.states) >= 4, (
-                        f"Expected >= 4 states (root, post-gate, post-email, "
-                        f"OTP), got {len(explorer.states)}"
+                    # ---- Exactly 4 states in the linear chain -----------------
+                    assert len(explorer.states) == 4, (
+                        f"Expected exactly 4 states (root, post-gate, "
+                        f"post-email, OTP), got {len(explorer.states)}: "
+                        f"{[(s.depth, s.url) for s in explorer.states]}"
                     )
 
                     # ---- OTP is the last state — no further transitions ---

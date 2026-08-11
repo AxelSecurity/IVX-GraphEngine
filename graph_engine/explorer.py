@@ -295,6 +295,7 @@ class StateGraphExplorer:
                                 self._node_count += 1
                                 if gate_state.dom_hash not in self._visited:
                                     await frontier.put(gate_state)
+                            continue
                         else:
                             # Gate still present — record and treat as leaf.
                             self._record_error(
