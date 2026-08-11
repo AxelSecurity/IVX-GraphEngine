@@ -70,9 +70,12 @@ _PROOFPOINT_V2_RE = re.compile(r"(?:^|[?&])u=([^&?#]+)")
 
 
 def _decode_proofpoint_v2(encoded: str) -> str:
-    """Apply Proofpoint v2 substitutions then percent-decode."""
-    substituted = encoded.replace("_", "/").replace("-", "+")
-    # URL-decode
+    """Apply Proofpoint v2 substitutions then percent-decode.
+
+    Real v2 encoding: / → _, then percent-encode, then % → -.
+    Decoding reverses: - → %, _ → /, then percent-decode.
+    """
+    substituted = encoded.replace("-", "%").replace("_", "/")
     from urllib.parse import unquote
     return unquote(substituted)
 
