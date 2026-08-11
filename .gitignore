@@ -4,3 +4,4 @@ __pycache__/
 .env
 data/graph_artifacts/
 .pytest_cache/
+.DS_Store

@@ -22,14 +22,6 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from graph_engine.actions import enumerate_actionable
 from graph_engine.budget import Budget
-from graph_engine.canary_identity import CANARY_EMAIL, CANARY_PASSWORD
-from graph_engine.credential_injection import (
-    check_known_idp,
-    detect_email_field,
-    detect_otp_field,
-    detect_password_field,
-    submit_field,
-)
 from graph_engine.dom_hash import normalise_and_hash
 from graph_engine.gate_solver import detect_captcha, try_pass_gate
 from graph_engine.models import (
@@ -310,62 +302,6 @@ class StateGraphExplorer:
                                 )
                                 continue
 
-                    # ---- credential injection (OTP → password → email) -----------
-                    # Priority order: OTP detection stops exploration entirely;
-                    # password is preferred over email because exfil of a password
-                    # is more critical.  When any case fires, generic click
-                    # enumeration is skipped — the form has priority.
-                    credential_action_taken = False
-
-                    # a. OTP / MFA — strong signal of live attack, stop here.
-                    if await detect_otp_field(page):
-                        self._record_error(
-                            scope=EvidenceScope.state,
-                            scope_id=state.id,
-                            key="otp_stage_reached",
-                            message=(
-                                f"OTP/MFA field detected at {page.url} — "
-                                f"live attack signal, stopping exploration"
-                            ),
-                        )
-                        continue
-
-                    # b. Password field — highest priority credential.
-                    pwd_selector = await detect_password_field(page)
-                    if pwd_selector is not None:
-                        self._our_goto_active = True
-                        try:
-                            result = await submit_field(
-                                page, pwd_selector, CANARY_PASSWORD, "password"
-                            )
-                        finally:
-                            self._our_goto_active = False
-                        credential_action_taken = True
-                        await self._handle_credential_submit(
-                            page, state, result,
-                            "canary_password_submit_endpoint", frontier,
-                        )
-
-                    # c. Email field — only if password was NOT already submitted.
-                    if not credential_action_taken:
-                        email_selector = await detect_email_field(page)
-                        if email_selector is not None:
-                            self._our_goto_active = True
-                            try:
-                                result = await submit_field(
-                                    page, email_selector, CANARY_EMAIL, "email"
-                                )
-                            finally:
-                                self._our_goto_active = False
-                            credential_action_taken = True
-                            await self._handle_credential_submit(
-                                page, state, result,
-                                "canary_email_submit_endpoint", frontier,
-                            )
-
-                    if credential_action_taken:
-                        continue
-
                     # Enumerate *passive* actions from this state
                     actions = await self._enumerate_passive_actions(page, state)
 
@@ -554,70 +490,6 @@ class StateGraphExplorer:
                         await asyncio.sleep(1.5)
                         return False
                 # Let the page settle after gate resolution.
-                await asyncio.sleep(1.0)
-
-            elif t.kind == TransitionKind.form_submit and t.trigger:
-                # Re-fill and re-submit the same form field.
-                field_kind = t.trigger.get("field_kind", "")
-                if field_kind == "password":
-                    selector = await detect_password_field(page)
-                    value = CANARY_PASSWORD
-                elif field_kind == "email":
-                    selector = await detect_email_field(page)
-                    value = CANARY_EMAIL
-                else:
-                    continue
-
-                if selector is None:
-                    # Field not found — fallback.
-                    self._record_error(
-                        scope=EvidenceScope.state,
-                        scope_id=state.id,
-                        key="replay_fallback_used",
-                        message=(
-                            f"Replay fallback: {field_kind} field not found "
-                            f"during replay for state {state.id}"
-                        ),
-                    )
-                    self._our_goto_active = True
-                    try:
-                        await page.goto(
-                            state.url, wait_until="domcontentloaded"
-                        )
-                    finally:
-                        self._our_goto_active = False
-                    await asyncio.sleep(1.5)
-                    return False
-
-                try:
-                    await submit_field(page, selector, value, field_kind)
-                except Exception:
-                    self._record_error(
-                        scope=EvidenceScope.state,
-                        scope_id=state.id,
-                        key="replay_fallback_used",
-                        message=(
-                            f"Replay fallback: form_submit ({field_kind}) "
-                            f"failed during replay for state {state.id}"
-                        ),
-                    )
-                    self._our_goto_active = True
-                    try:
-                        await page.goto(
-                            state.url, wait_until="domcontentloaded"
-                        )
-                    finally:
-                        self._our_goto_active = False
-                    await asyncio.sleep(1.5)
-                    return False
-
-                # Wait for navigation triggered by submit.
-                try:
-                    await page.wait_for_load_state(
-                        "networkidle", timeout=5000
-                    )
-                except Exception:
-                    pass
                 await asyncio.sleep(1.0)
 
             elif t.kind == TransitionKind.click and t.trigger:
@@ -1045,101 +917,6 @@ class StateGraphExplorer:
                 produced_by="StateGraphExplorer",
             )
         )
-
-    # ------------------------------------------------------------------
-    # Credential-submit handler
-    # ------------------------------------------------------------------
-
-    async def _handle_credential_submit(
-        self,
-        page: Page,
-        from_state: State,
-        result: dict,
-        evidence_key: str,
-        frontier: asyncio.Queue,
-    ) -> None:
-        """Process the result of a ``submit_field`` call.
-
-        - Creates a new State + ``form_submit`` Transition when the DOM
-          or URL changed.
-        - Records Evidence with the captured endpoint.
-        - Checks the endpoint against the known-IdP list.
-        """
-        post_url = page.url
-        post_html = await page.content()
-        post_hash = normalise_and_hash(post_html)
-
-        endpoint = result.get("endpoint", "")
-        field_kind = result.get("field_kind", "")
-
-        # --- evidence: submit endpoint ---------------------------------------
-        import json as _json
-        self.evidence.append(
-            Evidence(
-                target_id=self.target.id,  # type: ignore[union-attr]
-                scope=EvidenceScope.state,
-                scope_id=from_state.id,
-                layer="L4",
-                key=evidence_key,
-                value=_json.dumps(
-                    {
-                        "endpoint": endpoint,
-                        "method": result.get("method", ""),
-                        "field_kind": field_kind,
-                        "captured": result.get("captured", False),
-                    },
-                    ensure_ascii=False,
-                ),
-                weight=1.0,
-                produced_by="StateGraphExplorer",
-            )
-        )
-
-        # --- known-IdP check -------------------------------------------------
-        if endpoint:
-            idp_domain = check_known_idp(endpoint)
-            if idp_domain:
-                self.evidence.append(
-                    Evidence(
-                        target_id=self.target.id,  # type: ignore[union-attr]
-                        scope=EvidenceScope.state,
-                        scope_id=from_state.id,
-                        layer="L4",
-                        key="target_matches_known_idp",
-                        value=idp_domain,
-                        weight=1.0,
-                        produced_by="StateGraphExplorer",
-                    )
-                )
-
-        # --- new state if DOM / URL changed ----------------------------------
-        if post_hash != from_state.dom_hash or post_url.rstrip("/") != from_state.url.rstrip("/"):
-            new_state = State(
-                target_id=self.target.id,  # type: ignore[union-attr]
-                url=post_url,
-                dom_hash=post_hash,
-                depth=from_state.depth + 1,
-            )
-            if self._capture_artifacts_flag:
-                await self._save_artifacts(new_state, page, post_html, [])
-
-            transition = Transition(
-                target_id=self.target.id,  # type: ignore[union-attr]
-                from_state=from_state.id,
-                to_state=new_state.id,
-                kind=TransitionKind.form_submit,
-                trigger={
-                    "field_kind": field_kind,
-                    "endpoint": endpoint,
-                    "method": result.get("method", ""),
-                    "captured": result.get("captured", False),
-                },
-            )
-            self.states.append(new_state)
-            self.transitions.append(transition)
-            self._node_count += 1
-            if new_state.dom_hash not in self._visited:
-                await frontier.put(new_state)
 
     # ------------------------------------------------------------------
     # Artifact capture

@@ -4,7 +4,7 @@
 
 Le URL di phishing moderne raggiungono il payload finale solo dopo catene di redirect
 eterogenee (HTTP, meta-refresh, JavaScript) e, nei kit AiTM, dopo interazioni utente reali
-(inserimento email, password). Il motore modella questo percorso come **grafo di stati
+(click, navigazione gate). Il motore modella questo percorso come **grafo di stati
 esplorabile**, non come catena lineare.
 
 ## Domain model
@@ -81,11 +81,6 @@ while frontier and within_budget():
 - **Gate solver**: rilevamento e gestione di challenge anti-bot (Turnstile/hCaptcha
   interattivo, banner cookie, splash "click to continue"). Non prevede bypass crittografico di
   CAPTCHA, solo navigazione di gate standard.
-- **Credential injection con canary**: identità sintetica (mai reale). Compilazione email →
-  submit → osservazione endpoint POST (candidato exfil). Poi password → submit → osservazione
-  relay MFA. Safety non negoziabile: solo credenziali canary, container effimero, egress
-  isolato, nessun dato reale mai inviato.
-
 ## Evasione (fasi successive)
 
 Profilo coerente (UA + timezone + locale + Accept-Language + geo proxy), determinato dal
@@ -102,3 +97,33 @@ Questo motore è un servizio indipendente. L'integrazione con IntelIVX (repo sep
 via chiamata HTTP o coda messaggi, mai via import diretto — mantiene i due progetti
 disaccoppiati e permette di far evolvere questo motore senza rischiare regressioni
 sull'analyzer esistente, già in produzione.
+
+## Decisioni di scope
+
+### Rimozione della credential injection (2026-08-09)
+
+L'injection di credenziali canary (email/password/OTP) è stata rimossa dal motore.
+Lo scopo del progetto è la **classificazione** di siti di phishing tramite navigazione
+ed esplorazione del grafo degli stati — non l'inserimento di dati, nemmeno finti.
+
+La decisione è motivata da:
+1. **Focus**: la classificazione si basa su indicatori osservabili passivamente (URL,
+   DOM, redirect, infrastruttura), non sull'interazione con form.
+2. **Sicurezza**: anche con credenziali canary su dominio `.invalid`, l'invio di dati
+   verso endpoint di phishing solleva questioni operative e legali.
+3. **Semplicità**: rimuovere il sottosistema di injection riduce la superficie di
+   codice e i casi di test, accelerando l'iterazione sul core engine.
+
+I file rimossi:
+- `graph_engine/credential_injection.py`
+- `graph_engine/canary_identity.py`
+- `tests/graph_engine/test_credential_injection.py`
+
+Il codice rimosso da `graph_engine/explorer.py`:
+- Import dei moduli di credential injection
+- Blocco di credential injection nel BFS loop (~55 linee)
+- Branch `form_submit` in `_replay_to_state_impl` (~65 linee)
+- Metodo `_handle_credential_submit` (~90 linee)
+
+Il valore `TransitionKind.form_submit` è preservato nell'enum per retrocompatibilità
+e possibile uso futuro, ma non viene più prodotto dal motore.

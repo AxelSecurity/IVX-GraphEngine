@@ -1,8 +1,9 @@
-"""Full-chain integration test — gate → email → password → OTP stop.
+"""Full-chain integration tests — gate, click chains, replay, and resilience.
 
-Simulates a realistic AiTM phishing chain where the victim is funnelled
-through a CAPTCHA gate, multi-step credential harvest, and finally an
-OTP/MFA challenge — at which point the explorer must stop.
+Since credential injection (email/password/OTP) has been removed from scope,
+these tests verify the core exploration loop: gate solving, click-driven
+navigation across multiple depth levels, replay correctness, and error
+containment.
 """
 
 from __future__ import annotations
@@ -14,14 +15,10 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# HTML fixtures
+# HTML fixtures — gate + click chain
 # ---------------------------------------------------------------------------
 
-# Page 1 — CAPTCHA gate (auto-resolves after 2 s) + email form.
-# The email field is visible alongside the gate so the explorer can detect
-# it immediately after the gate is solved.  The form stays in the DOM the
-# whole time — real AiTM pages don't hide the form behind the captcha;
-# they show both so the victim fills in credentials while waiting.
+# Page 1 — CAPTCHA gate (auto-resolves after 2 s) + clickable link to /step2.
 _ROOT_PAGE = """\
 <!DOCTYPE html>
 <html>
@@ -33,11 +30,10 @@ _ROOT_PAGE = """\
           src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/if/ov/av0/rcv0/0x4AAAAAAADn7ROdM5XFV5/0/light/normal"
           width="300" height="65"
           style="border:0;"></iframe>
-  <form method="POST" action="/step2" style="margin-top:16px;">
-    <input type="email" id="email" name="email"
-           placeholder="Email address" autocomplete="email">
-    <input type="submit" id="submit-email" value="Next">
-  </form>
+  <p style="margin-top:16px;">
+    <a href="/step2" id="next-step"
+       style="display:inline-block;padding:10px 24px;background:#0078d4;color:#fff;text-decoration:none;font-size:16px;">Next</a>
+  </p>
   <script>
     // Auto-resolve after 2 s — simulates an "invisible" Turnstile challenge.
     setTimeout(() => {
@@ -49,53 +45,59 @@ _ROOT_PAGE = """\
 </body>
 </html>"""
 
-# Page 2 — password harvest.
-_PASSWORD_PAGE = """\
+# Page 2 — intermediate step with a clickable "Continue" link to /step3.
+_STEP2_PAGE = """\
 <!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Enter password — Microsoft</title></head>
+<head><meta charset="utf-8"><title>Step 2</title></head>
 <body>
-  <h1>Enter password</h1>
-  <form method="POST" action="/step3">
-    <input type="password" id="password" name="password"
-           placeholder="Password" autocomplete="current-password">
-    <input type="submit" id="submit-password" value="Sign in">
-  </form>
+  <h1>Step 2</h1>
+  <p>Almost there.</p>
+  <a href="/step3" id="continue-step"
+     style="display:inline-block;padding:10px 24px;background:#0078d4;color:#fff;text-decoration:none;font-size:16px;">Continue</a>
 </body>
 </html>"""
 
-# Page 3 — OTP / MFA challenge (strong live-attack signal → stop).
-_OTP_PAGE = """\
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>Verify your identity — Microsoft</title></head>
-<body>
-  <h1>Verify your identity</h1>
-  <p>Enter the code from your authenticator app.</p>
-  <form method="POST" action="/done">
-    <input type="text" id="otp" name="code"
-           placeholder="Verification code" autocomplete="one-time-code"
-           maxlength="6" inputmode="numeric">
-    <input type="submit" id="submit-otp" value="Verify">
-  </form>
-</body>
-</html>"""
-
-# Shown after the OTP form — the explorer should never reach this page.
-_DONE_PAGE = """\
+# Page 3 — leaf (no further links).
+_STEP3_PAGE = """\
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>Done</title></head>
-<body><h1>Welcome</h1><p>You are logged in.</p></body>
+<body><h1>Welcome</h1><p>You have arrived.</p></body>
 </html>"""
 
 
 # ---------------------------------------------------------------------------
-# Multi-route HTTP handler
+# Simple two-page fixture (for fault-injection tests)
 # ---------------------------------------------------------------------------
 
-class _FullChainHandler(BaseHTTPRequestHandler):
-    """Serve different pages depending on the request path."""
+# Root page — one clickable link to /next.
+_SIMPLE_ROOT = """\
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Simple</title></head>
+<body>
+  <h1>Hello</h1>
+  <a href="/next" id="go-next"
+     style="display:inline-block;padding:10px 24px;background:#0078d4;color:#fff;text-decoration:none;font-size:16px;">Go next</a>
+</body>
+</html>"""
+
+# Target page after the click.
+_SIMPLE_NEXT = """\
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Next</title></head>
+<body><h1>Next page</h1><p>You arrived.</p></body>
+</html>"""
+
+
+# ---------------------------------------------------------------------------
+# HTTP handlers
+# ---------------------------------------------------------------------------
+
+class _GateAndClickHandler(BaseHTTPRequestHandler):
+    """Serve a 3-page gate + click chain."""
 
     def _serve_html(self, html: str, status: int = 200) -> None:
         body = html.encode("utf-8")
@@ -108,51 +110,63 @@ class _FullChainHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = self.path.rstrip("/") or "/"
         if path == "/step2":
-            self._serve_html(_PASSWORD_PAGE)
+            self._serve_html(_STEP2_PAGE)
         elif path == "/step3":
-            self._serve_html(_OTP_PAGE)
-        elif path == "/done":
-            self._serve_html(_DONE_PAGE)
+            self._serve_html(_STEP3_PAGE)
         else:
             self._serve_html(_ROOT_PAGE)
 
     def do_POST(self) -> None:
+        self._serve_html(_STEP3_PAGE)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class _SimpleTwoPageHandler(BaseHTTPRequestHandler):
+    """Serve a 2-page click chain: / → /next."""
+
+    def _serve_html(self, html: str, status: int = 200) -> None:
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
         path = self.path.rstrip("/") or "/"
-        if path == "/step2":
-            self._serve_html(_PASSWORD_PAGE)
-        elif path == "/step3":
-            self._serve_html(_OTP_PAGE)
-        elif path == "/done":
-            self._serve_html(_DONE_PAGE)
+        if path == "/next":
+            self._serve_html(_SIMPLE_NEXT)
         else:
-            self._serve_html(_DONE_PAGE)
+            self._serve_html(_SIMPLE_ROOT)
 
     def log_message(self, format, *args):
         pass
 
 
 # ---------------------------------------------------------------------------
-# Test
+# 1 — Full chain: gate → click → click (linear depth 0→1→2→3)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-class TestFullChainGateEmailPasswordOtp:
-    """End-to-end: gate → email → password → OTP stop, with replay.
+class TestFullChainGateAndClickChain:
+    """End-to-end: gate → click → click → leaf, with replay.
 
-    The explorer must traverse the full AiTM chain, record all expected
-    Evidence, create the correct Transitions, and stop at the OTP stage
-    without submitting anything.
+    The explorer must traverse the full chain via gate_solved and click
+    transitions, create exactly 4 states in a linear progression, and
+    never trigger replay fallback.
     """
 
-    async def test_full_chain_all_steps_and_stop_at_otp(self):
+    async def test_full_chain_gate_solved_and_click_chain(self):
         from playwright.async_api import async_playwright
 
         from graph_engine.budget import Budget
         from graph_engine.explorer import StateGraphExplorer
         from graph_engine.models import TransitionKind
 
-        server = HTTPServer(("127.0.0.1", 0), _FullChainHandler)
+        server = HTTPServer(("127.0.0.1", 0), _GateAndClickHandler)
         port = server.server_port
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -172,20 +186,20 @@ class TestFullChainGateEmailPasswordOtp:
                             max_depth=5, max_nodes=20, timeout_s=60,
                         ),
                         capture_artifacts=False,
-                        top_n_actions=0,  # no click enumeration — form only
+                        top_n_actions=3,  # enable click enumeration
                         captcha_wait_s=5,
                     )
 
-                    # ---- Evidence keys -----------------------------------
+                    # ---- No credential-related Evidence ------------------
                     evidence_keys = {e.key for e in explorer.evidence}
-                    assert "canary_email_submit_endpoint" in evidence_keys, (
-                        f"Missing canary_email_submit_endpoint in {evidence_keys}"
+                    assert "canary_email_submit_endpoint" not in evidence_keys, (
+                        "Credential evidence must not appear"
                     )
-                    assert "canary_password_submit_endpoint" in evidence_keys, (
-                        f"Missing canary_password_submit_endpoint in {evidence_keys}"
+                    assert "canary_password_submit_endpoint" not in evidence_keys, (
+                        "Credential evidence must not appear"
                     )
-                    assert "otp_stage_reached" in evidence_keys, (
-                        f"Missing otp_stage_reached in {evidence_keys}"
+                    assert "otp_stage_reached" not in evidence_keys, (
+                        "Credential evidence must not appear"
                     )
 
                     # ---- Root must have exactly 1 outbound transition ----
@@ -220,88 +234,65 @@ class TestFullChainGateEmailPasswordOtp:
                     assert gate_t.trigger.get("provider") == "cloudflare_turnstile"
                     post_gate_state_id = gate_t.to_state
 
-                    # ---- form_submit transitions --------------------------
-                    form_transitions = [
+                    # ---- click transitions --------------------------------
+                    click_transitions = [
                         t for t in explorer.transitions
-                        if t.kind == TransitionKind.form_submit
+                        if t.kind == TransitionKind.click
                     ]
-                    assert len(form_transitions) >= 2, (
-                        f"Expected >= 2 form_submit transitions, "
-                        f"got {len(form_transitions)}"
-                    )
-                    field_kinds = {
-                        t.trigger.get("field_kind") for t in form_transitions
-                        if t.trigger
-                    }
-                    assert field_kinds >= {"email", "password"}, (
-                        f"Expected {{email, password}}, got {field_kinds}"
+                    # At least 2 clicks: one from post-gate, one from step2.
+                    assert len(click_transitions) >= 2, (
+                        f"Expected >= 2 click transitions, "
+                        f"got {len(click_transitions)}: "
+                        f"{[(t.trigger.get('action_label','') if t.trigger else '') for t in click_transitions]}"
                     )
 
-                    # ---- email form_submit must originate from post-gate state -
-                    email_transitions = [
-                        t for t in form_transitions
-                        if t.trigger and t.trigger.get("field_kind") == "email"
-                    ]
-                    assert len(email_transitions) >= 1
-                    email_t = email_transitions[0]
-                    assert email_t.from_state == post_gate_state_id, (
-                        f"form_submit(email).from_state must be "
-                        f"post-gate state ({post_gate_state_id}), "
-                        f"got {email_t.from_state}"
+                    # ---- click chain: post-gate → step2 → step3 ----------
+                    # Sort clicks by depth of their from_state.
+                    state_by_id = {s.id: s for s in explorer.states}
+                    clicks_by_depth = sorted(
+                        click_transitions,
+                        key=lambda t: state_by_id[t.from_state].depth,
                     )
-
-                    # ---- password form_submit must originate from email-dest ---
-                    password_transitions = [
-                        t for t in form_transitions
-                        if t.trigger and t.trigger.get("field_kind") == "password"
-                    ]
-                    assert len(password_transitions) >= 1
-                    password_t = password_transitions[0]
-                    assert password_t.from_state == email_t.to_state, (
-                        f"form_submit(password).from_state must be "
-                        f"post-email state ({email_t.to_state}), "
-                        f"got {password_t.from_state}"
+                    # First click originates from post-gate state.
+                    assert clicks_by_depth[0].from_state == post_gate_state_id, (
+                        f"First click must originate from post-gate state "
+                        f"({post_gate_state_id}), "
+                        f"got from_state={clicks_by_depth[0].from_state}"
+                    )
+                    # Second click originates from the first click's destination.
+                    assert clicks_by_depth[1].from_state == clicks_by_depth[0].to_state, (
+                        f"Second click must originate from first click's "
+                        f"destination ({clicks_by_depth[0].to_state}), "
+                        f"got from_state={clicks_by_depth[1].from_state}"
                     )
 
                     # ---- Depth distribution: linear chain 0→1→2→3 ---------
                     depths = {s.depth for s in explorer.states}
                     assert 0 in depths, f"Missing depth 0: {depths}"
-                    assert 1 in depths, (
-                        f"Missing depth 1 (post-gate): {depths}"
-                    )
-                    assert 2 in depths, (
-                        f"Missing depth 2 (post-email): {depths}"
-                    )
-                    assert 3 in depths, (
-                        f"Missing depth 3 (post-password, OTP stage): {depths}"
-                    )
+                    assert 1 in depths, f"Missing depth 1 (post-gate): {depths}"
+                    assert 2 in depths, f"Missing depth 2 (post-click1): {depths}"
+                    assert 3 in depths, f"Missing depth 3 (post-click2): {depths}"
 
                     # ---- Exactly 4 states in the linear chain -----------------
                     assert len(explorer.states) == 4, (
                         f"Expected exactly 4 states (root, post-gate, "
-                        f"post-email, OTP), got {len(explorer.states)}: "
-                        f"{[(s.depth, s.url) for s in explorer.states]}"
+                        f"post-click1, post-click2), got {len(explorer.states)}: "
+                        f"{[(s.depth, s.url.rstrip('/')[-10:]) for s in explorer.states]}"
                     )
 
-                    # ---- OTP is the last state — no further transitions ---
-                    otp_state_ids = {
-                        e.scope_id for e in explorer.evidence
-                        if e.key == "otp_stage_reached"
-                    }
-                    assert len(otp_state_ids) == 1, (
-                        f"Expected exactly 1 OTP evidence, "
-                        f"got {len(otp_state_ids)}"
-                    )
-                    otp_state_id = next(iter(otp_state_ids))
-                    # No transition originates from the OTP state.
-                    outbound_from_otp = [
-                        t for t in explorer.transitions
-                        if t.from_state == otp_state_id
+                    # ---- Leaf state (depth 3) has no outbound transitions --
+                    depth3_states = [
+                        s for s in explorer.states if s.depth == 3
                     ]
-                    assert len(outbound_from_otp) == 0, (
-                        f"Expected 0 transitions from OTP state, "
-                        f"got {len(outbound_from_otp)}: "
-                        f"{[t.kind.value for t in outbound_from_otp]}"
+                    assert len(depth3_states) == 1
+                    outbound_from_leaf = [
+                        t for t in explorer.transitions
+                        if t.from_state == depth3_states[0].id
+                    ]
+                    assert len(outbound_from_leaf) == 0, (
+                        f"Leaf state must have 0 outbound transitions, "
+                        f"got {len(outbound_from_leaf)}: "
+                        f"{[t.kind.value for t in outbound_from_leaf]}"
                     )
 
                     # ---- No replay fallback evidence ----------------------
@@ -341,11 +332,8 @@ class TestNodeFailureDoesNotCrashExploration:
 
         from graph_engine.budget import Budget
         from graph_engine.explorer import StateGraphExplorer
-        from tests.graph_engine.test_credential_injection import (
-            _MultiRouteHandler,
-        )
 
-        server = HTTPServer(("127.0.0.1", 0), _MultiRouteHandler)
+        server = HTTPServer(("127.0.0.1", 0), _SimpleTwoPageHandler)
         port = server.server_port
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -380,7 +368,7 @@ class TestNodeFailureDoesNotCrashExploration:
                             max_depth=3, max_nodes=10, timeout_s=60,
                         ),
                         capture_artifacts=False,
-                        top_n_actions=0,
+                        top_n_actions=3,
                     )
 
                     # ---- exploration completed normally ----------------
@@ -440,11 +428,8 @@ class TestReplayGotoExceptionIsCaught:
 
         from graph_engine.budget import Budget
         from graph_engine.explorer import StateGraphExplorer
-        from tests.graph_engine.test_credential_injection import (
-            _MultiRouteHandler,
-        )
 
-        server = HTTPServer(("127.0.0.1", 0), _MultiRouteHandler)
+        server = HTTPServer(("127.0.0.1", 0), _SimpleTwoPageHandler)
         port = server.server_port
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -488,7 +473,7 @@ class TestReplayGotoExceptionIsCaught:
                                 max_depth=3, max_nodes=10, timeout_s=60,
                             ),
                             capture_artifacts=False,
-                            top_n_actions=0,
+                            top_n_actions=3,
                         )
 
                         # ---- exploration completed normally ------------
@@ -496,8 +481,7 @@ class TestReplayGotoExceptionIsCaught:
 
                         # ---- partial graph survives -------------------
                         # Root state (depth 0) was created before the
-                        # fault, and the email submit already produced a
-                        # depth-1 state — both must still be present.
+                        # fault — it must still be present.
                         assert len(explorer.states) >= 1, (
                             "Expected at least root state to survive"
                         )

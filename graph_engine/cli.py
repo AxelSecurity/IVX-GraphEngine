@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
 
 from playwright.async_api import async_playwright
@@ -93,8 +94,20 @@ def main() -> None:
         default=3,
         help="Max click candidates attempted per state (default: 3, 0 = disable)",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable DEBUG-level logging for the entire exploration",
+    )
 
     args = parser.parse_args()
+
+    if args.debug:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            stream=sys.stderr,
+        )
 
     try:
         asyncio.run(_main(args))
