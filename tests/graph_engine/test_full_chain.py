@@ -318,3 +318,99 @@ class TestFullChainGateEmailPasswordOtp:
                     await browser.close()
         finally:
             server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# 2 — Node-level failure isolation: a single broken state must not kill
+#     the entire exploration.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestNodeFailureDoesNotCrashExploration:
+    """A single node-level exception must be contained — no crash, Evidence
+    recorded, already-discovered states preserved."""
+
+    async def test_unhandled_error_during_replay_is_contained(self):
+        """When replay raises an unexpected exception, the BFS loop records
+        ``unhandled_node_error`` Evidence and continues (instead of crashing)."""
+        import threading
+        from http.server import HTTPServer
+
+        from playwright.async_api import async_playwright
+
+        from graph_engine.budget import Budget
+        from graph_engine.explorer import StateGraphExplorer
+        from tests.graph_engine.test_credential_injection import (
+            _MultiRouteHandler,
+        )
+
+        server = HTTPServer(("127.0.0.1", 0), _MultiRouteHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        import time
+        time.sleep(0.1)
+
+        start_url = f"http://127.0.0.1:{port}/"
+
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    explorer = StateGraphExplorer(browser)
+
+                    # ---- inject a fault: replay explodes for any
+                    #      state beyond depth 0 --------------------------
+                    _original_replay = explorer._replay_to_state
+
+                    async def _faulty_replay(page, state):
+                        if state.depth > 0:
+                            raise TimeoutError(
+                                "Simulated page.goto timeout during replay"
+                            )
+                        return await _original_replay(page, state)
+
+                    explorer._replay_to_state = _faulty_replay  # type: ignore[assignment]
+
+                    # ---- run — must NOT raise --------------------------
+                    target = await explorer.run(
+                        start_url,
+                        budget=Budget(
+                            max_depth=3, max_nodes=10, timeout_s=60,
+                        ),
+                        capture_artifacts=False,
+                        top_n_actions=0,
+                    )
+
+                    # ---- exploration completed normally ----------------
+                    assert target is not None
+                    # Root state must exist (depth 0 was processed ok).
+                    root_states = [
+                        s for s in explorer.states if s.depth == 0
+                    ]
+                    assert len(root_states) == 1, (
+                        f"Expected root state to survive, "
+                        f"got {len(explorer.states)} states total"
+                    )
+
+                    # ---- unhandled_node_error Evidence recorded --------
+                    error_evidence = [
+                        e for e in explorer.evidence
+                        if e.key == "unhandled_node_error"
+                    ]
+                    assert len(error_evidence) >= 1, (
+                        f"Expected unhandled_node_error evidence, "
+                        f"got {[e.key for e in explorer.evidence]}"
+                    )
+                    assert "Simulated page.goto timeout" in (
+                        error_evidence[0].value
+                    ), (
+                        f"Evidence should mention the simulated error, "
+                        f"got: {error_evidence[0].value}"
+                    )
+
+                finally:
+                    await browser.close()
+        finally:
+            server.shutdown()

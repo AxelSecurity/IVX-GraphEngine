@@ -246,146 +246,158 @@ class StateGraphExplorer:
                 if state.depth >= budget.max_depth:
                     continue
 
-                # Replay the transition path so *page* shows this state's DOM
-                # (critical for SPA / multi-step forms where URL doesn't change).
-                if state.depth > 0:
-                    replay_ok = await self._replay_to_state(page, state)
-                    if not replay_ok:
-                        # Replay fell back to goto(state.url) — the DOM may
-                        # differ from the original exploration; treat as leaf.
+                try:
+                    # Replay the transition path so *page* shows this state's DOM
+                    # (critical for SPA / multi-step forms where URL doesn't change).
+                    if state.depth > 0:
+                        replay_ok = await self._replay_to_state(page, state)
+                        if not replay_ok:
+                            # Replay fell back to goto(state.url) — the DOM may
+                            # differ from the original exploration; treat as leaf.
+                            continue
+
+                    # ---- gate detection / solving --------------------------------
+                    if self._captcha_wait_s > 0:
+                        captcha = await detect_captcha(page)
+                        if captcha is not None:
+                            gate_passed = await try_pass_gate(
+                                page, self._captcha_wait_s
+                            )
+                            if gate_passed:
+                                # The DOM changed (gate iframe gone / replaced) —
+                                # record a new State + Transition.
+                                post_html = await page.content()
+                                post_hash = normalise_and_hash(post_html)
+                                post_url = page.url
+
+                                if post_hash != state.dom_hash:
+                                    gate_state = State(
+                                        target_id=self.target.id,  # type: ignore[union-attr]
+                                        url=post_url,
+                                        dom_hash=post_hash,
+                                        depth=state.depth + 1,
+                                    )
+                                    if self._capture_artifacts_flag:
+                                        await self._save_artifacts(
+                                            gate_state, page, post_html, []
+                                        )
+                                    gate_transition = Transition(
+                                        target_id=self.target.id,  # type: ignore[union-attr]
+                                        from_state=state.id,
+                                        to_state=gate_state.id,
+                                        kind=TransitionKind.gate_solved,
+                                        trigger={
+                                            "provider": captcha,
+                                            "wait_s": self._captcha_wait_s,
+                                        },
+                                    )
+                                    self.states.append(gate_state)
+                                    self.transitions.append(gate_transition)
+                                    self._node_count += 1
+                                    if gate_state.dom_hash not in self._visited:
+                                        await frontier.put(gate_state)
+                                continue
+                            else:
+                                # Gate still present — record and treat as leaf.
+                                self._record_error(
+                                    scope=EvidenceScope.state,
+                                    scope_id=state.id,
+                                    key="blocked_by_gate",
+                                    message=(
+                                        f"Gate not passed after "
+                                        f"{self._captcha_wait_s}s: {captcha}"
+                                    ),
+                                )
+                                continue
+
+                    # ---- credential injection (OTP → password → email) -----------
+                    # Priority order: OTP detection stops exploration entirely;
+                    # password is preferred over email because exfil of a password
+                    # is more critical.  When any case fires, generic click
+                    # enumeration is skipped — the form has priority.
+                    credential_action_taken = False
+
+                    # a. OTP / MFA — strong signal of live attack, stop here.
+                    if await detect_otp_field(page):
+                        self._record_error(
+                            scope=EvidenceScope.state,
+                            scope_id=state.id,
+                            key="otp_stage_reached",
+                            message=(
+                                f"OTP/MFA field detected at {page.url} — "
+                                f"live attack signal, stopping exploration"
+                            ),
+                        )
                         continue
 
-                # ---- gate detection / solving --------------------------------
-                if self._captcha_wait_s > 0:
-                    captcha = await detect_captcha(page)
-                    if captcha is not None:
-                        gate_passed = await try_pass_gate(
-                            page, self._captcha_wait_s
-                        )
-                        if gate_passed:
-                            # The DOM changed (gate iframe gone / replaced) —
-                            # record a new State + Transition.
-                            post_html = await page.content()
-                            post_hash = normalise_and_hash(post_html)
-                            post_url = page.url
-
-                            if post_hash != state.dom_hash:
-                                gate_state = State(
-                                    target_id=self.target.id,  # type: ignore[union-attr]
-                                    url=post_url,
-                                    dom_hash=post_hash,
-                                    depth=state.depth + 1,
-                                )
-                                if self._capture_artifacts_flag:
-                                    await self._save_artifacts(
-                                        gate_state, page, post_html, []
-                                    )
-                                gate_transition = Transition(
-                                    target_id=self.target.id,  # type: ignore[union-attr]
-                                    from_state=state.id,
-                                    to_state=gate_state.id,
-                                    kind=TransitionKind.gate_solved,
-                                    trigger={
-                                        "provider": captcha,
-                                        "wait_s": self._captcha_wait_s,
-                                    },
-                                )
-                                self.states.append(gate_state)
-                                self.transitions.append(gate_transition)
-                                self._node_count += 1
-                                if gate_state.dom_hash not in self._visited:
-                                    await frontier.put(gate_state)
-                            continue
-                        else:
-                            # Gate still present — record and treat as leaf.
-                            self._record_error(
-                                scope=EvidenceScope.state,
-                                scope_id=state.id,
-                                key="blocked_by_gate",
-                                message=(
-                                    f"Gate not passed after "
-                                    f"{self._captcha_wait_s}s: {captcha}"
-                                ),
-                            )
-                            continue
-
-                # ---- credential injection (OTP → password → email) -----------
-                # Priority order: OTP detection stops exploration entirely;
-                # password is preferred over email because exfil of a password
-                # is more critical.  When any case fires, generic click
-                # enumeration is skipped — the form has priority.
-                credential_action_taken = False
-
-                # a. OTP / MFA — strong signal of live attack, stop here.
-                if await detect_otp_field(page):
-                    self._record_error(
-                        scope=EvidenceScope.state,
-                        scope_id=state.id,
-                        key="otp_stage_reached",
-                        message=(
-                            f"OTP/MFA field detected at {page.url} — "
-                            f"live attack signal, stopping exploration"
-                        ),
-                    )
-                    continue
-
-                # b. Password field — highest priority credential.
-                pwd_selector = await detect_password_field(page)
-                if pwd_selector is not None:
-                    self._our_goto_active = True
-                    try:
-                        result = await submit_field(
-                            page, pwd_selector, CANARY_PASSWORD, "password"
-                        )
-                    finally:
-                        self._our_goto_active = False
-                    credential_action_taken = True
-                    await self._handle_credential_submit(
-                        page, state, result,
-                        "canary_password_submit_endpoint", frontier,
-                    )
-
-                # c. Email field — only if password was NOT already submitted.
-                if not credential_action_taken:
-                    email_selector = await detect_email_field(page)
-                    if email_selector is not None:
+                    # b. Password field — highest priority credential.
+                    pwd_selector = await detect_password_field(page)
+                    if pwd_selector is not None:
                         self._our_goto_active = True
                         try:
                             result = await submit_field(
-                                page, email_selector, CANARY_EMAIL, "email"
+                                page, pwd_selector, CANARY_PASSWORD, "password"
                             )
                         finally:
                             self._our_goto_active = False
                         credential_action_taken = True
                         await self._handle_credential_submit(
                             page, state, result,
-                            "canary_email_submit_endpoint", frontier,
+                            "canary_password_submit_endpoint", frontier,
                         )
 
-                if credential_action_taken:
-                    continue
+                    # c. Email field — only if password was NOT already submitted.
+                    if not credential_action_taken:
+                        email_selector = await detect_email_field(page)
+                        if email_selector is not None:
+                            self._our_goto_active = True
+                            try:
+                                result = await submit_field(
+                                    page, email_selector, CANARY_EMAIL, "email"
+                                )
+                            finally:
+                                self._our_goto_active = False
+                            credential_action_taken = True
+                            await self._handle_credential_submit(
+                                page, state, result,
+                                "canary_email_submit_endpoint", frontier,
+                            )
 
-                # Enumerate *passive* actions from this state
-                actions = await self._enumerate_passive_actions(page, state)
+                    if credential_action_taken:
+                        continue
 
-                # Enumerate *click* actions if enabled
-                if self._top_n_actions > 0:
-                    click_actions = await self._enumerate_click_actions(
-                        page, state
+                    # Enumerate *passive* actions from this state
+                    actions = await self._enumerate_passive_actions(page, state)
+
+                    # Enumerate *click* actions if enabled
+                    if self._top_n_actions > 0:
+                        click_actions = await self._enumerate_click_actions(
+                            page, state
+                        )
+                        actions.extend(click_actions)
+
+                    for action in actions:
+                        if not self._within_budget(budget):
+                            break
+                        new_state = await self._execute_action(
+                            page, context, state, action
+                        )
+                        if new_state is not None:
+                            self.states.append(new_state)
+                            self._node_count += 1
+                            if new_state.dom_hash not in self._visited:
+                                await frontier.put(new_state)
+
+                except Exception as exc:
+                    self._record_error(
+                        scope=EvidenceScope.state,
+                        scope_id=state.id,
+                        key="unhandled_node_error",
+                        message=(
+                            f"Unhandled error processing state "
+                            f"{state.id}: {exc}"
+                        ),
                     )
-                    actions.extend(click_actions)
-
-                for action in actions:
-                    if not self._within_budget(budget):
-                        break
-                    new_state = await self._execute_action(
-                        page, context, state, action
-                    )
-                    if new_state is not None:
-                        self.states.append(new_state)
-                        self._node_count += 1
-                        if new_state.dom_hash not in self._visited:
-                            await frontier.put(new_state)
 
             self.target.status = TargetStatus.done
 
@@ -472,10 +484,20 @@ class StateGraphExplorer:
             self._our_goto_active = True
             try:
                 await page.goto(state.url, wait_until="domcontentloaded")
+                await asyncio.sleep(1.5)
+                return True
+            except Exception as exc:
+                self._record_error(
+                    scope=EvidenceScope.state,
+                    scope_id=state.id,
+                    key="replay_fallback_used",
+                    message=(
+                        f"Replay fallback: goto({state.url}) failed: {exc}"
+                    ),
+                )
+                return False
             finally:
                 self._our_goto_active = False
-            await asyncio.sleep(1.5)
-            return True
 
         # Navigate to the root state's URL first.
         root_state = self._find_state_by_id(path[0].from_state)
@@ -483,6 +505,16 @@ class StateGraphExplorer:
         self._our_goto_active = True
         try:
             await page.goto(root_url, wait_until="domcontentloaded")
+        except Exception as exc:
+            self._record_error(
+                scope=EvidenceScope.state,
+                scope_id=state.id,
+                key="replay_fallback_used",
+                message=(
+                    f"Replay fallback: goto({root_url}) failed: {exc}"
+                ),
+            )
+            return False
         finally:
             self._our_goto_active = False
         await asyncio.sleep(1.0)
