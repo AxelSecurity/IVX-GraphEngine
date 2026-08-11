@@ -414,3 +414,132 @@ class TestNodeFailureDoesNotCrashExploration:
                     await browser.close()
         finally:
             server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# 3 — Replay goto fault: verify the inner try/except inside
+#     ``_replay_to_state_impl`` (not the broad BFS backstop) catches a
+#     ``page.goto()`` failure and records ``replay_fallback_used``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestReplayGotoExceptionIsCaught:
+    """When ``page.goto()`` itself raises inside ``_replay_to_state_impl``,
+    the inner handler must record ``replay_fallback_used`` — not the
+    broad ``unhandled_node_error`` backstop — and the partial graph must
+    survive."""
+
+    async def test_page_goto_failure_during_replay_records_fallback_evidence(
+        self,
+    ):
+        import threading
+        from http.server import HTTPServer
+
+        from playwright.async_api import async_playwright
+
+        from graph_engine.budget import Budget
+        from graph_engine.explorer import StateGraphExplorer
+        from tests.graph_engine.test_credential_injection import (
+            _MultiRouteHandler,
+        )
+
+        server = HTTPServer(("127.0.0.1", 0), _MultiRouteHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        import time
+        time.sleep(0.1)
+
+        start_url = f"http://127.0.0.1:{port}/"
+
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    explorer = StateGraphExplorer(browser)
+
+                    # Patch Page.goto so the FIRST call succeeds (root
+                    # navigation in _navigate_and_create_state) but every
+                    # subsequent call raises TimeoutError.  The second
+                    # call is the root-URL goto inside
+                    # _replay_to_state_impl when the BFS loop replays the
+                    # path for a depth>0 state.
+                    from playwright.async_api import Page as PWPage
+
+                    _real_goto = PWPage.goto
+                    _call_count = [0]
+
+                    async def _counted_goto(page_self, url, **kwargs):
+                        _call_count[0] += 1
+                        if _call_count[0] > 1:
+                            raise TimeoutError(
+                                "Simulated page.goto timeout during replay"
+                            )
+                        return await _real_goto(page_self, url, **kwargs)
+
+                    PWPage.goto = _counted_goto  # type: ignore[method-assign]
+
+                    try:
+                        # ---- run — must NOT raise ----------------------
+                        target = await explorer.run(
+                            start_url,
+                            budget=Budget(
+                                max_depth=3, max_nodes=10, timeout_s=60,
+                            ),
+                            capture_artifacts=False,
+                            top_n_actions=0,
+                        )
+
+                        # ---- exploration completed normally ------------
+                        assert target is not None
+
+                        # ---- partial graph survives -------------------
+                        # Root state (depth 0) was created before the
+                        # fault, and the email submit already produced a
+                        # depth-1 state — both must still be present.
+                        assert len(explorer.states) >= 1, (
+                            "Expected at least root state to survive"
+                        )
+                        depths = {s.depth for s in explorer.states}
+                        assert 0 in depths, (
+                            f"Root state (depth 0) must survive, "
+                            f"got depths={depths}"
+                        )
+
+                        # ---- replay_fallback_used Evidence (inner) ----
+                        fallback_evidence = [
+                            e for e in explorer.evidence
+                            if e.key == "replay_fallback_used"
+                        ]
+                        assert len(fallback_evidence) >= 1, (
+                            "Expected replay_fallback_used evidence "
+                            "(caught by inner try/except), "
+                            f"got {[e.key for e in explorer.evidence]}"
+                        )
+                        assert "Simulated page.goto timeout" in (
+                            fallback_evidence[0].value
+                        ), (
+                            "Evidence should mention the simulated error, "
+                            f"got: {fallback_evidence[0].value}"
+                        )
+
+                        # ---- NO unhandled_node_error ------------------
+                        backstop_evidence = [
+                            e for e in explorer.evidence
+                            if e.key == "unhandled_node_error"
+                        ]
+                        assert len(backstop_evidence) == 0, (
+                            "Must NOT have unhandled_node_error — "
+                            "the inner try/except inside "
+                            "_replay_to_state_impl must catch this "
+                            "before the broad BFS backstop sees it"
+                        )
+
+                    finally:
+                        PWPage.goto = _real_goto  # type: ignore[method-assign]
+
+                finally:
+                    await browser.close()
+        finally:
+            server.shutdown()
