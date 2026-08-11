@@ -86,28 +86,37 @@ _DETECT_PASSWORD_JS = """() => {
 }"""
 
 _DETECT_OTP_JS = """() => {
+    // Only text-like input types — explicitly exclude submit, button,
+    // checkbox, radio, hidden, image, file, range, color.
+    const FIELD_TYPES = new Set(['text', 'number', 'tel', 'password', '']);
+
     // ---- pattern A: single input with OTP-ish attributes ------------------
+    // Keywords are matched ONLY against the input's own attributes
+    // (name, id, placeholder, aria-label) — never against surrounding
+    // text, labels, or page content.
     const otpKeywords = /\\b(code|otp|verification|authenticator|token|2fa|mfa|pin|one.?time|passcode)\\b/;
-    for (const el of document.querySelectorAll('input:not([type="hidden"])')) {
+    for (const el of document.querySelectorAll('input')) {
         if (el.offsetParent === null) continue;
+        const t = (el.getAttribute('type') || 'text').toLowerCase();
+        if (!FIELD_TYPES.has(t)) continue;
         const haystack = [
             el.name || '', el.id || '', el.placeholder || '',
-            el.getAttribute('aria-label') || '', el.autocomplete || ''
+            el.getAttribute('aria-label') || ''
         ].join(' ').toLowerCase();
         if (otpKeywords.test(haystack)) {
             return {found: true, kind: 'single'};
         }
     }
-    // ---- pattern B: group of short numeric inputs (split OTP boxes) --------
+    // ---- pattern B: group of single-digit input boxes (split OTP) ---------
+    // Only maxlength=1 (exactly one character).  CAP (maxlength=5) and
+    // province codes (maxlength=2) are intentionally excluded.  Requires
+    // at least 3 such inputs on the page — the real split-OTP pattern.
     const maybeOtp = [];
-    for (const el of document.querySelectorAll(
-        'input[type="number"], input[type="tel"], ' +
-        'input[type="text"][inputmode="numeric"], ' +
-        'input:not([type])[maxlength="1"], input[maxlength="2"]'
-    )) {
+    for (const el of document.querySelectorAll('input[maxlength="1"]')) {
         if (el.offsetParent === null) continue;
-        const maxlen = parseInt(el.getAttribute('maxlength') || '99', 10);
-        if (maxlen >= 1 && maxlen <= 2) maybeOtp.push(el);
+        const t = (el.getAttribute('type') || 'text').toLowerCase();
+        if (!FIELD_TYPES.has(t)) continue;
+        maybeOtp.push(el);
     }
     if (maybeOtp.length >= 3) return {found: true, kind: 'group', count: maybeOtp.length};
     return {found: false};

@@ -458,3 +458,156 @@ class TestKnownIdpDetection:
                     await browser.close()
         finally:
             server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# 5 — OTP detection precision: regression + positive split-box test
+# ---------------------------------------------------------------------------
+
+# Regression fixture: phone field with "OTP" in surrounding helper text,
+# but no actual OTP field anywhere on the page.
+_PHONE_WITH_OTP_HELPER_TEXT = """\
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Verify phone</title></head>
+<body>
+  <h1>Verify your phone number</h1>
+  <form method="POST" action="/verify">
+    <label for="phone">Phone number</label>
+    <input type="tel" id="phone" name="phone"
+           placeholder="+39 123 456 7890" autocomplete="tel">
+    <small>We will send you an OTP verification code to confirm your identity.</small>
+    <button type="submit" id="send-code">Send code</button>
+  </form>
+</body>
+</html>"""
+
+# Positive fixture: 4 split OTP digit boxes (real OTP pattern).
+_OTP_SPLIT_BOXES_PAGE = """\
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Verify OTP</title></head>
+<body>
+  <h1>Enter verification code</h1>
+  <p>We sent a 4-digit code to your phone.</p>
+  <form method="POST" action="/verify-otp">
+    <div class="otp-digits">
+      <input type="text" maxlength="1" inputmode="numeric" class="otp-digit"
+             name="digit1" id="digit1" aria-label="Digit 1 of 4">
+      <input type="text" maxlength="1" inputmode="numeric" class="otp-digit"
+             name="digit2" id="digit2" aria-label="Digit 2 of 4">
+      <input type="text" maxlength="1" inputmode="numeric" class="otp-digit"
+             name="digit3" id="digit3" aria-label="Digit 3 of 4">
+      <input type="text" maxlength="1" inputmode="numeric" class="otp-digit"
+             name="digit4" id="digit4" aria-label="Digit 4 of 4">
+    </div>
+    <button type="submit" id="verify-btn">Verify</button>
+  </form>
+</body>
+</html>"""
+
+
+class _SinglePageHandler(BaseHTTPRequestHandler):
+    """Serve a fixed HTML page for every request."""
+
+    page_html: str = ""
+
+    def do_GET(self) -> None:
+        body = self.page_html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:
+        body = self.page_html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+@pytest.mark.integration
+class TestOtpDetectionPrecision:
+    """OTP detection must NOT fire on surrounding text — only on the
+    input's own attributes.  Split OTP digit boxes (maxlength=1, >=3)
+    must fire correctly."""
+
+    async def test_phone_with_otp_helper_text_does_not_trigger(self):
+        """Regression: a phone field with 'OTP' in nearby helper text
+        must NOT trigger OTP detection."""
+        from playwright.async_api import async_playwright
+
+        from graph_engine.credential_injection import detect_otp_field
+
+        # Bind the fixture to the handler class.
+        _SinglePageHandler.page_html = _PHONE_WITH_OTP_HELPER_TEXT
+
+        server = HTTPServer(("127.0.0.1", 0), _SinglePageHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        import time
+        time.sleep(0.1)
+
+        url = f"http://127.0.0.1:{port}/"
+
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page()
+                    await page.goto(url, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(500)
+
+                    result = await detect_otp_field(page)
+                    assert result is False, (
+                        f"OTP detection must NOT fire on phone field "
+                        f"with 'OTP' in surrounding helper text, "
+                        f"got {result!r}"
+                    )
+                finally:
+                    await browser.close()
+        finally:
+            server.shutdown()
+
+    async def test_split_otp_digit_boxes_trigger_correctly(self):
+        """Positive: 4 separate maxlength=1 inputs (split OTP boxes)
+        must trigger OTP detection via pattern B."""
+        from playwright.async_api import async_playwright
+
+        from graph_engine.credential_injection import detect_otp_field
+
+        _SinglePageHandler.page_html = _OTP_SPLIT_BOXES_PAGE
+
+        server = HTTPServer(("127.0.0.1", 0), _SinglePageHandler)
+        port = server.server_port
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        import time
+        time.sleep(0.1)
+
+        url = f"http://127.0.0.1:{port}/"
+
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page()
+                    await page.goto(url, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(500)
+
+                    result = await detect_otp_field(page)
+                    assert result is True, (
+                        f"OTP detection MUST fire on 4 split "
+                        f"maxlength=1 digit boxes, got {result!r}"
+                    )
+                finally:
+                    await browser.close()
+        finally:
+            server.shutdown()
