@@ -168,6 +168,7 @@ def test_verdict_instantiation():
     )
     assert v.classification == Classification.phishing
     assert v.confidence == 0.95
+    assert v.produced_by == "foundry"  # default when not specified
     assert v.brand == "Microsoft"
     assert v.kit_family == "EvilGinx2"
 
@@ -178,6 +179,7 @@ def test_verdict_minimal():
         classification=Classification.benign,
     )
     assert v.confidence == 0.0
+    assert v.produced_by == "foundry"  # default
     assert v.brand is None
 
 

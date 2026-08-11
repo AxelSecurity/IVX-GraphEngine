@@ -96,6 +96,7 @@ async def classify(
         target_id=target_id,  # type: ignore[arg-type]
         classification=classification,
         confidence=confidence,
+        produced_by="foundry",
         brand=data.get("brand") or None,
         kit_family=data.get("kit_family") or None,
         rationale=data.get("rationale") or None,
@@ -250,6 +251,7 @@ def _heuristic_fallback(bundle: dict) -> Verdict:
             target_id=bundle.get("target_id", ""),
             classification=Classification.suspicious,
             confidence=0.1,
+            produced_by="heuristic_fallback",
             rationale=(
                 "Heuristic fallback (Foundry unavailable): single state with "
                 "no visible form fields — insufficient data for classification."
@@ -262,6 +264,7 @@ def _heuristic_fallback(bundle: dict) -> Verdict:
             target_id=bundle.get("target_id", ""),
             classification=Classification.suspicious,
             confidence=0.2,
+            produced_by="heuristic_fallback",
             rationale=(
                 "Heuristic fallback (Foundry unavailable): multiple states with "
                 f"form fields ({total_fields} total) detected — cannot exclude "
@@ -273,6 +276,7 @@ def _heuristic_fallback(bundle: dict) -> Verdict:
         target_id=bundle.get("target_id", ""),
         classification=Classification.suspicious,
         confidence=0.15,
+        produced_by="heuristic_fallback",
         rationale=(
             "Heuristic fallback (Foundry unavailable): insufficient signals "
             "for automated classification."

@@ -54,6 +54,7 @@ def prefilter(bundle: dict) -> Optional[Verdict]:
             target_id=bundle.get("target_id", ""),
             classification=Classification.suspicious,
             confidence=0.05,
+            produced_by="prefilter",
             rationale=(
                 "Explorazione inconclusiva: è stato visitato solo il "
                 "root state e non è stato possibile estrarre testo "
@@ -73,6 +74,7 @@ def prefilter(bundle: dict) -> Optional[Verdict]:
             target_id=bundle.get("target_id", ""),
             classification=Classification.suspicious,
             confidence=0.05,
+            produced_by="prefilter",
             rationale=(
                 "Esplorazione inconclusiva: un errore non gestito ha "
                 "interrotto l'esplorazione e non sono stati raccolti "

@@ -102,7 +102,9 @@ class TestStatelessThreadCreation:
             assert v2 is not None
             # Both must have the classification from our mock
             assert v1.classification == Classification.phishing
+            assert v1.produced_by == "foundry"
             assert v2.classification == Classification.phishing
+            assert v2.produced_by == "foundry"
 
     @pytest.mark.asyncio
     async def test_foundry_not_configured_falls_back(self):
@@ -113,6 +115,7 @@ class TestStatelessThreadCreation:
 
             assert verdict is not None
             assert verdict.classification == Classification.suspicious
+            assert verdict.produced_by == "heuristic_fallback"
             assert verdict.confidence <= 0.3
             assert "Heuristic fallback" in (verdict.rationale or "")
 
@@ -165,6 +168,7 @@ class TestHeuristicFallback:
         }
         verdict = _heuristic_fallback(bundle)
         assert verdict.classification == Classification.suspicious
+        assert verdict.produced_by == "heuristic_fallback"
         assert verdict.confidence <= 0.15
         assert "insufficient" in verdict.rationale.lower()
 
@@ -178,6 +182,7 @@ class TestHeuristicFallback:
         }
         verdict = _heuristic_fallback(bundle)
         assert verdict.classification == Classification.suspicious
+        assert verdict.produced_by == "heuristic_fallback"
         assert verdict.confidence <= 0.3
 
 

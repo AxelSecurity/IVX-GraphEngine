@@ -111,11 +111,24 @@ class Evidence(BaseModel):
 
 
 class Verdict(BaseModel):
-    """Aggregated outcome after exploration budget is exhausted."""
+    """Aggregated outcome after exploration budget is exhausted.
+
+    ``produced_by`` is MANDATORY — it tracks provenance so downstream
+    consumers can distinguish an AI judgment from a deterministic
+    fallback.  Allowed values:
+
+    - ``"foundry"`` — classified by the Azure Foundry Agent (L5 model)
+    - ``"prefilter"`` — intercepted by the deterministic prefilter
+      (data too sparse for meaningful AI analysis)
+    - ``"heuristic_fallback"`` — Foundry was unreachable or returned
+      invalid output; verdict is a conservative guess, NOT an AI
+      analysis
+    """
 
     target_id: uuid.UUID
     classification: Classification
     confidence: float = 0.0
+    produced_by: str = "foundry"
     brand: Optional[str] = None
     kit_family: Optional[str] = None
     rationale: Optional[str] = None

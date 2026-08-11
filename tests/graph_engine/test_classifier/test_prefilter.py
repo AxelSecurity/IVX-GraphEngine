@@ -49,6 +49,7 @@ class TestPrefilterReturnsVerdict:
         verdict = prefilter(bundle)
         assert verdict is not None, "Should return Verdict for insufficient data"
         assert verdict.classification == Classification.suspicious
+        assert verdict.produced_by == "prefilter"
         assert verdict.confidence <= 0.1, (
             f"Confidence should be very low, got {verdict.confidence}"
         )
@@ -86,6 +87,7 @@ class TestPrefilterReturnsVerdict:
         verdict = prefilter(bundle)
         assert verdict is not None
         assert verdict.classification == Classification.suspicious
+        assert verdict.produced_by == "prefilter"
         assert verdict.confidence <= 0.1
 
     def test_unhandled_error_with_gate_bypasses_prefilter(self):
@@ -215,3 +217,4 @@ class TestPrefilterReturnsNone:
         verdict = prefilter(bundle)
         assert verdict is not None
         assert verdict.classification == Classification.suspicious
+        assert verdict.produced_by == "prefilter"
