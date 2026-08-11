@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import requests
+
 from graph_engine.lexical.typosquat import (
     _registrable_domain,
     check_typosquat,
@@ -85,23 +87,38 @@ class TestNetworkIsolation:
         assert ts._extractor.suffix_list_urls == ()
 
     def test_extract_works_offline(self):
-        """Verifica che l'estrazione funzioni senza alcuna richiesta di rete."""
-        # Basta chiamare _registrable_domain su una varietà di TLD —
-        # se tldextract tentasse di fare rete, il test fallirebbe in timeout
-        # o con un errore di connessione.
-        cases = [
-            ("login.inps.gov.it", "inps.gov.it"),
-            ("evil.example.com", "example.com"),
-            ("phish.example.co.uk", "example.co.uk"),
-            ("www.example.com.mx", "example.com.mx"),
-            ("sub.example.co.in", "example.co.in"),
-            ("keyimportacao.com.br", "keyimportacao.com.br"),
-            ("cittadino.inps.it", "inps.it"),
-        ]
-        for hostname, expected in cases:
-            assert _registrable_domain(hostname) == expected, (
-                f"Failed: _registrable_domain({hostname!r}) should be {expected!r}"
+        """Verifica che l'estrazione funzioni senza alcuna richiesta di rete.
+
+        Blocca ESPLICITAMENTE ``requests.Session.send`` — il punto di
+        strozzatura unico della libreria ``requests`` usata da tldextract.
+        Se una versione futura di tldextract tentasse una richiesta HTTP
+        (es. per un cambiamento nel comportamento offline), questo test
+        fallisce rumorosamente con ``RuntimeError`` invece di passare
+        silenziosamente per assenza di rete.
+        """
+
+        def _blocked(self_or_cls, request, **kwargs):
+            raise RuntimeError(
+                "RETE BLOCCATA: tldextract ha tentato una richiesta HTTP "
+                f"({request.method} {request.url})! "
+                "Verificare la configurazione offline di TLDExtract."
             )
+
+        with patch.object(requests.Session, "send", _blocked):
+            cases = [
+                ("login.inps.gov.it", "inps.gov.it"),
+                ("evil.example.com", "example.com"),
+                ("phish.example.co.uk", "example.co.uk"),
+                ("www.example.com.mx", "example.com.mx"),
+                ("sub.example.co.in", "example.co.in"),
+                ("keyimportacao.com.br", "keyimportacao.com.br"),
+                ("cittadino.inps.it", "inps.it"),
+            ]
+            for hostname, expected in cases:
+                assert _registrable_domain(hostname) == expected, (
+                    f"Failed: _registrable_domain({hostname!r})"
+                    f" should be {expected!r}"
+                )
 
 
 class TestTyposquatCheck:
