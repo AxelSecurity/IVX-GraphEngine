@@ -60,12 +60,22 @@ class Classification(str, Enum):
 
 
 class AnalysisTarget(BaseModel):
-    """Unit of work — a single input URL to explore."""
+    """Unit of work — a single input URL to explore.
+
+    Three distinct URL fields with three distinct meanings::
+
+        input_url     — raw URL as entered by the user / upstream system
+        canonical_url — L0-normalised URL (refang → unwrap → canonicalize)
+                        used as the actual exploration start point
+        final_url     — URL where L4 exploration landed after redirects /
+                        navigation (set by the explorer post-goto)
+    """
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4)
     input_url: str
     canonical_url: Optional[str] = None
     url_hash: Optional[str] = None
+    final_url: Optional[str] = None
     status: TargetStatus = TargetStatus.queued
     root_state_id: Optional[uuid.UUID] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

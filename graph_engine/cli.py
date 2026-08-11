@@ -21,7 +21,7 @@ from playwright.async_api import async_playwright
 
 from graph_engine.budget import Budget
 from graph_engine.explorer import StateGraphExplorer
-from graph_engine.models import AnalysisTarget, Evidence, State, Transition, Verdict
+from graph_engine.models import AnalysisTarget, Evidence, EvidenceScope, State, Transition, Verdict
 
 
 def _serialise(target: AnalysisTarget, states: list[State],
@@ -111,7 +111,7 @@ async def _run_classification(
     # ---- bundle -----------------------------------------------------------
     bundle = build_evidence_bundle(
         target_url=target.input_url,
-        canonical_url=target.canonical_url,
+        canonical_url=target.final_url,
         states=states,
         transitions=transitions,
         evidence=evidence,
@@ -144,6 +144,11 @@ async def _run_classification(
 
 
 async def _main(args: argparse.Namespace) -> None:
+    # ── L0 ingestion (refang → unwrap → extract → canonicalize) ──────────
+    from graph_engine.ingestion.pipeline import ingest
+
+    ingested = ingest(args.url)
+
     budget = Budget(
         max_depth=args.max_depth,
         max_nodes=args.max_nodes,
@@ -155,11 +160,45 @@ async def _main(args: argparse.Namespace) -> None:
         try:
             explorer = StateGraphExplorer(browser)
             target = await explorer.run(
-                args.url,
+                ingested["canonical_url"],
                 budget=budget,
                 capture_artifacts=not args.no_artifacts,
                 top_n_actions=args.top_n_actions,
             )
+
+            # ── Patch target with L0 fields ──────────────────────────────
+            target.input_url = ingested["input_url"]
+            target.canonical_url = ingested["canonical_url"]
+            target.url_hash = ingested["url_hash"]
+
+            # ── Register L0 Evidence ─────────────────────────────────────
+            import uuid as _uuid  # alias to avoid collision with the stdlib
+
+            tid = target.id
+            for i, step in enumerate(ingested["unwrap_chain"]):
+                explorer.evidence.append(Evidence(
+                    target_id=tid,
+                    scope=EvidenceScope.target,
+                    scope_id=tid,
+                    layer="L0",
+                    key=f"unwrap_step_{i}",
+                    value=(
+                        f"{step['wrapper_type']}: "
+                        f"{step['input_url']} → {step['output_url']}"
+                        f"{' [opaque]' if step.get('opaque') else ''}"
+                    ),
+                    produced_by="ingestion.unwrap",
+                ))
+            for payload in ingested["nested_payloads"]:
+                explorer.evidence.append(Evidence(
+                    target_id=tid,
+                    scope=EvidenceScope.target,
+                    scope_id=tid,
+                    layer="L0",
+                    key=f"nested_payload_{payload['kind']}",
+                    value=payload["decoded"],
+                    produced_by="ingestion.payload_extraction",
+                ))
 
             verdict: Optional[Verdict] = None
             if args.classify:

@@ -37,6 +37,7 @@ def test_analysis_target_defaults():
     assert isinstance(target.id, uuid.UUID)
     assert target.input_url == "https://example.com"
     assert target.canonical_url is None
+    assert target.final_url is None
     assert target.url_hash is None
     assert target.status == TargetStatus.queued
     assert target.root_state_id is None
@@ -49,10 +50,12 @@ def test_analysis_target_explicit():
         input_url="https://evil.example/login",
         canonical_url="https://evil.example/login",
         url_hash="abc123",
+        final_url="https://evil.example/login?redirected=true",
         status=TargetStatus.running,
         root_state_id=root_id,
     )
     assert target.canonical_url == "https://evil.example/login"
+    assert target.final_url == "https://evil.example/login?redirected=true"
     assert target.url_hash == "abc123"
     assert target.status == TargetStatus.running
     assert target.root_state_id == root_id

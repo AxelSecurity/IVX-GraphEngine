@@ -1,6 +1,6 @@
 """Actionable element scoring for interactive BFS transitions.
 
-Implements the "Actionable scoring" section from ARCHITECTURE_L4.md:
+Implements the "Actionable scoring" section from ARCHITECTURE.md:
 enumerate every visible button / link / role=button / input[type=submit],
 score each one by keyword match + visual salience + position, and return
 the list sorted by combined score descending.

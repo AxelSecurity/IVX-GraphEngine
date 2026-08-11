@@ -86,7 +86,7 @@ Tutti modelli Pydantic v2 con `from __future__ import annotations`:
 
 Questi vincoli non devono mai essere violati. Se una modifica li contraddice, va bloccata.
 
-1. **Classificazione Foundry stateless**: ogni chiamata `classify()` crea un **nuovo** thread e lo cancella dopo l'uso. I thread ID non vengono MAI riutilizzati tra analisi. Questo vincolo esiste perché un bug storico (2026-08) causava falsi positivi: la memoria conversazionale di Foundry faceva "ricordare" campi credential di un caso phishing precedente durante l'analisi di un URL benigno. La funzione `_new_thread_id(client)` è estratta come separata proprio per permettere ai test di verificare questo vincolo. Vedi `docs/ARCHITECTURE_L4.md § L5 — Classificazione`.
+1. **Classificazione Foundry stateless**: ogni chiamata `classify()` crea un **nuovo** thread e lo cancella dopo l'uso. I thread ID non vengono MAI riutilizzati tra analisi. Questo vincolo esiste perché un bug storico (2026-08) causava falsi positivi: la memoria conversazionale di Foundry faceva "ricordare" campi credential di un caso phishing precedente durante l'analisi di un URL benigno. La funzione `_new_thread_id(client)` è estratta come separata proprio per permettere ai test di verificare questo vincolo. Vedi `docs/ARCHITECTURE.md § L5 — Classificazione`.
 
 2. **Nessuna injection di credenziali**: la funzionalità è stata completamente rimossa (2026-08-09). File eliminati: `credential_injection.py`, `canary_identity.py` e relativi test. Rimosse ~155 righe da `explorer.py` (`_handle_credential_submit`, ramo `form_submit`). Il progetto classifica passivamente — non riempie né invia mai form. I test verificano l'assenza di chiavi evidenza come `canary_email_submit_endpoint`, `otp_stage_reached`, ecc.
 

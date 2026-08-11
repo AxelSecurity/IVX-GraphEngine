@@ -1,6 +1,6 @@
 """DOM normalisation and content-based hashing.
 
-Implements the strategy described in ARCHITECTURE_L4.md:
+Implements the strategy described in ARCHITECTURE.md:
 - Strip nonces, CSRF tokens, timestamps, UUIDs from attributes / text.
 - Sort attributes alphabetically.
 - Return SHA-256 of the canonical serialised tree.

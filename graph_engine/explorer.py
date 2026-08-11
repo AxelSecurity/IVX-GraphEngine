@@ -1,6 +1,6 @@
 """BFS state-graph explorer — passive redirects + click interactions.
 
-Implements the BFS loop from ARCHITECTURE_L4.md using Playwright async API.
+Implements the BFS loop from ARCHITECTURE.md using Playwright async API.
 Handles passive transitions (http_3xx, meta_refresh, js_location) and the
 first interactive transition: click on scored actionable elements.
 """
@@ -217,7 +217,7 @@ class StateGraphExplorer:
                 return self.target
 
             self.target.root_state_id = root_state.id
-            self.target.canonical_url = root_state.url
+            self.target.final_url = root_state.url
             self.states.append(root_state)
             self._node_count += 1
 

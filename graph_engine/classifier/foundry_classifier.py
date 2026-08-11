@@ -13,7 +13,7 @@ CRITICAL DESIGN CONSTRAINT — read before modifying:
     high-confidence phishing verdicts for legitimate sites.
 
     Stateless isolation is therefore NON-NEGOTIABLE for correctness.
-    See docs/ARCHITECTURE_L4.md § L5 — Classificazione.
+    See docs/ARCHITECTURE.md § L5 — Classificazione.
 """
 
 from __future__ import annotations
