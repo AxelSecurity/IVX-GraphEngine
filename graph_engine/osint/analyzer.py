@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import httpx
 
 from graph_engine.osint.certificate_transparency import query_crtsh
+from graph_engine.osint.dns_resolve import resolve_dns
 from graph_engine.osint.rdap import query_rdap
 from graph_engine.osint.reputation.registry import get_enabled_providers
 
@@ -94,14 +95,16 @@ async def analyze(canonical_url: str) -> dict:
 
         crtsh_task = query_crtsh(hostname, client)
         rdap_task = query_rdap(hostname, client)
+        dns_task = resolve_dns(hostname)
         rep_tasks = [p.check(canonical_url, client) for p in providers]
 
-        all_tasks = [crtsh_task, rdap_task] + rep_tasks
+        all_tasks = [crtsh_task, rdap_task, dns_task] + rep_tasks
         results = await _gather_ignore_exceptions(*all_tasks)
 
         crtsh_result = results[0]
         rdap_result = results[1]
-        rep_results = results[2:]
+        dns_result = results[2]
+        rep_results = results[3:]
 
         # ── crt.sh: domini fratelli ────────────────────────────────────
         if isinstance(crtsh_result, dict):
@@ -177,6 +180,39 @@ async def analyze(canonical_url: str) -> dict:
             evidence.append(_make_evidence(
                 key="provider_unavailable",
                 value={"provider": "rdap", "reason": str(rdap_result)},
+                weight=0.0,
+            ))
+
+        # ── DNS: record A e AAAA ─────────────────────────────────────
+        if isinstance(dns_result, dict):
+            if dns_result.get("error"):
+                evidence.append(_make_evidence(
+                    key="provider_unavailable",
+                    value={"provider": "dns", "reason": dns_result["error"]},
+                    weight=0.0,
+                ))
+            else:
+                a_records = dns_result.get("a_records", [])
+                aaaa_records = dns_result.get("aaaa_records", [])
+                if a_records:
+                    evidence.append(_make_evidence(
+                        key="dns_a_records",
+                        value={"addresses": a_records},
+                        weight=0.0,
+                    ))
+                if aaaa_records:
+                    evidence.append(_make_evidence(
+                        key="dns_aaaa_records",
+                        value={"addresses": aaaa_records},
+                        weight=0.0,
+                    ))
+                # MAI evidenza per l'assenza di record — coerente con il
+                # principio del progetto
+        else:
+            # Eccezione catturata da asyncio.gather
+            evidence.append(_make_evidence(
+                key="provider_unavailable",
+                value={"provider": "dns", "reason": str(dns_result)},
                 weight=0.0,
             ))
 

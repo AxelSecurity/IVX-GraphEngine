@@ -19,6 +19,9 @@ class TestAnalyzerIntegration:
             "graph_engine.osint.analyzer.query_rdap",
             new_callable=AsyncMock,
         ) as mock_rdap, patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+        ) as mock_dns, patch(
             "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
             new_callable=AsyncMock,
         ) as mock_urlhaus:
@@ -36,6 +39,11 @@ class TestAnalyzerIntegration:
                 "registrar": "TestReg",
                 "nameservers": ["ns1.test.com"],
             }
+            mock_dns.return_value = {
+                "a_records": ["93.184.216.34"],
+                "aaaa_records": [],
+                "error": None,
+            }
             mock_urlhaus.return_value = {
                 "provider": "urlhaus",
                 "listed": True,
@@ -47,6 +55,7 @@ class TestAnalyzerIntegration:
             # Tutte le fonti devono essere state chiamate
             mock_crtsh.assert_called_once()
             mock_rdap.assert_called_once()
+            mock_dns.assert_called_once()
             mock_urlhaus.assert_called_once()
 
     async def test_one_source_failure_doesnt_block_others(self):
@@ -58,6 +67,9 @@ class TestAnalyzerIntegration:
             "graph_engine.osint.analyzer.query_rdap",
             new_callable=AsyncMock,
         ) as mock_rdap, patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+        ) as mock_dns, patch(
             "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
             new_callable=AsyncMock,
         ) as mock_urlhaus:
@@ -69,6 +81,12 @@ class TestAnalyzerIntegration:
                 "domain_age_days": 5,
                 "registrar": "TestReg",
                 "nameservers": [],
+            }
+            # DNS funziona
+            mock_dns.return_value = {
+                "a_records": ["1.2.3.4"],
+                "aaaa_records": [],
+                "error": None,
             }
             # URLhaus funziona
             mock_urlhaus.return_value = {
@@ -89,6 +107,13 @@ class TestAnalyzerIntegration:
                 if e["key"] == "domain_age_days"
             ]
             assert len(age_ev) == 1  # 5 giorni → young
+
+            # Deve contenere evidenza DNS (funziona)
+            dns_ev = [
+                e for e in result["evidence"]
+                if e["key"] == "dns_a_records"
+            ]
+            assert len(dns_ev) == 1
 
             # crt.sh deve aver fallito → evidenza provider_unavailable
             unavail = [
@@ -117,6 +142,11 @@ class TestAnalyzerIntegration:
             return_value={"domain_age_days": 7, "registrar": "BadReg",
                           "nameservers": []},
         ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value={"a_records": ["1.2.3.4"], "aaaa_records": [],
+                          "error": None},
+        ), patch(
             "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
             new_callable=AsyncMock,
             return_value={"provider": "urlhaus", "listed": False,
@@ -139,6 +169,11 @@ class TestAnalyzerIntegration:
             new_callable=AsyncMock,
             return_value={"domain_age_days": 365, "registrar": "GoodReg",
                           "nameservers": []},
+        ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value={"a_records": ["93.184.216.34"], "aaaa_records": [],
+                          "error": None},
         ), patch(
             "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
             new_callable=AsyncMock,
@@ -172,6 +207,11 @@ class TestAnalyzerIntegration:
             return_value={"domain_age_days": 2, "registrar": "Bad",
                           "nameservers": []},
         ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value={"a_records": ["1.2.3.4"], "aaaa_records": [],
+                          "error": None},
+        ), patch(
             "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
             new_callable=AsyncMock,
             return_value={"provider": "urlhaus", "listed": True,
@@ -197,6 +237,11 @@ class TestAnalyzerIntegration:
             return_value={"domain_age_days": 10, "registrar": "R",
                           "nameservers": []},
         ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value={"a_records": ["93.184.216.34"],
+                          "aaaa_records": ["::1"], "error": None},
+        ), patch(
             "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
             new_callable=AsyncMock,
             return_value={"provider": "urlhaus", "listed": False,
@@ -221,6 +266,11 @@ class TestAnalyzerIntegration:
             new_callable=AsyncMock,
             return_value={"domain_age_days": 365, "registrar": "OldReg",
                           "nameservers": []},
+        ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value={"a_records": ["93.184.216.34"], "aaaa_records": [],
+                          "error": None},
         ), patch(
             "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
             new_callable=AsyncMock,

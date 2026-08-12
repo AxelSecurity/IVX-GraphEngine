@@ -21,6 +21,7 @@ from typing import Optional
 TTL_RDAP = 86_400       # 24 ore — i dati WHOIS cambiano molto raramente
 TTL_CRTSH = 21_600      # 6 ore — nuovi certificati possono comparire
 TTL_URLHAUS = 3_600     # 1 ora — feed di minacce, più dinamico
+TTL_DNS = 3_600         # 1 ora — i record DNS possono cambiare, ma non frequentemente
 TTL_IANA_BOOTSTRAP = 2_592_000  # 30 giorni — la mappatura TLD→server RDAP è stabile
 
 # ---------------------------------------------------------------------------

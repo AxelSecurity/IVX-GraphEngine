@@ -212,6 +212,7 @@ il target. Tutte le query sono in **parallelo** (`asyncio.gather` con
 | **crt.sh** | Certificate Transparency | `https://crt.sh/?q=<domain>&output=json` | 6 ore |
 | **RDAP** | WHOIS moderno (via bootstrap IANA) | `https://data.iana.org/rdap/dns.json` → server TLD-specifico | 24 ore |
 | **URLhaus** | Reputation / threat feed | `https://urlhaus-api.abuse.ch/v1/url/` | 1 ora |
+| **DNS** | Risoluzione A/AAAA | `loop.getaddrinfo` (asyncio nativo, nessuna dipendenza esterna) | 1 ora |
 
 ### Adapter predisposti (disabilitati di default)
 
@@ -238,6 +239,14 @@ rileva le variabili a runtime e istanzia i provider.
 
 - **Reputation hit** (`reputation_hit`): URL presente in un feed di
   minacce (es. URLhaus). Peso 0.50 (il più alto).
+
+- **Record A** (`dns_a_records`): indirizzi IPv4 risolti per il dominio.
+  Peso 0.0 (informativo). Colma una lacuna IOC: gli IP servono ai
+  consumatori a valle (Horus/IntelIVX) per correlazione infrastrutturale,
+  geolocalizzazione, e lookup ASN.
+
+- **Record AAAA** (`dns_aaaa_records`): indirizzi IPv6 risolti per il
+  dominio. Peso 0.0 (informativo). Stessa semantica dei record A.
 
 - **Provider unavailable** (`provider_unavailable`): per ogni fonte
   che fallisce, evidenza con weight=0.0 (informativa, non contribuisce
@@ -283,6 +292,7 @@ graph_engine/osint/
     analyzer.py          — orchestratore parallelo
     cache.py             — cache filesystem con TTL
     certificate_transparency.py — crt.sh
+    dns_resolve.py       — risoluzione DNS A/AAAA (asyncio nativo)
     rdap.py              — RDAP con bootstrap IANA
     reputation/
         __init__.py

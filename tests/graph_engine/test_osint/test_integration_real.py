@@ -92,3 +92,27 @@ class TestRealUrlhaus:
 
         assert result["listed"] is False
         assert result["details"].get("query_status") == "no_results"
+
+
+@pytest.mark.integration
+class TestRealDns:
+    """Risoluzione DNS reale su hostname stabili."""
+
+    async def test_dns_real_google_has_a_records(self):
+        """google.com deve risolvere con almeno un record A (formato IPv4)."""
+        from graph_engine.osint.dns_resolve import resolve_dns
+
+        result = await resolve_dns("google.com")
+
+        if result.get("error"):
+            pytest.skip(f"DNS temporaneamente non disponibile: {result['error']}")
+            return
+
+        assert len(result["a_records"]) > 0, (
+            "google.com deve avere almeno un record A"
+        )
+        # Verifica formato IPv4 su ogni record
+        import ipaddress
+        for addr in result["a_records"]:
+            ip = ipaddress.ip_address(addr)
+            assert ip.version == 4, f"Atteso IPv4, ottenuto {addr}"
