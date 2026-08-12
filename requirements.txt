@@ -17,3 +17,5 @@ tldextract>=5.0  # Public Suffix List ufficiale — sostituisce lista TLD manual
 httpx>=0.28.0  # HTTP client asincrono — L2 OSINT, coerenza con architettura async
 aiosqlite>=0.20.0  # async SQLite — persistenza append-only
 mmh3>=5.0  # MurmurHash3 — favicon hash (stile Shodan/Censys) per L3
+fastapi>=0.115.0  # HTTP API — interfaccia asincrona per dashboard/consumatori
+uvicorn[standard]>=0.30.0  # Server ASGI — avvio: uvicorn graph_engine.api.app:app --reload

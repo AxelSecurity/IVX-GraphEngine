@@ -494,3 +494,80 @@ salvati come TEXT, i datetime in ISO-8601, gli enum come TEXT.
   senza eseguire una nuova analisi.
 - Ogni `python -m graph_engine.cli <url>` salva automaticamente al termine
   dell'esplorazione — nessun flag aggiuntivo richiesto.
+
+## API HTTP (FastAPI)
+
+L'API espone la pipeline L0→L5 come endpoint REST asincroni. È il punto
+d'ingresso per tutti i consumatori futuri (dashboard web, tool interni)
+diversi dal wrapper Trellix.
+
+### Design
+
+- **Nessuna coda esterna** (no Redis, no Celery). Lo stato dei job è
+  persistito su SQLite tramite `AnalysisTarget.status`.
+- **Lifecycle**: `queued` → `running` → `done` | `error`.
+- **Fire-and-forget**: la POST risponde subito con 202; il job gira in
+  background via `asyncio.create_task`.
+- **Race-free**: il target viene salvato come `queued` (con `await`) prima
+  di lanciare il task — un GET immediato sull'id restituito non darà mai 404.
+- **Browser Playwright**: aperto solo durante L4 e chiuso prima di L5 (il
+  classificatore non ha bisogno del browser).
+- **Runner riusabile**: `run_full_analysis(raw_url, budget, classify)` è
+  usato sia dalla route POST che dal wrapper Trellix.
+
+### Endpoint
+
+| Metodo | Path | Descrizione | Status code |
+|---|---|---|---|
+| `POST` | `/analyses` | Submit a new analysis | 202 |
+| `GET` | `/analyses/{id}` | Analysis status + counts | 200 / 404 |
+| `GET` | `/analyses/{id}/graph` | Full graph (states, transitions, evidence, verdict) | 200 / 404 |
+| `GET` | `/analyses/{id}/artifacts` | List artifact files (screenshot, DOM, HAR) | 200 / 404 |
+| `GET` | `/analyses/history?url=` or `?url_hash=` | Past analyses for the same URL | 200 / 422 |
+| `GET` | `/health` | Health check + running job count | 200 |
+
+### Avvio
+
+```bash
+uvicorn graph_engine.api.app:app --reload
+```
+
+L'app va avviata dalla root del progetto (i path `data/` sono relativi).
+
+### Architettura del package
+
+```
+graph_engine/api/
+    __init__.py
+    app.py               — FastAPI app factory (create_app)
+    routes.py            — 6 endpoint, factory con db_path/artifact_root iniettabili
+    pipeline_runner.py   — run_full_analysis(): orchestrazione L0→L5, lifecycle status
+    schemas.py           — modelli Pydantic request/response (distinti dal dominio)
+```
+
+### Test
+
+I test API usano `httpx.AsyncClient` + `ASGITransport` (nessun server reale).
+La pipeline è interamente mockata (nessun browser Playwright, nessuna rete):
+
+- **`FakePlaywright`** sostituisce `async_playwright()`
+- **`FakeExplorer`** sostituisce `StateGraphExplorer`
+- **`_fake_l2` / `_fake_l3`** sostituiscono gli analyzer OSINT e Active
+- L1 (lexical) è sync e non ha bisogno di mock async
+- `ingest()` (L0) **non** è mockato — è puro e offline
+
+I test verificano:
+- La race 202→GET 404 è chiusa
+- Il lifecycle status (queued → done) funziona
+- L'error path salva lo stato `error` con evidence `pipeline_error`
+- Il re-parenting (UUID esploratore → UUID API) è corretto
+- Gli endpoint history, artifacts e health rispondono correttamente
+
+### Limitazioni
+
+- **Multi-worker**: se si usano più worker uvicorn, i job girano nel worker
+  che ha ricevuto la richiesta. Lo stato su SQLite è la fonte di verità
+  condivisa, ma non c'è bilanciamento del carico tra worker.
+- **Nessuna autenticazione**: l'API è pensata per uso interno. Autenticazione
+  e autorizzazione vanno aggiunte prima di esporla su rete.
+- **Nessuna cancellazione**: non esiste un endpoint `DELETE /analyses/{id}`.
