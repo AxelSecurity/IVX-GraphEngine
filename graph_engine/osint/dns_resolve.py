@@ -11,10 +11,13 @@ ri-risolvere lo stesso hostname entro il TTL (1 ora).
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 from typing import Optional
 
 from graph_engine.osint.cache import TTL_DNS, cache_get, cache_set
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Timeout
@@ -43,6 +46,12 @@ async def resolve_dns(hostname: str) -> dict:
         Non rilancia MAI eccezioni — gli errori diventano ``error`` popolato
         e liste vuote.
     """
+    # ── Normalizzazione ─────────────────────────────────────────────────
+    # DNS è case-insensitive; il dot finale (FQDN) è irrilevante.
+    # Normalizziamo PRIMA della cache e di getaddrinfo — difesa in
+    # profondità anche se l'analyzer L2 normalizza già a monte.
+    hostname = hostname.lower().strip(".")
+
     # ── Cache ──────────────────────────────────────────────────────────
     cached = cache_get("dns", hostname, TTL_DNS)
     if cached is not None:
@@ -76,10 +85,19 @@ async def resolve_dns(hostname: str) -> dict:
             _resolve(socket.AF_INET6),
         )
     except Exception as exc:
+        # _resolve() cattura già internamente TimeoutError e OSError
+        # (i normali fallimenti DNS/rete) e ritorna [] per quei casi.
+        # Qualsiasi eccezione che arriva fin qui è INATTESA — un
+        # probabile bug di programmazione, non un fallimento operativo.
+        # Logghiamo il traceback completo così che sia visibile nei log,
+        # e marchiamo il risultato con unexpected=True per chi consuma
+        # il dato a valle.
+        logger.exception("Unexpected error during DNS resolution for %r", hostname)
         result = {
             "a_records": [],
             "aaaa_records": [],
             "error": f"DNS resolution failed: {exc}",
+            "unexpected": True,
         }
         cache_set("dns", hostname, result)
         return result

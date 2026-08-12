@@ -98,6 +98,12 @@ class TestDnsResolve:
         assert result["aaaa_records"] == []
         assert result["error"] is not None
         assert "No DNS records found" in result["error"]
+        # I fallimenti NORMALI (NXDOMAIN) NON devono avere unexpected=True:
+        # quel flag è riservato ai bug di programmazione inattesi
+        assert result.get("unexpected") is None, (
+            f"NXDOMAIN non deve avere unexpected=True; "
+            f"ottenuto unexpected={result.get('unexpected')}"
+        )
 
     async def test_timeout_returns_error(self):
         """Timeout → error popolato, mai eccezione."""
@@ -200,3 +206,69 @@ class TestDnsCache:
             f"getaddrinfo chiamato {call_count} volte — "
             f"attese 4 (2 per hostname: A+AAAA ciascuno)"
         )
+
+    async def test_hostname_case_normalized_for_cache(self, tmp_path, monkeypatch):
+        """"Example.COM" e "example.com" → stesso risultato dalla cache.
+        La normalizzazione .lower() deve rendere le due chiavi identiche."""
+        monkeypatch.setattr(
+            "graph_engine.osint.cache._CACHE_ROOT", tmp_path / "osint_cache"
+        )
+
+        call_count = 0
+
+        async def mock_getaddrinfo(host, port, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            # Verifichiamo che getaddrinfo riceva SEMPRE hostname.lower()
+            assert host == host.lower(), (
+                f"getaddrinfo ha ricevuto hostname NON normalizzato: {host!r}"
+            )
+            if kwargs.get("family") == socket.AF_INET:
+                return _fake_addrinfo("93.184.216.34")
+            raise socket.gaierror("No AAAA")
+
+        with patch.object(
+            asyncio.get_running_loop(), "getaddrinfo", side_effect=mock_getaddrinfo
+        ):
+            result1 = await resolve_dns("Example.COM")
+            result2 = await resolve_dns("example.com")
+
+        # Stesso risultato
+        assert result1["a_records"] == result2["a_records"] == ["93.184.216.34"]
+        # Seconda chiamata deve essere cache hit → getaddrinfo chiamato
+        # solo 2 volte (A+AAAA per la prima risoluzione), non 4
+        assert call_count == 2, (
+            f"getaddrinfo chiamato {call_count} volte — "
+            f"la normalizzazione .lower() non ha funzionato sulla cache "
+            f"(attese 2: solo la prima risoluzione)"
+        )
+
+    async def test_unexpected_exception_logged_and_marked(self):
+        """Un TypeError inatteso → logging.exception + unexpected=True."""
+        from unittest.mock import MagicMock as _MagicMock
+
+        import graph_engine.osint.dns_resolve as dns_mod
+
+        mock_loop = _MagicMock()
+        # Solleviamo RuntimeError: NON è sottoclasse di OSError, quindi
+        # _resolve() NON lo cattura. Propaga attraverso asyncio.gather
+        # fino al except Exception esterno.
+        mock_loop.getaddrinfo.side_effect = RuntimeError(
+            "bug inatteso nel lookup"
+        )
+
+        with patch.object(
+            dns_mod.asyncio, "get_running_loop", return_value=mock_loop,
+        ):
+            result = await resolve_dns("buggy.example.com")
+
+        # Il risultato deve avere unexpected=True.
+        # logger.exception(...) è strutturalmente garantito: è nello
+        # stesso blocco except di unexpected=True, senza branching.
+        assert result.get("unexpected") is True, (
+            f"Atteso unexpected=True per bug di programmazione, "
+            f"ottenuto {result.get('unexpected')!r}"
+        )
+        assert result["a_records"] == []
+        assert result["aaaa_records"] == []
+        assert "DNS resolution failed" in result["error"]
