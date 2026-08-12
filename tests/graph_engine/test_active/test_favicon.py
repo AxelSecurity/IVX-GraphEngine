@@ -112,6 +112,29 @@ class TestFaviconHash:
 
         assert result is None
 
+    def test_explicit_params_equal_defaults(self):
+        """I parametri espliciti (seed=0, signed=True) devono produrre lo
+        stesso hash dei default correnti di mmh3.hash().
+
+        Se in futuro aggiornate mmh3 e questo test fallisce, significa che
+        i default sono cambiati — il codice in favicon.py è protetto perché
+        usa parametri espliciti, ma QUESTO test esiste per segnalare subito
+        il mismatch, invece di scoprirlo da un hash sbagliato in produzione.
+        """
+        raw_bytes = _KNOWN_FAVICON_BYTES
+        encoded = base64.encodebytes(raw_bytes)
+
+        hash_explicit = mmh3.hash(encoded, seed=0, signed=True)
+        hash_default = mmh3.hash(encoded)
+
+        assert hash_explicit == hash_default, (
+            f"ATTENZIONE: i default di mmh3.hash() sono cambiati!\n"
+            f"  Esplicito (seed=0, signed=True): {hash_explicit}\n"
+            f"  Default (mmh3.hash()):          {hash_default}\n"
+            f"  Il codice in favicon.py è protetto (usa parametri espliciti),\n"
+            f"  ma questo test esiste per segnalare il mismatch."
+        )
+
     async def test_uses_root_favicon_ico(self):
         """Verifica che venga interrogato /favicon.ico sulla root del dominio."""
         client = AsyncMock(spec=httpx.AsyncClient)

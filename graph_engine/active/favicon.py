@@ -5,11 +5,14 @@ L'algoritmo è ESATTAMENTE:
 1. Scarica i byte grezzi del favicon
 2. ``encoded = base64.encodebytes(raw_bytes)`` — con a-capo MIME ogni 76
    caratteri (NON ``base64.b64encode`` che produce una stringa continua)
-3. ``h = mmh3.hash32(encoded)`` — MurmurHash3 32-bit CON segno (signed int)
+3. ``h = mmh3.hash(encoded, seed=0, signed=True)`` — MurmurHash3 32-bit
+   CON segno (signed int). I parametri sono ESPLICITI per blindare la
+   convenzione Shodan/Censys contro futuri cambi di default di mmh3.
+   (mmh3 v5.x ha rimosso ``hash32()`` — non ci fidiamo dei default.)
 
 Nota: Shodan pubblica il valore come intero CON segno a 32-bit.
-``mmh3.hash32`` restituisce già un signed int, quindi nessuna conversione
-necessaria.
+``mmh3.hash`` con ``signed=True`` restituisce già un signed int,
+quindi nessuna conversione necessaria.
 
 LIMITAZIONE ATTUALE: per semplicità in questa fase, proviamo SOLO
 ``/favicon.ico`` sulla root del dominio. Il parsing del link
@@ -67,7 +70,11 @@ async def fetch_favicon_hash(
         # 1. base64.encodebytes (MIME-style, con a-capo ogni 76 caratteri)
         # 2. mmh3.hash (32-bit signed MurmurHash3 — API mmh3 >= 5.0)
         encoded = base64.encodebytes(raw_bytes)
-        favicon_hash = mmh3.hash(encoded)
+        # Parametri ESPLICITI (seed=0, signed=True): blindano la convenzione
+        # Shodan/Censys contro futuri cambi di default della libreria mmh3.
+        # v5.x ha già rimosso hash32() — non vogliamo che un cambio di default
+        # in v6.x produca hash sbagliati senza alcun errore visibile.
+        favicon_hash = mmh3.hash(encoded, seed=0, signed=True)
 
         return {
             "favicon_hash": favicon_hash,
