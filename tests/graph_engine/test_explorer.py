@@ -152,6 +152,53 @@ class TestMetaRefresh:
 
 
 # ---------------------------------------------------------------------------
+# Explicit target_id
+# ---------------------------------------------------------------------------
+
+
+class TestExplicitTargetId:
+    @patch("graph_engine.explorer.asyncio.sleep", new_callable=AsyncMock)
+    async def test_explicit_target_id_preserved(self, mock_sleep):
+        """Quando target_id viene passato esplicitamente, il target
+        esplorato DEVE avere quell'UUID — non uno generato internamente."""
+        import uuid as _uuid
+
+        page = _mock_page()
+        browser, _ = _mock_browser(page)
+        explorer = StateGraphExplorer(browser)
+
+        explicit_id = _uuid.uuid4()
+        target = await explorer.run(
+            "https://example.com",
+            budget=Budget(),
+            target_id=explicit_id,
+        )
+
+        assert target.id == explicit_id
+        # Anche gli stati figli devono nascere con lo stesso target_id
+        for state in explorer.states:
+            assert state.target_id == explicit_id
+
+    @patch("graph_engine.explorer.asyncio.sleep", new_callable=AsyncMock)
+    async def test_no_target_id_generates_new(self, mock_sleep):
+        """Se target_id NON viene passato, il target riceve un UUID
+        generato internamente — comportamento invariato."""
+        page = _mock_page()
+        browser, _ = _mock_browser(page)
+        explorer = StateGraphExplorer(browser)
+
+        target = await explorer.run("https://example.com", budget=Budget())
+
+        # Deve essere un UUID valido (36 caratteri, 4 trattini)
+        tid = str(target.id)
+        assert len(tid) == 36
+        assert tid.count("-") == 4
+        # Gli stati devono avere lo stesso target_id
+        for state in explorer.states:
+            assert state.target_id == target.id
+
+
+# ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------
 

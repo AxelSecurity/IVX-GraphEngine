@@ -63,7 +63,7 @@ class FakePlaywright:
 
 class FakeExplorer:
     """Sostituisce ``StateGraphExplorer``: ``run()`` popola target e stati
-    senza aprire un browser."""
+    senza aprire un browser.  Accetta ``target_id`` come l'esploratore reale."""
 
     def __init__(self, browser):
         self.browser = browser
@@ -79,8 +79,13 @@ class FakeExplorer:
         capture_artifacts: bool = True,
         top_n_actions: int = 3,
         profile=None,
+        target_id=None,
     ) -> AnalysisTarget:
+        import uuid as _uuid
+
+        tid = target_id if target_id is not None else _uuid.uuid4()
         self.target = AnalysisTarget(
+            id=tid,
             input_url=start_url,
             final_url=start_url,
             status=TargetStatus.done,
@@ -98,11 +103,41 @@ class FakeExplorer:
         return self.target
 
 
-class ExplodingExplorer(FakeExplorer):
-    """Sostituisce StateGraphExplorer con uno che esplode."""
+class PartialExplodingExplorer(FakeExplorer):
+    """Esploratore che popola 3 stati e POI esplode durante L5.
+
+    Simula il caso reale in cui L4 produce stati con successo ma qualcosa
+    a valle (es. classificazione L5) fallisce.  I 3 stati DEVONO
+    sopravvivere nel DB nonostante lo status finale sia ``error``.
+    """
 
     async def run(self, *args, **kwargs) -> AnalysisTarget:
-        raise RuntimeError("Boom! Simulated explorer failure")
+        # Popola il target e 3 stati normalmente
+        target = await super().run(*args, **kwargs)
+        s2 = State(
+            target_id=target.id,
+            url=f"{kwargs.get('start_url', args[0] if args else '/page2')}",
+            dom_hash="h1",
+            depth=1,
+        )
+        s3 = State(
+            target_id=target.id,
+            url=f"{kwargs.get('start_url', args[0] if args else '/page3')}",
+            dom_hash="h2",
+            depth=2,
+        )
+        self.states.extend([s2, s3])
+        return target
+
+
+class ExplodingAfterExplorer(PartialExplodingExplorer):
+    """Esploratore che popola stati e POI esplode — simula un fallimento
+    a valle di L4 (es. L5 che lancia un'eccezione)."""
+
+    async def run(self, *args, **kwargs) -> AnalysisTarget:
+        target = await super().run(*args, **kwargs)
+        raise RuntimeError("Boom! L5 classification exploded")
+
 
 
 # ---------------------------------------------------------------------------

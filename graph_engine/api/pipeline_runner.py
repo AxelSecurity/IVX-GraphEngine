@@ -48,50 +48,6 @@ DEFAULT_ARTIFACT_ROOT = Path("data") / "graph_artifacts"
 
 
 # ---------------------------------------------------------------------------
-# Re-parenting — l'esploratore genera un proprio UUID, l'API ne usa un altro
-# ---------------------------------------------------------------------------
-
-
-def _reparent(
-    target_id,  # uuid.UUID — l'id API (pre-creato)
-    explorer,    # StateGraphExplorer appena eseguito (ha .target, .states, …)
-    artifact_root: Path = DEFAULT_ARTIFACT_ROOT,
-) -> None:
-    """Riscrive ``target_id`` su tutti i record figli dell'esploratore e
-    rinomina la directory artefatti per allinearla all'id API.
-
-    ``StateGraphExplorer.run()`` crea internamente un ``AnalysisTarget``
-    con un proprio UUID.  L'API però pre-crea un target con l'UUID che
-    restituisce al chiamante — dobbiamo **re-parentare** i record prodotti
-    dall'esploratore sotto l'UUID API, altrimenti le foreign key falliscono.
-    """
-    old_id = str(explorer.target.id)
-    new_id = str(target_id)
-
-    if old_id == new_id:
-        return
-
-    # Riscrivi target_id su tutti i record figli
-    for s in explorer.states:
-        s.target_id = target_id
-    for t in explorer.transitions:
-        t.target_id = target_id
-    for e in explorer.evidence:
-        e.target_id = target_id
-
-    # Rinomina directory artefatti e aggiorna i riferimenti nei path
-    old_dir = artifact_root / old_id
-    new_dir = artifact_root / new_id
-    if old_dir.exists() and old_dir != new_dir:
-        old_dir.rename(new_dir)
-        for s in explorer.states:
-            for attr in ("screenshot_ref", "har_ref"):
-                ref = getattr(s, attr)
-                if ref and old_id in ref:
-                    setattr(s, attr, ref.replace(old_id, new_id))
-
-
-# ---------------------------------------------------------------------------
 # Classificazione L5 — estratta da cli.py per riuso
 # ---------------------------------------------------------------------------
 
@@ -239,6 +195,7 @@ async def run_full_analysis(
     transitions: list[Transition] = []
     evidence: list[Evidence] = []
     verdict: Optional[Verdict] = None
+    explorer = None  # inizializzato prima del try per il controllo nell'except
 
     try:
         # ── L0 ingestion (sync, puro — refang/unwrap/canonicalize) ────────
@@ -279,6 +236,7 @@ async def run_full_analysis(
                     capture_artifacts=capture_artifacts,
                     top_n_actions=top_n_actions,
                     profile=l3_result["recommended_profile"],
+                    target_id=analysis_target.id,
                 )
             finally:
                 await browser.close()
@@ -287,13 +245,12 @@ async def run_full_analysis(
         transitions = explorer.transitions
         evidence = explorer.evidence
 
-        # ── Patch L0 + re-parenting sotto l'id API ────────────────────────
+        # ── Patch L0 fields sull'AnalysisTarget ─────────────────────────
         analysis_target.input_url = ingested["input_url"]
         analysis_target.canonical_url = ingested["canonical_url"]
         analysis_target.url_hash = ingested["url_hash"]
         analysis_target.final_url = explored.final_url
         analysis_target.root_state_id = explored.root_state_id
-        _reparent(analysis_target.id, explorer)
 
         tid = analysis_target.id
 
@@ -364,10 +321,14 @@ async def run_full_analysis(
     except Exception as exc:
         logger.exception("Pipeline failed for %s", analysis_target.id)
 
-        # Error path minimale: SOLO target + pipeline_error evidence.
-        # I partial states dell'esploratore NON vengono salvati perché il
-        # loro target_id (UUID interno) non corrisponde all'API target_id →
-        # violerebbero le FK con PRAGMA foreign_keys=ON.
+        # Ora che target_id viene iniettato in explorer.run(), tutti i
+        # record figli (states, transitions, evidence) nascono già con
+        # l'UUID API corretto.  Possiamo quindi salvare TUTTO ciò che
+        # l'esploratore è riuscito a produrre prima del fallimento.
+        #
+        # Se il fallimento avviene PRIMA che l'esploratore esista
+        # (es. errore in L0/L1/L2/L3), usiamo liste vuote come fallback.
+
         error_evidence = Evidence(
             target_id=analysis_target.id,
             scope=EvidenceScope.target,
@@ -377,10 +338,30 @@ async def run_full_analysis(
             value=f"{type(exc).__name__}: {exc}",
             produced_by="api.pipeline_runner",
         )
+
+        partial_states: list[State] = []
+        partial_transitions: list[Transition] = []
+        partial_evidence: list[Evidence] = []
+
+        # Se l'esploratore esiste (l'errore è avvenuto durante o dopo L4),
+        # salviamo tutto ciò che è riuscito a produrre.  Se l'errore è
+        # avvenuto prima (L0/L1/L2/L3), salviamo liste vuote.
+        if explorer is not None:
+            partial_states = explorer.states
+            partial_transitions = explorer.transitions
+            partial_evidence = list(explorer.evidence)
+
+        # La pipeline_error va SEMPRE in coda, dopo le evidenze parziali
+        partial_evidence.append(error_evidence)
+
         try:
             analysis_target.status = TargetStatus.error
             await save_target(
-                analysis_target, [], [], [error_evidence], None,
+                analysis_target,
+                partial_states,
+                partial_transitions,
+                partial_evidence,
+                None,
                 db_path=db_path,
             )
         except Exception:

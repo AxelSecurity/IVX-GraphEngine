@@ -158,6 +158,7 @@ class StateGraphExplorer:
         capture_artifacts: bool = True,
         top_n_actions: int = 3,
         captcha_wait_s: int = 8,
+        target_id: Optional[uuid.UUID] = None,
     ) -> AnalysisTarget:
         """Explore *start_url* passively and return the populated AnalysisTarget.
 
@@ -173,6 +174,13 @@ class StateGraphExplorer:
 
         *captcha_wait_s* is the max wait time for invisible gate auto-resolve
         (default 8).  Set to 0 to skip gate detection entirely.
+
+        *target_id* is the UUID to use for the ``AnalysisTarget`` created
+        internally.  When ``None`` (default), a new UUID is generated — this
+        preserves backward compatibility with all existing callers.  When
+        provided (by the API layer), all child records (states, transitions,
+        evidence) are born with this UUID from the start, eliminating the
+        need for post-hoc re-parenting.
         """
         budget = budget or Budget()
         self._capture_artifacts_flag = capture_artifacts
@@ -189,6 +197,7 @@ class StateGraphExplorer:
         self._start_ts = time.monotonic()
 
         self.target = AnalysisTarget(
+            id=target_id if target_id is not None else uuid.uuid4(),
             input_url=start_url,
             status=TargetStatus.running,
         )
