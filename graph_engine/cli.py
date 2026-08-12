@@ -231,7 +231,7 @@ async def _main(args: argparse.Namespace) -> None:
                     scope_id=tid,
                     layer=ev["layer"],
                     key=ev["key"],
-                    value=ev["value"],
+                    value=ev["value"] if isinstance(ev["value"], str) else json.dumps(ev["value"]),
                     weight=ev.get("weight", 1.0),
                     produced_by=ev["produced_by"],
                 ))
@@ -244,7 +244,7 @@ async def _main(args: argparse.Namespace) -> None:
                     scope_id=tid,
                     layer=ev["layer"],
                     key=ev["key"],
-                    value=ev["value"],
+                    value=ev["value"] if isinstance(ev["value"], str) else json.dumps(ev["value"]),
                     weight=ev.get("weight", 1.0),
                     produced_by=ev["produced_by"],
                 ))
@@ -257,7 +257,7 @@ async def _main(args: argparse.Namespace) -> None:
                     scope_id=tid,
                     layer=ev["layer"],
                     key=ev["key"],
-                    value=ev["value"],
+                    value=ev["value"] if isinstance(ev["value"], str) else json.dumps(ev["value"]),
                     weight=ev.get("weight", 1.0),
                     produced_by=ev["produced_by"],
                 ))

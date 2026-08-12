@@ -203,3 +203,59 @@ class TestPipelineRunner:
         ]
         assert len(error_evs) == 1
         assert "L5 classification exploded" in error_evs[0].value
+
+    async def test_dict_evidence_value_serialized_before_persist(
+        self, fake_pipeline, tmp_path, monkeypatch
+    ):
+        """L2 che restituisce un value dict (caso reale: crt.sh HTTP 404 su
+        rinnovospid.cc/pay) → nessun ValidationError e il value salvato su
+        SQLite è una stringa JSON che round-trip sul dict originale."""
+        import json
+
+        from graph_engine.api.pipeline_runner import run_full_analysis
+
+        crtsh_error = {
+            "provider": "crtsh",
+            "reason": "crt.sh HTTP error: 404 Not Found",
+        }
+
+        async def _fake_l2_with_dict(url, timeout_s=None):
+            return {
+                "evidence": [
+                    {
+                        "layer": "L2",
+                        "key": "provider_unavailable",
+                        "value": crtsh_error,
+                        "weight": 0.0,
+                        "produced_by": "osint",
+                    }
+                ],
+                "passive_risk_score": 0.0,
+            }
+
+        # Sovrascrive il mock "evidence vuote" del fixture fake_pipeline
+        monkeypatch.setattr(
+            "graph_engine.osint.analyzer.analyze",
+            _fake_l2_with_dict,
+        )
+
+        db = str(tmp_path / "test.db")
+        target_id = await run_full_analysis(
+            "https://rinnovospid.cc/pay",
+            db_path=db,
+            classify=False,
+        )
+
+        data = await get_target_by_id(target_id, db_path=db)
+        assert data["target"].status == TargetStatus.done
+
+        l2_evs = [
+            e for e in data["evidence"] if e.key == "provider_unavailable"
+        ]
+        assert len(l2_evs) == 1
+        stored = l2_evs[0].value
+        assert isinstance(stored, str), (
+            f"Evidence.value su SQLite deve essere str, "
+            f"trovato {type(stored).__name__}"
+        )
+        assert json.loads(stored) == crtsh_error

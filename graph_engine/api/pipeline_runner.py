@@ -21,6 +21,7 @@ classificatore legge DOM snapshot da disco e strutture in memoria.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -313,7 +314,7 @@ async def run_full_analysis(
                     scope_id=tid,
                     layer=ev["layer"],
                     key=ev["key"],
-                    value=ev["value"],
+                    value=ev["value"] if isinstance(ev["value"], str) else json.dumps(ev["value"]),
                     weight=ev.get("weight", 1.0),
                     produced_by=ev["produced_by"],
                 )
