@@ -243,11 +243,21 @@ class TestDnsCache:
             f"(attese 2: solo la prima risoluzione)"
         )
 
-    async def test_unexpected_exception_logged_and_marked(self):
+    async def test_unexpected_exception_logged_and_marked(
+        self, caplog, tmp_path, monkeypatch,
+    ):
         """Un TypeError inatteso → logging.exception + unexpected=True."""
+        import logging
         from unittest.mock import MagicMock as _MagicMock
 
         import graph_engine.osint.dns_resolve as dns_mod
+
+        # Isoliamo la cache su tmp_path: altrimenti la prima esecuzione
+        # caché il risultato e tutte le successive leggono da cache senza
+        # mai raggiungere logger.exception().
+        monkeypatch.setattr(
+            "graph_engine.osint.cache._CACHE_ROOT", tmp_path / "osint_cache"
+        )
 
         mock_loop = _MagicMock()
         # Solleviamo RuntimeError: NON è sottoclasse di OSError, quindi
@@ -257,14 +267,26 @@ class TestDnsCache:
             "bug inatteso nel lookup"
         )
 
-        with patch.object(
-            dns_mod.asyncio, "get_running_loop", return_value=mock_loop,
+        with caplog.at_level(
+            logging.ERROR, logger="graph_engine.osint.dns_resolve"
         ):
-            result = await resolve_dns("buggy.example.com")
+            with patch.object(
+                dns_mod.asyncio, "get_running_loop", return_value=mock_loop,
+            ):
+                result = await resolve_dns("buggy.example.com")
 
-        # Il risultato deve avere unexpected=True.
-        # logger.exception(...) è strutturalmente garantito: è nello
-        # stesso blocco except di unexpected=True, senza branching.
+        # Il log deve contenere il traceback di logger.exception
+        error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(error_records) >= 1, (
+            f"Nessun record ERROR catturato. "
+            f"caplog.records={caplog.records}, caplog.text={caplog.text!r}"
+        )
+        assert "Unexpected error during DNS resolution" in caplog.text, (
+            f"Messaggio di log assente. caplog.text={caplog.text!r}"
+        )
+        assert "buggy.example.com" in caplog.text
+
+        # Il risultato deve avere unexpected=True
         assert result.get("unexpected") is True, (
             f"Atteso unexpected=True per bug di programmazione, "
             f"ottenuto {result.get('unexpected')!r}"
