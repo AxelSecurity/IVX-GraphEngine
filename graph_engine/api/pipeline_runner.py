@@ -155,6 +155,9 @@ async def run_full_analysis(
     db_path: str = DEFAULT_DB_PATH,
     top_n_actions: int = 3,
     capture_artifacts: bool = True,
+    captcha_wait_s: int = 8,
+    l2_timeout_s: Optional[float] = None,
+    l3_timeout_s: Optional[float] = None,
 ) -> str:
     """Esegue la pipeline completa L0→L5 e persiste tutto su SQLite.
 
@@ -172,6 +175,14 @@ async def run_full_analysis(
         top_n_actions: Massimo candidati click per stato.
         capture_artifacts: Se ``True``, salva screenshot, DOM, HAR per
                            ogni stato.
+        captcha_wait_s: Secondi di attesa per auto-risoluzione CAPTCHA
+                        (default: 8s; fast path Trellix: 4s).
+        l2_timeout_s: Timeout in secondi per le query OSINT L2
+                      (crt.sh, RDAP, DNS).  Se ``None``, ogni provider
+                      usa il proprio default.
+        l3_timeout_s: Timeout in secondi per JARM (L3).  Se ``None``,
+                      usa il default (10s).  Le altre sonde L3
+                      mantengono i propri timeout interni.
 
     Returns:
         ``str(target.id)`` — l'UUID dell'analisi persistita.
@@ -214,12 +225,18 @@ async def run_full_analysis(
         # ── L2 passive OSINT (async, rete) ─────────────────────────────────
         from graph_engine.osint.analyzer import analyze as l2_analyze
 
-        l2_result = await l2_analyze(ingested["canonical_url"])
+        l2_result = await l2_analyze(
+            ingested["canonical_url"],
+            timeout_s=l2_timeout_s,
+        )
 
         # ── L3 active low-interaction (async, rete) ────────────────────────
         from graph_engine.active.analyzer import analyze as l3_analyze
 
-        l3_result = await l3_analyze(ingested["canonical_url"])
+        l3_result = await l3_analyze(
+            ingested["canonical_url"],
+            timeout_s=l3_timeout_s,
+        )
 
         budget_obj = budget or Budget()
 
@@ -235,6 +252,7 @@ async def run_full_analysis(
                     budget=budget_obj,
                     capture_artifacts=capture_artifacts,
                     top_n_actions=top_n_actions,
+                    captcha_wait_s=captcha_wait_s,
                     profile=l3_result["recommended_profile"],
                     target_id=analysis_target.id,
                 )

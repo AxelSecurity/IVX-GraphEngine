@@ -18,6 +18,7 @@ from fastapi import FastAPI
 
 from graph_engine.api.pipeline_runner import DEFAULT_ARTIFACT_ROOT
 from graph_engine.api.routes import build_router
+from graph_engine.api.routes_trellix import build_trellix_router
 from graph_engine.storage.schema import DEFAULT_DB_PATH
 
 
@@ -37,6 +38,9 @@ def create_app(
     )
     app.include_router(
         build_router(db_path=db_path, artifact_root=artifact_root)
+    )
+    app.include_router(
+        build_trellix_router(db_path=db_path)
     )
     return app
 

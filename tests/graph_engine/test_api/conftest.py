@@ -78,6 +78,7 @@ class FakeExplorer:
         budget=None,
         capture_artifacts: bool = True,
         top_n_actions: int = 3,
+        captcha_wait_s: int = 8,
         profile=None,
         target_id=None,
     ) -> AnalysisTarget:
@@ -213,10 +214,10 @@ def fake_pipeline(monkeypatch):
     # L2 e L3 sono async — la pipeline le awaita, quindi devono
     # restituire una coroutine, non un dict direttamente
 
-    async def _fake_l2(url):
+    async def _fake_l2(url, timeout_s=None):
         return {"evidence": [], "passive_risk_score": 0.0}
 
-    async def _fake_l3(url):
+    async def _fake_l3(url, timeout_s=None):
         return {"evidence": [], "recommended_profile": {}}
 
     monkeypatch.setattr(

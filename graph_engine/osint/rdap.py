@@ -29,12 +29,18 @@ MAX_RDAP_SERVERS = 3  # numero massimo di server RDAP da tentare
 # ---------------------------------------------------------------------------
 
 
-async def query_rdap(domain: str, client: httpx.AsyncClient) -> dict:
+async def query_rdap(
+    domain: str,
+    client: httpx.AsyncClient,
+    timeout: float | None = None,
+) -> dict:
     """Interroga il server RDAP competente per *domain*.
 
     Args:
         domain: Dominio da interrogare (es. ``"example.com"``).
         client: Client HTTP asincrono già configurato.
+        timeout: Timeout HTTP in secondi. Se ``None``, usa
+                 ``RDAP_TIMEOUT`` (15s).
 
     Returns:
         Dizionario con:
@@ -50,7 +56,7 @@ async def query_rdap(domain: str, client: httpx.AsyncClient) -> dict:
     if cached is not None:
         return cached
 
-    result = await _fetch_rdap(reg_domain, client)
+    result = await _fetch_rdap(reg_domain, client, timeout=timeout)
     cache_set("rdap", reg_domain, result)
     return result
 
@@ -60,7 +66,10 @@ async def query_rdap(domain: str, client: httpx.AsyncClient) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _get_iana_bootstrap(client: httpx.AsyncClient) -> dict:
+async def _get_iana_bootstrap(
+    client: httpx.AsyncClient,
+    timeout: float | None = None,
+) -> dict:
     """Scarica (o recupera da cache) la mappatura TLD → server RDAP da IANA.
 
     Il file https://data.iana.org/rdap/dns.json ha questa struttura::
@@ -80,8 +89,11 @@ async def _get_iana_bootstrap(client: httpx.AsyncClient) -> dict:
     if cached is not None:
         return cached
 
+    effective_timeout = timeout if timeout is not None else RDAP_TIMEOUT
     try:
-        response = await client.get(IANA_BOOTSTRAP_URL, timeout=RDAP_TIMEOUT)
+        response = await client.get(
+            IANA_BOOTSTRAP_URL, timeout=effective_timeout,
+        )
         response.raise_for_status()
         data = response.json()
     except Exception as exc:
@@ -106,10 +118,16 @@ async def _get_iana_bootstrap(client: httpx.AsyncClient) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _fetch_rdap(reg_domain: str, client: httpx.AsyncClient) -> dict:
+async def _fetch_rdap(
+    reg_domain: str,
+    client: httpx.AsyncClient,
+    timeout: float | None = None,
+) -> dict:
     """Risolvi il server RDAP via IANA e interrogalo per *reg_domain*."""
+    effective_timeout = timeout if timeout is not None else RDAP_TIMEOUT
+
     # 1. Bootstrap IANA
-    iana_map = await _get_iana_bootstrap(client)
+    iana_map = await _get_iana_bootstrap(client, timeout=timeout)
 
     if "_error" in iana_map:
         return {"error": f"RDAP bootstrap failed: {iana_map['_error']}"}
@@ -129,7 +147,7 @@ async def _fetch_rdap(reg_domain: str, client: httpx.AsyncClient) -> dict:
         rdap_url = _build_rdap_url(server_url, reg_domain)
 
         try:
-            response = await client.get(rdap_url, timeout=RDAP_TIMEOUT)
+            response = await client.get(rdap_url, timeout=effective_timeout)
             if response.status_code == 404:
                 return {
                     "domain_age_days": None,

@@ -543,6 +543,10 @@ graph_engine/api/
     routes.py            — 6 endpoint, factory con db_path/artifact_root iniettabili
     pipeline_runner.py   — run_full_analysis(): orchestrazione L0→L5, lifecycle status
     schemas.py           — modelli Pydantic request/response (distinti dal dominio)
+    fast_profile.py      — budget/timeout del profilo fast Trellix (vedi sotto)
+    allowlist.py         — tabella allowlist/blacklist con matching eTLD+1
+    trellix_verdict.py   — mapping binario + signature + response builder
+    routes_trellix.py    — GET /trellix/analyze (wrapper sincrono Trellix)
 ```
 
 ### Test
@@ -560,7 +564,8 @@ I test verificano:
 - La race 202→GET 404 è chiusa
 - Il lifecycle status (queued → done) funziona
 - L'error path salva lo stato `error` con evidence `pipeline_error`
-- Il re-parenting (UUID esploratore → UUID API) è corretto
+- Gli stati parziali prodotti da L4 sopravvivono a un fallimento di L5
+  (il `target_id` API è iniettato in `explorer.run()` fin dall'inizio)
 - Gli endpoint history, artifacts e health rispondono correttamente
 
 ### Limitazioni
@@ -571,3 +576,149 @@ I test verificano:
 - **Nessuna autenticazione**: l'API è pensata per uso interno. Autenticazione
   e autorizzazione vanno aggiunte prima di esporla su rete.
 - **Nessuna cancellazione**: non esiste un endpoint `DELETE /analyses/{id}`.
+
+## Wrapper Trellix
+
+Il wrapper espone un endpoint **sincrono** compatibile con Trellix IVX:
+`GET /trellix/analyze?url=...`. Trellix invia URL a un endpoint sincrono e
+si aspetta una risposta binaria `safe`/`malicious` entro ~60 secondi —
+un profilo radicalmente diverso da quello dell'API REST asincrona.
+
+### Principio guida: fire-and-continue, mai bloccare
+
+Il wrapper **non deve mai bloccare Trellix** oltre la sua deadline. Il
+pattern è **fire-and-continue**:
+
+1. L'analisi parte come background task (`asyncio.create_task`)
+2. La route attende al massimo 48s con `asyncio.wait([task], timeout=48)`
+   — **NON** `asyncio.wait_for`, che cancellerebbe il task
+3. Se il task non completa entro la finestra, la risposta è
+   `safe` + signature `Analysis-Incomplete — Benign By Default` con un
+   reason che dichiara esplicitamente che l'analisi continua in background
+4. Il task **continua** in background e persiste il risultato su SQLite;
+   la richiesta successiva per lo stesso URL (cache 24h) lo troverà
+
+La scelta "in dubbio → safe" è deliberata: meglio un falso negativo che
+bloccare un sito legittimo su un'analisi incompleta.
+
+### Flow della route
+
+```
+GET /trellix/analyze?url=<double-encoded>
+    │
+    ├─ 0. Auth Bearer opzionale (TRELLIX_API_TOKEN)
+    │     — confronto constant-time (secrets.compare_digest)
+    │     — se la variabile non è configurata, nessuna auth
+    │
+    ├─ 1. unquote() aggiuntivo (Trellix invia URL doppio-encodati)
+    │
+    ├─ 2. Allowlist/blacklist → risposta immediata (confidence 1.0)
+    │
+    ├─ 3. Cache 24h: get_latest_for_url_hash + status=done + verdict
+    │     → risposta immediata dal DB
+    │
+    └─ 4. Fire-and-continue con budget FAST_BUDGET
+          (vedi fast_profile.py)
+```
+
+### Verdetto binario
+
+| Classification | Verdetto Trellix | Azione |
+|---|---|---|
+| `benign` | `safe` | `allow` |
+| `suspicious` | `safe` | `allow` |
+| `phishing` | `malicious` | `block` |
+
+La signature testuale ha una catena di priorità:
+1. **Brand impersonation** — brand noto trovato nell'evidenza L1
+   `typosquat` o in `verdict.brand` → `Phishing: {brand} Impersonation`
+2. **Gate bypass** — evidenza `gate_solved` → `Suspicious Gate Bypass Detected`
+3. **Credential harvesting** — evidenza L1 `aitm_email_payload` o
+   `kit_family` con "aitm"/"harvest" → `Credential Harvesting Detected`
+4. **Firma generica** basata sulla classificazione
+
+Nota: i form fields NON sono persistiti come evidenza
+(`pipeline_runner._run_classification` li inizializza a `[]`), quindi il
+rilevamento credenziali usa solo i segnali L1 persistiti.
+
+### Profilo fast (`fast_profile.py`)
+
+Trellix concede ~60s totali per l'intera risposta. Il profilo fast
+dimensiona la pipeline per terminare entro ~45s:
+
+| Fase | Budget |
+|---|---|
+| L0+L1 (sync, locali) | ~1s |
+| L2+L3 (rete, in parallelo) | ≤ 5s (timeout espliciti) |
+| L4 BFS Playwright | `FAST_BUDGET = Budget(max_depth=3, max_nodes=8, timeout_s=25)` |
+| L5 (prefilter/fallback) | ~1s |
+
+Altri parametri del profilo:
+- `FAST_TOP_N_ACTIONS = 1` — un solo candidato click per stato (default: 3)
+- `FAST_CAPTCHA_WAIT_S = 4` — metà dell'attesa standard (default: 8)
+- `FAST_L2_TIMEOUT_S = 5.0`, `FAST_L3_TIMEOUT_S = 5.0` — timeout di rete
+  dimezzati (default: crt.sh/RDAP 15s, DNS 5s, JARM 10s)
+- `TRELLIX_RESPONSE_TIMEOUT_S = 48` — attesa massima del wrapper (12s di
+  margine sulla deadline di 60s)
+
+La classificazione Foundry NON rientra nella garanzia di tempo: se
+configurata può sforare la finestra → il wrapper risponde onestamente
+"Analysis-Incomplete" e il task continua in background.
+
+Per supportare il profilo fast, le funzioni L2/L3 accettano un parametro
+`timeout`/`timeout_s` opzionale (backward-compatible, default invariati):
+
+- `osint/certificate_transparency.py`: `query_crtsh(..., timeout=CRTSH_TIMEOUT)`
+- `osint/rdap.py`: `query_rdap(..., timeout=RDAP_TIMEOUT)`
+- `osint/dns_resolve.py`: `resolve_dns(..., timeout=_DNS_TIMEOUT)`
+- `osint/analyzer.py`: `analyze(..., timeout_s=None)`
+- `active/analyzer.py`: `analyze(..., timeout_s=None)` (solo JARM)
+- `api/pipeline_runner.py`: `run_full_analysis(..., l2_timeout_s=None, l3_timeout_s=None, captcha_wait_s=8)`
+
+### Allowlist/blacklist (`allowlist.py`)
+
+Tabella SQLite `allowlist_blacklist` con matching sul **dominio
+registrabile** (eTLD+1) — la stessa normalizzazione usata da L1 (typosquat)
+e L2 (RDAP):
+
+```sql
+CREATE TABLE IF NOT EXISTS allowlist_blacklist (
+    domain    TEXT PRIMARY KEY,
+    list_type TEXT NOT NULL CHECK (list_type IN ('whitelist', 'blacklist')),
+    note      TEXT,
+    added_by  TEXT,
+    added_at  TEXT NOT NULL
+);
+```
+
+- `check_domain(domain)` → `{"list_type": ..., "note": ...}` o `None`
+  (cercare `login.example.com` matcha l'entry `example.com`)
+- `add_entry(domain, list_type, ...)` → `INSERT OR REPLACE` (idempotente)
+- `remove_entry(domain)` → `True`/`False`
+
+Un hit allowlist/blacklist bypassa completamente l'analisi: risposta
+immediata con confidence 1.0 e signature `Whitelist-Override` /
+`Blacklist-Override`.
+
+### Architettura del package
+
+```
+graph_engine/api/
+    ...
+    fast_profile.py     — budget e timeout del profilo fast Trellix
+    allowlist.py        — tabella allowlist/blacklist (matching eTLD+1)
+    trellix_verdict.py  — VERDICT_MAP, build_signature, build_trellix_response
+    routes_trellix.py   — build_trellix_router() — GET /trellix/analyze
+```
+
+### Test
+
+I test del wrapper sono in `tests/graph_engine/test_trellix/`:
+
+- `test_allowlist.py` — CRUD + matching su dominio esatto/sottodominio
+- `test_verdict_mapping.py` — mapping ternario→binario, signature con/senza
+  brand, `timed_out=True` forza sempre `safe`/`allow`
+- `test_routes_trellix.py` — whitelist/cache hit bypassano
+  `run_full_analysis`, timeout fire-and-continue (il task completa DOPO la
+  risposta e il risultato è su SQLite), URL doppio-encodato
+- `test_auth.py` — token richiesto quando configurato, assente altrimenti

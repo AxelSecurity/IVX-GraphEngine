@@ -29,12 +29,18 @@ CRTSH_TIMEOUT = 15.0      # timeout HTTP in secondi
 # ---------------------------------------------------------------------------
 
 
-async def query_crtsh(domain: str, client: httpx.AsyncClient) -> dict:
+async def query_crtsh(
+    domain: str,
+    client: httpx.AsyncClient,
+    timeout: float | None = None,
+) -> dict:
     """Interroga crt.sh per i certificati di *domain*.
 
     Args:
         domain: Dominio da interrogare (es. ``"example.com"``).
         client: Client HTTP asincrono già configurato.
+        timeout: Timeout HTTP in secondi. Se ``None``, usa
+                 ``CRTSH_TIMEOUT`` (15s).
 
     Returns:
         Un dizionario con le chiavi:
@@ -53,7 +59,7 @@ async def query_crtsh(domain: str, client: httpx.AsyncClient) -> dict:
     if cached is not None:
         return cached
 
-    result = await _fetch_and_parse(domain, client)
+    result = await _fetch_and_parse(domain, client, timeout=timeout)
     cache_set("crtsh", domain, result)
     return result
 
@@ -63,15 +69,20 @@ async def query_crtsh(domain: str, client: httpx.AsyncClient) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _fetch_and_parse(domain: str, client: httpx.AsyncClient) -> dict:
+async def _fetch_and_parse(
+    domain: str,
+    client: httpx.AsyncClient,
+    timeout: float | None = None,
+) -> dict:
     """Fetch raw JSON from crt.sh and extract structured data."""
     url = f"https://crt.sh/?q={domain}&output=json"
+    effective_timeout = timeout if timeout is not None else CRTSH_TIMEOUT
 
     try:
-        response = await client.get(url, timeout=CRTSH_TIMEOUT)
+        response = await client.get(url, timeout=effective_timeout)
         response.raise_for_status()
     except httpx.TimeoutException:
-        return {"error": f"crt.sh timeout after {CRTSH_TIMEOUT}s"}
+        return {"error": f"crt.sh timeout after {effective_timeout}s"}
     except httpx.HTTPError as exc:
         return {"error": f"crt.sh HTTP error: {exc}"}
 

@@ -57,7 +57,10 @@ def _make_evidence(
 # ---------------------------------------------------------------------------
 
 
-async def analyze(canonical_url: str) -> dict:
+async def analyze(
+    canonical_url: str,
+    timeout_s: float | None = None,
+) -> dict:
     """Esegue tutte le sonde L3 su *canonical_url* IN PARALLELO.
 
     Le quattro sonde vengono lanciate simultaneamente. JARM ha bisogno
@@ -65,6 +68,10 @@ async def analyze(canonical_url: str) -> dict:
 
     Args:
         canonical_url: URL normalizzato (output di L0 canonicalize).
+        timeout_s: Timeout in secondi per JARM. Se ``None``, usa il
+                   default (10s). Le altre sonde (redirect_chain,
+                   favicon, differential_fetch) mantengono i propri
+                   timeout interni.
 
     Returns:
         dict con chiavi:
@@ -90,7 +97,11 @@ async def analyze(canonical_url: str) -> dict:
         # ── Lancio parallelo di TUTTE le sonde ───────────────────────────
         redirect_task = trace_redirect_chain(canonical_url, client)
         favicon_task = fetch_favicon_hash(canonical_url, client)
-        jarm_task = compute_jarm(hostname)
+        jarm_task = (
+            compute_jarm(hostname, timeout_s=timeout_s)
+            if timeout_s is not None
+            else compute_jarm(hostname)
+        )
         diff_task = differential_fetch(canonical_url)
 
         results = await _gather_ignore_exceptions(

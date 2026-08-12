@@ -65,7 +65,10 @@ def _make_evidence(
 # ---------------------------------------------------------------------------
 
 
-async def analyze(canonical_url: str) -> dict:
+async def analyze(
+    canonical_url: str,
+    timeout_s: float | None = None,
+) -> dict:
     """Esegue tutte le query OSINT L2 su *canonical_url*.
 
     Le fonti vengono interrogate IN PARALLELO. Se una fallisce, le altre
@@ -73,6 +76,9 @@ async def analyze(canonical_url: str) -> dict:
 
     Args:
         canonical_url: URL normalizzato (output di L0 canonicalize).
+        timeout_s: Timeout HTTP in secondi per crt.sh, RDAP e DNS.
+                   Se ``None``, ogni provider usa il proprio default
+                   (15s, 15s, 5s rispettivamente).
 
     Returns:
         dict con chiavi:
@@ -93,9 +99,9 @@ async def analyze(canonical_url: str) -> dict:
         # ── Lancio parallelo di TUTTE le fonti ──────────────────────────
         providers = get_enabled_providers()
 
-        crtsh_task = query_crtsh(hostname, client)
-        rdap_task = query_rdap(hostname, client)
-        dns_task = resolve_dns(hostname)
+        crtsh_task = query_crtsh(hostname, client, timeout=timeout_s)
+        rdap_task = query_rdap(hostname, client, timeout=timeout_s)
+        dns_task = resolve_dns(hostname, timeout=timeout_s)
         rep_tasks = [p.check(canonical_url, client) for p in providers]
 
         all_tasks = [crtsh_task, rdap_task, dns_task] + rep_tasks

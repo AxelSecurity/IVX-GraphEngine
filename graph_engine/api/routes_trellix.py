@@ -1,0 +1,215 @@
+"""Route sincrona compatibile Trellix IVX — ``GET /trellix/analyze``.
+
+Trellix invia URL a un endpoint sincrono e si aspetta una risposta
+binaria safe/malicious entro ~60 secondi.  Questo modulo implementa
+il pattern **fire-and-continue**: l'analisi parte in background, e
+se non completa entro la finestra di tempo, rispondiamo comunque con
+un verdetto "safe" onesto (Analysis-Incomplete) SENZA cancellare il
+task — che continua in background e persiste il risultato su SQLite
+per la prossima richiesta (cache 24h).
+
+Flow della route:
+
+    1. Auth Bearer opzionale (``TRELLIX_API_TOKEN``)
+    2. URL decoding (Trellix invia URL doppio-encodati)
+    3. Allowlist/blacklist check → risposta immediata
+    4. Cache 24h (``get_latest_for_url_hash``) → risposta immediata
+    5. Fire-and-continue con ``asyncio.wait([task], timeout=48)``
+       — NON cancella il task se scade il timeout
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import secrets
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+from urllib.parse import unquote, urlparse
+
+from fastapi import APIRouter, Header, HTTPException, Query, Request
+
+from graph_engine.api.allowlist import check_domain
+from graph_engine.api.fast_profile import (
+    FAST_BUDGET,
+    FAST_CAPTCHA_WAIT_S,
+    FAST_L2_TIMEOUT_S,
+    FAST_L3_TIMEOUT_S,
+    FAST_TOP_N_ACTIONS,
+    TRELLIX_RESPONSE_TIMEOUT_S,
+)
+from graph_engine.api.pipeline_runner import run_full_analysis
+from graph_engine.api.trellix_verdict import build_trellix_response, entry_response
+from graph_engine.models import AnalysisTarget
+from graph_engine.storage.repository import get_latest_for_url_hash, save_target
+from graph_engine.storage.schema import DEFAULT_DB_PATH
+
+logger = logging.getLogger("graph_engine.api.trellix")
+
+# ── Costanti ────────────────────────────────────────────────────────────────
+
+_CACHE_TTL_HOURS = 24
+_AUTH_ENV = "TRELLIX_API_TOKEN"
+
+
+# ---------------------------------------------------------------------------
+# Router factory
+# ---------------------------------------------------------------------------
+
+
+def build_trellix_router(
+    db_path: str = DEFAULT_DB_PATH,
+    wait_timeout_s: float = TRELLIX_RESPONSE_TIMEOUT_S,
+) -> APIRouter:
+    """Costruisce il router Trellix con dipendenze iniettate.
+
+    Args:
+        db_path: Percorso del database SQLite.
+        wait_timeout_s: Timeout di attesa per il task in secondi
+                        (iniettabile per i test).
+    """
+
+    router = APIRouter()
+
+    def _on_task_done(task: asyncio.Task) -> None:
+        """Consuma l'eccezione del background task per evitare
+        ``Task exception was never retrieved``.  Lo stato 'error' è già
+        stato persistito su SQLite dal runner."""
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            logger.error("Background Trellix analysis failed: %s", exc)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # GET /trellix/analyze
+    # ──────────────────────────────────────────────────────────────────────
+
+    @router.get("/trellix/analyze")
+    async def trellix_analyze(
+        request: Request,
+        url: str = Query(..., min_length=1, max_length=2048),
+    ):
+        """Endpoint sincrono compatibile Trellix.
+
+        Args:
+            url: URL da analizzare. Trellix lo invia doppio-encodato;
+                 applichiamo ``unquote()`` una volta aggiuntiva.
+        """
+        # ── 0. Auth ────────────────────────────────────────────────────
+        token = os.environ.get(_AUTH_ENV)
+        if token:
+            auth_header = request.headers.get("Authorization", "")
+            if not _check_token(auth_header, token):
+                raise HTTPException(status_code=401, detail="Unauthorized")
+
+        # ── 1. URL decoding ────────────────────────────────────────────
+        # Starlette decodifica già il query param una volta.
+        # Trellix invia URL doppio-encodati → un unquote aggiuntivo.
+        target_url = unquote(url.strip())
+        if not target_url:
+            raise HTTPException(status_code=422, detail="URL vuoto dopo decoding")
+
+        # ── 2. Allowlist check ─────────────────────────────────────────
+        hostname = urlparse(target_url).hostname
+        if hostname:
+            entry = await check_domain(hostname, db_path=db_path)
+            if entry is not None:
+                logger.info(
+                    "Trellix allowlist hit: %s → %s",
+                    hostname, entry["list_type"],
+                )
+                return entry_response(entry)
+
+        # ── 3. Cache check (24h TTL) ───────────────────────────────────
+        from graph_engine.ingestion.pipeline import ingest
+
+        ingested = ingest(target_url)
+        url_hash = ingested["url_hash"]
+        cached = await get_latest_for_url_hash(url_hash, db_path=db_path)
+
+        if cached is not None:
+            target_status = getattr(cached["target"], "status", None)
+            status_val = (
+                target_status.value
+                if hasattr(target_status, "value")
+                else str(target_status)
+            )
+
+            # Cache hit solo se done + verdict presente + creato < 24h fa
+            if status_val == "done" and cached.get("verdict") is not None:
+                created_at = cached["target"].created_at
+                age = datetime.now(timezone.utc) - created_at
+                if age < timedelta(hours=_CACHE_TTL_HOURS):
+                    logger.info(
+                        "Trellix cache hit: %s (age=%s)", target_url, age,
+                    )
+                    return build_trellix_response(cached)
+
+        # ── 4. Fire-and-continue ───────────────────────────────────────
+
+        # 4a. Pre-crea il target come "queued" (pattern POST /analyses)
+        target = AnalysisTarget(
+            input_url=ingested["input_url"],
+            canonical_url=ingested["canonical_url"],
+            url_hash=url_hash,
+        )
+        await save_target(target, [], [], [], None, db_path=db_path)
+
+        # 4b. Lancia l'analisi in background
+        task = asyncio.create_task(
+            run_full_analysis(
+                target_url,
+                budget=FAST_BUDGET,
+                classify=True,
+                target=target,
+                db_path=db_path,
+                top_n_actions=FAST_TOP_N_ACTIONS,
+                captcha_wait_s=FAST_CAPTCHA_WAIT_S,
+                l2_timeout_s=FAST_L2_TIMEOUT_S,
+                l3_timeout_s=FAST_L3_TIMEOUT_S,
+                capture_artifacts=False,
+            )
+        )
+        task.add_done_callback(_on_task_done)
+
+        # 4c. Attendi con asyncio.wait (NON wait_for — NON cancella!)
+        done, pending = await asyncio.wait({task}, timeout=wait_timeout_s)
+        timed_out = task in pending
+
+        # 4d. Leggi lo stato corrente da SQLite
+        data = await get_latest_for_url_hash(url_hash, db_path=db_path)
+
+        if timed_out:
+            logger.info(
+                "Trellix analysis %s still running after %.0fs — "
+                "responding timed_out, task continues in background",
+                target.id, wait_timeout_s,
+            )
+
+        return build_trellix_response(data, timed_out=timed_out)
+
+    return router
+
+
+# ---------------------------------------------------------------------------
+# Auth helper
+# ---------------------------------------------------------------------------
+
+
+def _check_token(auth_header: str, expected_token: str) -> bool:
+    """Verifica il token Bearer con confronto costante nel tempo.
+
+    Args:
+        auth_header: Valore dell'header ``Authorization``.
+        expected_token: Token configurato nell'ambiente.
+
+    Returns:
+        ``True`` se il token è valido.
+    """
+    if not auth_header.startswith("Bearer "):
+        return False
+    provided = auth_header[7:]  # len("Bearer ") == 7
+    return secrets.compare_digest(provided, expected_token)

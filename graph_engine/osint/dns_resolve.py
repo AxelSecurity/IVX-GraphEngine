@@ -30,11 +30,16 @@ _DNS_TIMEOUT = 5.0  # secondi — un DNS che non risponde non deve appendere
 # ---------------------------------------------------------------------------
 
 
-async def resolve_dns(hostname: str) -> dict:
+async def resolve_dns(
+    hostname: str,
+    timeout: float | None = None,
+) -> dict:
     """Risolve i record A (IPv4) e AAAA (IPv6) per *hostname*.
 
     Args:
         hostname: Nome host da risolvere (es. ``"example.com"``).
+        timeout: Timeout in secondi per la risoluzione DNS. Se ``None``,
+                 usa ``_DNS_TIMEOUT`` (5s).
 
     Returns:
         dict con chiavi:
@@ -58,6 +63,7 @@ async def resolve_dns(hostname: str) -> dict:
         return cached
 
     # ── Risoluzione ────────────────────────────────────────────────────
+    effective_timeout = timeout if timeout is not None else _DNS_TIMEOUT
     loop = asyncio.get_running_loop()
 
     async def _resolve(family: int) -> list[str]:
@@ -65,7 +71,7 @@ async def resolve_dns(hostname: str) -> dict:
         try:
             addrinfo = await asyncio.wait_for(
                 loop.getaddrinfo(hostname, None, family=family, type=0, proto=0),
-                timeout=_DNS_TIMEOUT,
+                timeout=effective_timeout,
             )
             # getaddrinfo restituisce una lista di tuple a 5 elementi;
             # l'indirizzo IP è in sockaddr[0] (il primo elemento della
