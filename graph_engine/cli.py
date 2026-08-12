@@ -263,8 +263,42 @@ async def _main(args: argparse.Namespace) -> None:
                              explorer.evidence, verdict,
                              lexical_risk_score=l1_result["lexical_risk_score"],
                              passive_risk_score=l2_result["passive_risk_score"]))
+
+            # ── Persistenza: ogni run viene salvato ─────────────────────
+            from graph_engine.storage.repository import save_target
+
+            await save_target(
+                target,
+                explorer.states,
+                explorer.transitions,
+                explorer.evidence,
+                verdict,
+            )
         finally:
             await browser.close()
+
+
+async def _print_history(history_input: str) -> None:
+    """Compute url_hash if needed, query history, print JSON."""
+    import hashlib
+
+    from graph_engine.ingestion.pipeline import normalize_url
+    from graph_engine.storage.repository import get_history_for_url_hash
+
+    # If the input looks like a URL (has a dot or starts with http), hash it
+    if "." in history_input or history_input.startswith("http"):
+        canonical = normalize_url(history_input)
+        url_hash = hashlib.sha256(canonical.encode()).hexdigest()
+    else:
+        url_hash = history_input
+
+    rows = await get_history_for_url_hash(url_hash)
+
+    if not rows:
+        print(json.dumps({"history": [], "url_hash": url_hash}, indent=2))
+        return
+
+    print(json.dumps({"history": rows, "url_hash": url_hash}, indent=2, default=str))
 
 
 def main() -> None:
@@ -273,7 +307,8 @@ def main() -> None:
     )
     parser.add_argument(
         "url",
-        help="Starting URL to explore",
+        nargs="?",
+        help="Starting URL to explore (optional if --history is used)",
     )
     parser.add_argument(
         "--max-depth",
@@ -314,6 +349,11 @@ def main() -> None:
         action="store_true",
         help="Run L5 classification after exploration (requires Azure Foundry or falls back to heuristics)",
     )
+    parser.add_argument(
+        "--history",
+        metavar="URL_OR_HASH",
+        help="Print historical analyses for the given URL (or url_hash) and exit — no new exploration is performed",
+    )
 
     args = parser.parse_args()
 
@@ -323,6 +363,14 @@ def main() -> None:
             format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
             stream=sys.stderr,
         )
+
+    # ── --history mode: print past analyses and exit ──────────────────────
+    if args.history:
+        asyncio.run(_print_history(args.history))
+        return
+
+    if not args.url:
+        parser.error("URL is required (or use --history to browse past analyses)")
 
     try:
         asyncio.run(_main(args))

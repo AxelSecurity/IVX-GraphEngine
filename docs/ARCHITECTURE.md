@@ -292,3 +292,61 @@ graph_engine/osint/
         opencti.py        — OpenCTI adapter (disabilitato di default)
         registry.py       — get_enabled_providers()
 ```
+
+## Persistenza SQLite
+
+A partire da Agosto 2026, ogni esplorazione viene salvata automaticamente in un
+database SQLite append-only (`data/graph_engine.db`). Il salvataggio non è
+opzionale né dietro un flag — ogni run produce una nuova riga in
+`analysis_target`.
+
+### Principio append-only
+
+- Ogni analisi è un **nuovo record** con un suo UUID (`analysis_target.id`).
+- Due analisi dello stesso URL sono indipendenti — condividono lo stesso
+  `url_hash` (SHA-256 del canonical URL) per il raggruppamento storico, ma
+  hanno UUID diversi.
+- Nessun UPDATE su righe esistenti — solo INSERT OR REPLACE (idempotente)
+  durante il salvataggio.
+
+### Schema
+
+```
+analysis_target  (id PK, input_url, canonical_url, url_hash INDEXED,
+                  final_url, status, root_state_id, created_at)
+
+state            (id PK, target_id FK→analysis_target ON DELETE CASCADE,
+                  url, dom_hash, depth, screenshot_ref, har_ref)
+
+transition       (id PK, target_id FK→analysis_target ON DELETE CASCADE,
+                  from_state, to_state, kind, trigger JSON, ts)
+
+evidence         (id PK, target_id FK→analysis_target ON DELETE CASCADE,
+                  scope, scope_id, layer, key, value, weight, produced_by, ts)
+
+verdict          (target_id PK+FK→analysis_target ON DELETE CASCADE,
+                  classification, confidence, produced_by, brand,
+                  kit_family, rationale, final_url, exfil_endpoint)
+```
+
+Lo schema rispecchia esattamente `graph_engine/models.py`. Tutti gli UUID sono
+salvati come TEXT, i datetime in ISO-8601, gli enum come TEXT.
+
+### Repository async
+
+`graph_engine/storage/repository.py` — operazioni CRUD via `aiosqlite`:
+
+- **`save_target()`** — un'unica transazione: target + stati + transizioni
+  + evidence + verdict. Idempotente sull'UUID del target (`INSERT OR REPLACE`).
+- **`get_target_by_id()`** — grafo completo (join delle 5 tabelle) per un
+  target UUID.
+- **`get_history_for_url_hash()`** — riepilogo compatto di tutte le analisi
+  per un dato `url_hash`, ordinate per `created_at` decrescente.
+- **`get_latest_for_url_hash()`** — solo l'analisi più recente, formato completo.
+
+### CLI
+
+- `--history <URL_OR_HASH>` — stampa lo storico esistente per quell'URL e termina
+  senza eseguire una nuova analisi.
+- Ogni `python -m graph_engine.cli <url>` salva automaticamente al termine
+  dell'esplorazione — nessun flag aggiuntivo richiesto.
