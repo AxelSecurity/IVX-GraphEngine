@@ -22,6 +22,7 @@ from graph_engine.osint.cache import TTL_IANA_BOOTSTRAP, TTL_RDAP, cache_get, ca
 
 IANA_BOOTSTRAP_URL = "https://data.iana.org/rdap/dns.json"
 RDAP_TIMEOUT = 15.0  # secondi
+MAX_RDAP_SERVERS = 3  # numero massimo di server RDAP da tentare
 
 # ---------------------------------------------------------------------------
 # RDAP query pubblica
@@ -120,29 +121,53 @@ async def _fetch_rdap(reg_domain: str, client: httpx.AsyncClient) -> dict:
     if not servers:
         return {"error": f"No RDAP server found for TLD '{tld}'"}
 
-    # 3. Interroga il primo server che risponde
-    rdap_url = _build_rdap_url(servers[0], reg_domain)
+    # 3. Preferisci HTTPS e limita il numero di tentativi
+    servers = _prioritize_https(servers)[:MAX_RDAP_SERVERS]
 
-    try:
-        response = await client.get(rdap_url, timeout=RDAP_TIMEOUT)
-        if response.status_code == 404:
-            return {
-                "domain_age_days": None,
-                "registrar": None,
-                "nameservers": [],
-                "error": f"Domain '{reg_domain}' not found in RDAP",
-            }
-        response.raise_for_status()
-        rdap_data = response.json()
-    except httpx.TimeoutException:
-        return {"error": f"RDAP timeout after {RDAP_TIMEOUT}s for '{reg_domain}'"}
-    except httpx.HTTPError as exc:
-        return {"error": f"RDAP HTTP error: {exc}"}
-    except Exception as exc:
-        return {"error": f"RDAP unexpected error: {exc}"}
+    errors: list[str] = []
+    for server_url in servers:
+        rdap_url = _build_rdap_url(server_url, reg_domain)
 
-    # 4. Estrai dati
-    return _extract_rdap_info(rdap_data)
+        try:
+            response = await client.get(rdap_url, timeout=RDAP_TIMEOUT)
+            if response.status_code == 404:
+                return {
+                    "domain_age_days": None,
+                    "registrar": None,
+                    "nameservers": [],
+                    "error": f"Domain '{reg_domain}' not found in RDAP",
+                }
+            # 5xx: server error → prova il prossimo
+            if 500 <= response.status_code < 600:
+                errors.append(
+                    f"server {server_url}: HTTP {response.status_code}"
+                )
+                continue
+            response.raise_for_status()
+            rdap_data = response.json()
+        except httpx.TimeoutException:
+            errors.append(f"server {server_url}: timeout")
+            continue
+        except httpx.ConnectError as exc:
+            errors.append(f"server {server_url}: connection failed — {exc}")
+            continue
+        except httpx.HTTPError as exc:
+            # Errore non recuperabile (es. 4xx diverso da 404/5xx)
+            return {"error": f"RDAP HTTP error: {exc}"}
+        except Exception as exc:
+            errors.append(f"server {server_url}: {exc}")
+            continue
+
+        # 4. Estrai dati
+        return _extract_rdap_info(rdap_data)
+
+    # Tutti i server hanno fallito
+    return {
+        "error": (
+            f"All {len(servers)} RDAP server(s) failed for TLD '{tld}': "
+            + "; ".join(errors)
+        )
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +194,21 @@ def _build_rdap_url(server_url: str, domain: str) -> str:
     """Costruisce l'URL RDAP per un dominio."""
     base = server_url.rstrip("/")
     return f"{base}/domain/{domain}"
+
+
+def _prioritize_https(servers: list[str]) -> list[str]:
+    """Riordina la lista di server: prima https://, poi http://.
+
+    Non scarta gli HTTP — potrebbero servire come fallback
+    se tutti gli HTTPS falliscono.
+    """
+    https_servers = [s for s in servers if s.startswith("https://")]
+    http_servers = [s for s in servers if s.startswith("http://")]
+    other_servers = [
+        s for s in servers
+        if not s.startswith("https://") and not s.startswith("http://")
+    ]
+    return https_servers + http_servers + other_servers
 
 
 def _parse_rdap_date(date_str: str) -> Optional[datetime]:

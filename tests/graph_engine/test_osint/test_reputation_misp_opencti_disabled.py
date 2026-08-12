@@ -116,6 +116,8 @@ class TestNetworkBlockedExplicit:
 
         assert result["listed"] is False
         assert result["details"]["skipped"] == "not configured"
+        # Verifica ATTIVA: il client httpx non deve mai essere invocato
+        mock_client.post.assert_not_called()
 
     async def test_opencti_no_network_when_disabled(self):
         """OpenCTI disabilitato → blocco rete esplicito, zero chiamate."""
@@ -140,3 +142,5 @@ class TestNetworkBlockedExplicit:
 
         assert result["listed"] is False
         assert result["details"]["skipped"] == "not configured"
+        # Verifica ATTIVA: il client httpx non deve mai essere invocato
+        mock_client.post.assert_not_called()
