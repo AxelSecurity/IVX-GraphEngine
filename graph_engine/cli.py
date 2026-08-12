@@ -279,18 +279,23 @@ async def _main(args: argparse.Namespace) -> None:
 
 
 async def _print_history(history_input: str) -> None:
-    """Compute url_hash if needed, query history, print JSON."""
-    import hashlib
+    """Compute url_hash if needed, query history, print JSON.
 
-    from graph_engine.ingestion.pipeline import normalize_url
+    Uses the **same** ``ingest()`` pipeline as normal analysis
+    to guarantee the url_hash matches what was persisted at save time.
+    """
+    import re
+
+    from graph_engine.ingestion.pipeline import ingest
     from graph_engine.storage.repository import get_history_for_url_hash
 
-    # If the input looks like a URL (has a dot or starts with http), hash it
-    if "." in history_input or history_input.startswith("http"):
-        canonical = normalize_url(history_input)
-        url_hash = hashlib.sha256(canonical.encode()).hexdigest()
+    # SHA-256 hex digest → already a hash
+    if re.fullmatch(r"^[0-9a-f]{64}$", history_input, re.IGNORECASE):
+        url_hash = history_input.lower()
     else:
-        url_hash = history_input
+        # Raw URL — run the REAL L0 pipeline (refang → unwrap → canonicalize)
+        ingested = ingest(history_input)
+        url_hash = ingested["url_hash"]
 
     rows = await get_history_for_url_hash(url_hash)
 
