@@ -16,3 +16,4 @@ pyyaml>=6.0
 tldextract>=5.0  # Public Suffix List ufficiale — sostituisce lista TLD manuale incompleta
 httpx>=0.28.0  # HTTP client asincrono — L2 OSINT, coerenza con architettura async
 aiosqlite>=0.20.0  # async SQLite — persistenza append-only
+mmh3>=5.0  # MurmurHash3 — favicon hash (stile Shodan/Censys) per L3

@@ -166,6 +166,11 @@ async def _main(args: argparse.Namespace) -> None:
 
     l2_result = await l2_analyze(ingested["canonical_url"])
 
+    # ── L3 active low-interaction (redirect chain, favicon, JARM, diff fetch) ─
+    from graph_engine.active.analyzer import analyze as l3_analyze
+
+    l3_result = await l3_analyze(ingested["canonical_url"])
+
     budget = Budget(
         max_depth=args.max_depth,
         max_nodes=args.max_nodes,
@@ -181,6 +186,7 @@ async def _main(args: argparse.Namespace) -> None:
                 budget=budget,
                 capture_artifacts=not args.no_artifacts,
                 top_n_actions=args.top_n_actions,
+                profile=l3_result["recommended_profile"],
             )
 
             # ── Patch target with L0 fields ──────────────────────────────
@@ -232,6 +238,19 @@ async def _main(args: argparse.Namespace) -> None:
 
             # ── Register L2 Evidence ─────────────────────────────────────
             for ev in l2_result["evidence"]:
+                explorer.evidence.append(Evidence(
+                    target_id=tid,
+                    scope=EvidenceScope.target,
+                    scope_id=tid,
+                    layer=ev["layer"],
+                    key=ev["key"],
+                    value=ev["value"],
+                    weight=ev.get("weight", 1.0),
+                    produced_by=ev["produced_by"],
+                ))
+
+            # ── Register L3 Evidence ─────────────────────────────────────
+            for ev in l3_result["evidence"]:
                 explorer.evidence.append(Evidence(
                     target_id=tid,
                     scope=EvidenceScope.target,

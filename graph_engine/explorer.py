@@ -194,6 +194,7 @@ class StateGraphExplorer:
         )
 
         # --- browser context (isolated per target) -------------------------
+        extra_headers = self._profile.get("headers", {})
         context = await self._browser.new_context(
             user_agent=self._profile.get(
                 "user_agent",
@@ -203,6 +204,7 @@ class StateGraphExplorer:
             viewport={"width": 1280, "height": 720},
             locale=self._profile.get("locale", "en-US"),
             timezone_id=self._profile.get("timezone", "America/New_York"),
+            extra_http_headers=extra_headers if extra_headers else None,
         )
         try:
             page = await context.new_page()

@@ -293,6 +293,140 @@ graph_engine/osint/
         registry.py       — get_enabled_providers()
 ```
 
+## L3 — Attivo low-interaction
+
+Il livello L3 interagisce ATTIVAMENTE con il target, ma solo a bassa intensità:
+richieste HTTP senza esecuzione JavaScript e una connessione TLS per il
+fingerprinting JARM. Non viene mai eseguito codice della pagina, non vengono
+compilati form, non viene aperto un browser.
+
+### Fonti
+
+| Fonte | Tipo | Target | Rischio |
+|---|---|---|---|
+| **Redirect chain** | HTTP manuale | L'URL stesso | Minimo — richieste HEAD/GET senza cookie |
+| **Favicon hash** | HTTP GET | `/favicon.ico` | Minimo — una richiesta statica |
+| **JARM** | Connessione TLS | `hostname:443` | Basso — 10 Client Hello TLS senza completare l'handshake |
+| **Differential fetch** | HTTP parallelo | L'URL stesso | Basso — 4 richieste GET con User-Agent diversi |
+
+### Redirect chain (`graph_engine/active/redirect_chain.py`)
+
+Segue MANUALMENTE i redirect HTTP con `follow_redirects=False`, registrando
+per ogni hop: `status_code`, `location`, `server` header, e i **nomi** dei
+cookie (MAI i valori). Si ferma a `max_hops=10` o quando arriva una risposta
+non-redirect. Gli errori di rete diventano un hop con `{"error": "..."}` —
+mai eccezioni verso il chiamante.
+
+### Favicon hash (`graph_engine/active/favicon.py`)
+
+Prova `/favicon.ico` sulla root del dominio. L'algoritmo hash è ESATTAMENTE
+quello di Shodan/Censys:
+
+1. Scarica i byte grezzi del favicon
+2. `encoded = base64.encodebytes(raw_bytes)` — **NON** `base64.b64encode`!
+   `encodebytes` produce output MIME-style con a-capo ogni 76 caratteri.
+   Se si usa `b64encode` (plain, senza a-capo) l'hash mmh3 risulterà DIVERSO.
+   Il test `test_base64_encodebytes_vs_b64encode_produce_different_hashes`
+   verifica ATTIVAMENTE questa distinzione.
+3. `h = mmh3.hash32(encoded)` — MurmurHash3 32-bit signed. `mmh3.hash32`
+   restituisce già un intero con segno, non serve conversione esplicita.
+
+**LIMITAZIONE ATTUALE**: solo `/favicon.ico` sulla root del dominio. Il
+parsing di `<link rel="icon">` dal body HTML non è ancora implementato.
+Documentato nel codice con un commento.
+
+### JARM (`graph_engine/active/jarm.py`)
+
+**Implementazione**: vendorizzata da [Salesforce/jarm](https://github.com/salesforce/jarm)
+(BSD 3-Clause) in `graph_engine/active/vendor/jarm_reference.py`. La logica
+di costruzione del TLS ClientHello è PRESERVATA ESATTAMENTE dall'originale —
+è stata rifattorizzata SOLO per:
+- rimuovere argparse e print (da CLI a libreria)
+- rendere host/port parametri espliciti
+- rimuovere il supporto proxy SOCKS5
+
+Il PyPI package `jarm` NON è il tool Salesforce (è un package non correlato
+di "rayan haddad"). Per questo motivo è stato necessario vendorizzare.
+
+**Esecuzione asincrona**: la computazione JARM è sincrona e basata su socket
+grezzi. Viene wrappata con `asyncio.to_thread()` per non bloccare l'event
+loop, con un timeout esplicito (`timeout_s + 2s` di margine).
+
+### Differential fetch (`graph_engine/active/differential_fetch.py`)
+
+Quattro profili HTTP predefiniti:
+
+| Profilo | User-Agent | Note |
+|---|---|---|
+| `desktop_chrome` | Chrome 125 su Windows 10 | Default L4 |
+| `mobile_safari` | Safari su iPhone iOS 17.5 | Mobile |
+| `bot_googlebot` | Googlebot 2.1 | Crawler |
+| `no_referer_desktop` | Chrome 125 su Windows 10 | Nessun Referer |
+
+Tutti i profili vengono eseguiti IN PARALLELO (`asyncio.gather`). Per
+ciascuno si registra: `status_code`, `final_url`, `content_length`,
+`body_sha256`.
+
+**Cloaking detection**: confronta status code, URL finali e hash dei body
+tra tutti i profili. Se divergono, `cloaking_detected=True` e viene
+raccomandato il profilo che ha ricevuto la risposta "più ricca"
+(content_length maggiore tra i profili non divergenti).
+
+**Recommend profile**: restituisce un dict `{user_agent, headers}` pronto
+per `browser.new_context()` di Playwright in L4.
+
+### Orchestratore (`graph_engine/active/analyzer.py`)
+
+`analyze(canonical_url)` esegue tutte e quattro le sonde IN PARALLELO.
+JARM ha bisogno solo di hostname/porta, quindi può partire insieme alle
+altre. Un fallimento su una sonda non blocca MAI le altre
+(`asyncio.gather` con `return_exceptions=True`).
+
+**Segnali estratti**:
+- `redirect_hop_count` — numero di hop e redirect (peso: 0.05 se >= 3 redirect)
+- `excessive_redirects` — >= 5 redirect (peso: 0.15)
+- `unusual_server_header` — server header non standard (peso: 0.05)
+- `favicon_hash` — hash mmh3 del favicon (peso: 0.05)
+- `jarm_fingerprint` — JARM hash a 62 caratteri (peso: 0.10)
+- `cloaking_detected` — cloaking rilevato tra profili (peso: 0.25)
+- `differential_fetch_summary` — riepilogo profili (peso: 0.0, informativo)
+- `active_probe_error` — fallimento di una sonda (peso: 0.0, informativo)
+
+### Wiring L3 → L4
+
+Il `recommended_profile` prodotto dall'analyzer L3 viene passato a
+`StateGraphExplorer.run(profile=...)`. Il profilo contiene
+`user_agent` e `headers`:
+
+- `user_agent` → `browser.new_context(user_agent=...)`
+- `headers` → `browser.new_context(extra_http_headers=...)`
+
+Playwright applica questi header a OGNI richiesta HTTP del browser,
+permettendo di emulare il profilo che L3 ha determinato essere il più
+adatto per quel target (es. il profilo che ha ricevuto la risposta
+"più ricca" in caso di cloaking).
+
+### Architettura del package
+
+```
+graph_engine/active/
+    __init__.py
+    analyzer.py              — orchestratore parallelo
+    redirect_chain.py        — tracciamento manuale HTTP redirect
+    favicon.py               — hash favicon stile Shodan/Censys
+    jarm.py                  — wrapper asincrono JARM
+    differential_fetch.py    — fetch multi-profilo + cloaking detection
+    vendor/
+        __init__.py
+        jarm_reference.py    — implementazione Salesforce (BSD 3-Clause)
+```
+
+### Dipendenze
+
+- `mmh3>=5.0` — MurmurHash3 per favicon hash
+- `httpx` — già presente per L2, usato anche per le richieste HTTP L3
+- Nessuna dipendenza aggiuntiva per JARM (socket stdlib + hashlib)
+
 ## Persistenza SQLite
 
 A partire da Agosto 2026, ogni esplorazione viene salvata automaticamente in un
