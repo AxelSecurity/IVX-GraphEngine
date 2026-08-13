@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from graph_engine.config import settings
 from graph_engine.osint.analyzer import analyze
 
 
 class TestAnalyzerIntegration:
-    async def test_all_sources_in_parallel(self):
+    async def test_all_sources_in_parallel(self, monkeypatch):
         """Verifica che le fonti vengano chiamate (anche se mockate)."""
+        # URLhaus è condizionale alla Auth-Key: la configuriamo perché
+        # il registry lo includa tra i provider abilitati.
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         # Per questo test, mockiamo direttamente le tre funzioni di query
         # per evitare di dover mockare httpx a più livelli
         with patch(
@@ -58,8 +62,9 @@ class TestAnalyzerIntegration:
             mock_dns.assert_called_once()
             mock_urlhaus.assert_called_once()
 
-    async def test_one_source_failure_doesnt_block_others(self):
+    async def test_one_source_failure_doesnt_block_others(self, monkeypatch):
         """Se una fonte fallisce, le altre producono comunque risultati."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         with patch(
             "graph_engine.osint.analyzer.query_crtsh",
             new_callable=AsyncMock,
@@ -128,8 +133,9 @@ class TestAnalyzerIntegration:
         assert result["evidence"] == []
         assert result["passive_risk_score"] == 0.0
 
-    async def test_young_domain_increases_risk(self):
+    async def test_young_domain_increases_risk(self, monkeypatch):
         """Dominio < 30 giorni → peso alto (0.35)."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         with patch(
             "graph_engine.osint.analyzer.query_crtsh",
             new_callable=AsyncMock,
@@ -156,8 +162,9 @@ class TestAnalyzerIntegration:
 
             assert result["passive_risk_score"] == 0.35  # solo domain_age young
 
-    async def test_reputation_hit_high_weight(self):
+    async def test_reputation_hit_high_weight(self, monkeypatch):
         """URLhaus hit → peso molto alto (0.50)."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         with patch(
             "graph_engine.osint.analyzer.query_crtsh",
             new_callable=AsyncMock,
@@ -188,8 +195,9 @@ class TestAnalyzerIntegration:
             hit_ev = [e for e in result["evidence"] if e["key"] == "reputation_hit"]
             assert len(hit_ev) == 1
 
-    async def test_risk_score_clamped_to_one(self):
+    async def test_risk_score_clamped_to_one(self, monkeypatch):
         """Il rischio non supera mai 1.0."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         with patch(
             "graph_engine.osint.analyzer.query_crtsh",
             new_callable=AsyncMock,
@@ -221,8 +229,9 @@ class TestAnalyzerIntegration:
             # 0.35 + 0.30 + 0.50 = 1.15 → clampato a 1.0
             assert result["passive_risk_score"] <= 1.0
 
-    async def test_evidence_layer_is_l2(self):
+    async def test_evidence_layer_is_l2(self, monkeypatch):
         """Tutte le evidenze devono avere layer='L2'."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         with patch(
             "graph_engine.osint.analyzer.query_crtsh",
             new_callable=AsyncMock,
@@ -253,8 +262,9 @@ class TestAnalyzerIntegration:
                 assert ev["layer"] == "L2"
                 assert ev["scope"] == "target"
 
-    async def test_old_domain_no_penalty(self):
+    async def test_old_domain_no_penalty(self, monkeypatch):
         """Dominio > 90 giorni → NESSUNA evidenza domain_age (nessuna penalità)."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         with patch(
             "graph_engine.osint.analyzer.query_crtsh",
             new_callable=AsyncMock,

@@ -19,6 +19,7 @@ _ALL_CONFIG_FIELDS = (
     "misp_api_key",
     "opencti_url",
     "opencti_api_key",
+    "urlhaus_api_key",
     "trellix_api_token",
 )
 

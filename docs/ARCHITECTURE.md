@@ -211,19 +211,27 @@ il target. Tutte le query sono in **parallelo** (`asyncio.gather` con
 |---|---|---|---|
 | **crt.sh** | Certificate Transparency | `https://crt.sh/?q=<domain>&output=json` | 6 ore |
 | **RDAP** | WHOIS moderno (via bootstrap IANA) | `https://data.iana.org/rdap/dns.json` → server TLD-specifico | 24 ore |
-| **URLhaus** | Reputation / threat feed | `https://urlhaus-api.abuse.ch/v1/url/` | 1 ora |
 | **DNS** | Risoluzione A/AAAA | `loop.getaddrinfo` (asyncio nativo, nessuna dipendenza esterna) | 1 ora |
 
 ### Adapter predisposti (disabilitati di default)
 
 | Provider | Variabili d'ambiente richieste | Stato |
 |---|---|---|
+| **URLhaus** | `URLHAUS_API_KEY` | Disabilitato — si attiva automaticamente quando la chiave è presente |
 | **MISP** | `MISP_URL` + `MISP_API_KEY` | Disabilitato — si attiva automaticamente quando entrambe le variabili sono presenti |
 | **OpenCTI** | `OPENCTI_URL` + `OPENCTI_API_KEY` | Disabilitato — stessa logica |
 
-Per attivare MISP o OpenCTI, basta impostare le variabili d'ambiente
-corrispondenti. Nessuna modifica al codice necessaria: il `registry.py`
-rileva le variabili a runtime e istanzia i provider.
+URLhaus richiede ora una Auth-Key gratuita (registrazione su
+https://auth.abuse.ch/), inviata nell'header `Auth-Key` di ogni
+richiesta verso `https://urlhaus-api.abuse.ch/v1/url/` (endpoint
+invariato). Senza chiave il provider restituisce `skipped: "not
+configured"` senza tentare alcuna chiamata HTTP — stesso pattern di
+MISP/OpenCTI. Una risposta 401 con chiave configurata (chiave invalida
+o scaduta) produce evidenza `provider_unavailable`, mai un'eccezione.
+
+Per attivare URLhaus, MISP o OpenCTI, basta impostare le variabili
+d'ambiente corrispondenti. Nessuna modifica al codice necessaria: il
+`registry.py` rileva le variabili a runtime e istanzia i provider.
 
 ### Segnali estratti
 
@@ -297,7 +305,7 @@ graph_engine/osint/
     reputation/
         __init__.py
         base.py          — ReputationProvider (ABC)
-        urlhaus.py       — URLhaus (sempre attivo)
+        urlhaus.py       — URLhaus (richiede Auth-Key)
         misp.py           — MISP adapter (disabilitato di default)
         opencti.py        — OpenCTI adapter (disabilitato di default)
         registry.py       — get_enabled_providers()
@@ -757,11 +765,13 @@ più permessa nei moduli.
 | `MISP_API_KEY` | `misp_api_key` | provider MISP (L2) | richiede anche `MISP_URL` |
 | `OPENCTI_URL` | `opencti_url` | provider OpenCTI (L2) | richiede anche `OPENCTI_API_KEY` (`opencti_configured`) |
 | `OPENCTI_API_KEY` | `opencti_api_key` | provider OpenCTI (L2) | richiede anche `OPENCTI_URL` |
+| `URLHAUS_API_KEY` | `urlhaus_api_key` | provider URLhaus (L2) | campo singolo (`urlhaus_configured`); endpoint fisso `urlhaus-api.abuse.ch`, chiave gratuita da https://auth.abuse.ch/ |
 | `TRELLIX_API_TOKEN` | `trellix_api_token` | auth Bearer su `/trellix/analyze` | campo singolo (`trellix_auth_required`) |
 
 Le property `foundry_configured` / `misp_configured` / `opencti_configured`
 richiedono **ENTRAMBE** le variabili della coppia (una sola non basta);
-`trellix_auth_required` è True se il token è impostato (e non vuoto).
+`urlhaus_configured` e `trellix_auth_required` sono True con il singolo
+valore impostato (e non vuoto).
 
 ### Attivazione
 
@@ -776,6 +786,7 @@ MISP_URL=https://misp.example.org        # → provider MISP attivo in L2
 MISP_API_KEY=<api-key>
 OPENCTI_URL=https://opencti.example.org  # → provider OpenCTI attivo in L2
 OPENCTI_API_KEY=<api-key>
+URLHAUS_API_KEY=<auth-key>               # → provider URLhaus attivo in L2 (gratuita, https://auth.abuse.ch/)
 TRELLIX_API_TOKEN=<token>                # → /trellix/analyze richiede Bearer
 ```
 

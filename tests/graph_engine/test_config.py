@@ -22,6 +22,7 @@ ALL_ENV_VARS = {
     "misp_api_key": "MISP_API_KEY",
     "opencti_url": "OPENCTI_URL",
     "opencti_api_key": "OPENCTI_API_KEY",
+    "urlhaus_api_key": "URLHAUS_API_KEY",
     "trellix_api_token": "TRELLIX_API_TOKEN",
 }
 
@@ -49,6 +50,7 @@ class TestSettingsFields:
         monkeypatch.setenv("MISP_API_KEY", "misp-key")
         monkeypatch.setenv("OPENCTI_URL", "https://opencti.example.com")
         monkeypatch.setenv("OPENCTI_API_KEY", "opencti-key")
+        monkeypatch.setenv("URLHAUS_API_KEY", "urlhaus-key")
         monkeypatch.setenv("TRELLIX_API_TOKEN", "trellix-token")
 
         s = Settings(_env_file=None)
@@ -59,6 +61,7 @@ class TestSettingsFields:
         assert s.misp_api_key == "misp-key"
         assert s.opencti_url == "https://opencti.example.com"
         assert s.opencti_api_key == "opencti-key"
+        assert s.urlhaus_api_key == "urlhaus-key"
         assert s.trellix_api_token == "trellix-token"
 
     def test_whitespace_stripped_from_values(self, monkeypatch):
@@ -99,11 +102,13 @@ class TestConfiguredProperties:
             misp_api_key="k1",
             opencti_url="https://opencti.example.com",
             opencti_api_key="k2",
+            urlhaus_api_key="k3",
             trellix_api_token="t1",
         )
         assert s.foundry_configured is True
         assert s.misp_configured is True
         assert s.opencti_configured is True
+        assert s.urlhaus_configured is True
         assert s.trellix_auth_required is True
 
     def test_only_one_of_pair_is_false(self):
@@ -134,6 +139,7 @@ class TestConfiguredProperties:
         assert s.foundry_configured is False
         assert s.misp_configured is False
         assert s.opencti_configured is False
+        assert s.urlhaus_configured is False
         assert s.trellix_auth_required is False
 
     def test_trellix_single_field(self):
@@ -141,11 +147,18 @@ class TestConfiguredProperties:
         s = _clean_settings(trellix_api_token="t1")
         assert s.trellix_auth_required is True
 
+    def test_urlhaus_single_field(self):
+        """URLhaus ha un solo campo (endpoint fisso): chiave presente →
+        configurato."""
+        s = _clean_settings(urlhaus_api_key="k")
+        assert s.urlhaus_configured is True
+
     def test_empty_string_not_configured(self):
         """Stringa vuota (es. ``TRELLIX_API_TOKEN=`` in .env) → non
         configurata — identico al vecchio ``if token:``."""
-        s = _clean_settings(trellix_api_token="")
+        s = _clean_settings(trellix_api_token="", urlhaus_api_key="")
         assert s.trellix_auth_required is False
+        assert s.urlhaus_configured is False
 
 
 class TestModuleSingleton:
@@ -159,4 +172,5 @@ class TestModuleSingleton:
         assert isinstance(settings.foundry_configured, bool)
         assert isinstance(settings.misp_configured, bool)
         assert isinstance(settings.opencti_configured, bool)
+        assert isinstance(settings.urlhaus_configured, bool)
         assert isinstance(settings.trellix_auth_required, bool)

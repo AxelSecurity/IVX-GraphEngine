@@ -32,6 +32,7 @@ _CONFIG_FIELDS = (
     "misp_api_key",
     "opencti_url",
     "opencti_api_key",
+    "urlhaus_api_key",
     "trellix_api_token",
 )
 
@@ -56,6 +57,9 @@ class Settings(BaseSettings):
     # ── OpenCTI (provider reputazione L2) ───────────────────────────
     opencti_url: Optional[str] = None
     opencti_api_key: Optional[str] = None
+
+    # ── URLhaus (provider reputazione L2, abuse.ch) ──────────────────
+    urlhaus_api_key: Optional[str] = None
 
     # ── Endpoint Trellix (/trellix/analyze) ─────────────────────────
     trellix_api_token: Optional[str] = None
@@ -88,6 +92,16 @@ class Settings(BaseSettings):
     def opencti_configured(self) -> bool:
         """True se URL e API key OpenCTI sono entrambi presenti."""
         return bool(self.opencti_url and self.opencti_api_key)
+
+    @property
+    def urlhaus_configured(self) -> bool:
+        """True se la Auth-Key URLhaus è presente.
+
+        A differenza di MISP/OpenCTI non serve una coppia URL+key:
+        l'endpoint abuse.ch è fisso e noto (``URLHAUS_API_URL``),
+        quindi basta la sola chiave.
+        """
+        return bool(self.urlhaus_api_key)
 
     @property
     def trellix_auth_required(self) -> bool:
