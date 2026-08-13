@@ -138,6 +138,62 @@ class TestDnsResolve:
 
         assert result["a_records"] == ["10.0.0.1", "10.0.0.2"]
 
+    async def test_ipv4_mapped_addresses_filtered_from_aaaa(self):
+        """IPv4-mapped ("::ffff:...") nel risultato AF_INET6 → scartati.
+
+        Su alcuni sistemi (macOS incluso) getaddrinfo con family=AF_INET6
+        restituisce l'IPv4 mappato nello spazio IPv6 quando l'host non ha
+        record AAAA reali (RFC 4291 §2.5.5.2, artefatto del resolver).
+        Non è un record IPv6 pubblicato dal dominio: aaaa_records deve
+        restare vuoto.
+        """
+        fake_a = _fake_addrinfo("93.184.216.34")
+        fake_aaaa_mapped = [
+            (socket.AF_INET6, 0, 0, "", ("::ffff:93.184.216.34", 0, 0, 0)),
+        ]
+
+        async def mock_getaddrinfo(host, port, **kwargs):
+            if kwargs.get("family") == socket.AF_INET:
+                return fake_a
+            return fake_aaaa_mapped
+
+        with patch.object(
+            asyncio.get_running_loop(), "getaddrinfo", side_effect=mock_getaddrinfo
+        ):
+            result = await resolve_dns("mapped.example.com")
+
+        assert result["a_records"] == ["93.184.216.34"]
+        assert result["aaaa_records"] == [], (
+            f"IPv4-mapped non filtrato: {result['aaaa_records']!r}"
+        )
+        assert result["error"] is None
+
+    async def test_mixed_real_and_mapped_aaaa_keeps_only_real(self):
+        """AAAA reali e IPv4-mapped nella stessa risposta → sopravvive
+        solo l'indirizzo IPv6 vero."""
+        fake_a = _fake_addrinfo("93.184.216.34")
+        fake_aaaa_mixed = [
+            (socket.AF_INET6, 0, 0, "",
+             ("2606:2800:220:1:248:1893:25c8:1946", 0, 0, 0)),
+            (socket.AF_INET6, 0, 0, "", ("::ffff:93.184.216.34", 0, 0, 0)),
+        ]
+
+        async def mock_getaddrinfo(host, port, **kwargs):
+            if kwargs.get("family") == socket.AF_INET:
+                return fake_a
+            return fake_aaaa_mixed
+
+        with patch.object(
+            asyncio.get_running_loop(), "getaddrinfo", side_effect=mock_getaddrinfo
+        ):
+            result = await resolve_dns("mixed.example.com")
+
+        assert result["aaaa_records"] == [
+            "2606:2800:220:1:248:1893:25c8:1946"
+        ], (
+            f"Atteso solo l'AAAA reale, ottenuto {result['aaaa_records']!r}"
+        )
+
 
 class TestDnsCache:
     """Verifica che la cache venga usata correttamente."""

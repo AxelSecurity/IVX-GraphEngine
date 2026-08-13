@@ -44,7 +44,9 @@ async def resolve_dns(
     Returns:
         dict con chiavi:
         - ``a_records``: list[str] — indirizzi IPv4
-        - ``aaaa_records``: list[str] — indirizzi IPv6
+        - ``aaaa_records``: list[str] — indirizzi IPv6; gli indirizzi
+          IPv4-mapped ("::ffff:...") restituiti da alcuni resolver
+          vengono scartati (non sono record AAAA reali)
         - ``error``: str | None — messaggio di errore se la risoluzione
           fallisce, ``None`` altrimenti
 
@@ -79,6 +81,14 @@ async def resolve_dns(
             addresses: list[str] = []
             for _, _, _, _, sockaddr in addrinfo:
                 addr = sockaddr[0]
+                # Su alcuni sistemi (macOS incluso), getaddrinfo con
+                # family=AF_INET6 su un host SENZA record AAAA reali può
+                # restituire l'indirizzo IPv4 mappato nello spazio IPv6
+                # ("::ffff:a.b.c.d", RFC 4291 §2.5.5.2). Non è un record
+                # IPv6 pubblicato dal dominio: è un artefatto del
+                # resolver di sistema. Lo scartiamo esplicitamente.
+                if family == socket.AF_INET6 and addr.startswith("::ffff:"):
+                    continue
                 if addr not in addresses:
                     addresses.append(addr)
             return addresses
