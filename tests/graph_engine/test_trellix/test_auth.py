@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from graph_engine.config import settings
+
 
 class TestAuth:
     """Test del meccanismo di auth opzionale TRELLIX_API_TOKEN."""
 
     async def test_no_token_configured_allows_all(self, client, monkeypatch):
         """Senza TRELLIX_API_TOKEN → nessuna auth richiesta."""
-        monkeypatch.delenv("TRELLIX_API_TOKEN", raising=False)
+        monkeypatch.setattr(settings, "trellix_api_token", None)
 
         # Mock della pipeline per evitare che l'analisi parta davvero
         async def _fake_pipeline(*args, **kwargs):
@@ -28,7 +30,7 @@ class TestAuth:
 
     async def test_token_required_when_configured(self, client, monkeypatch):
         """TRELLIX_API_TOKEN impostato, nessuna auth → 401."""
-        monkeypatch.setenv("TRELLIX_API_TOKEN", "secret-token")
+        monkeypatch.setattr(settings, "trellix_api_token", "secret-token")
 
         res = await client.get(
             "/trellix/analyze?url=https://example.com",
@@ -38,7 +40,7 @@ class TestAuth:
 
     async def test_wrong_token_returns_401(self, client, monkeypatch):
         """Token sbagliato → 401."""
-        monkeypatch.setenv("TRELLIX_API_TOKEN", "secret-token")
+        monkeypatch.setattr(settings, "trellix_api_token", "secret-token")
 
         res = await client.get(
             "/trellix/analyze?url=https://example.com",
@@ -48,7 +50,7 @@ class TestAuth:
 
     async def test_correct_token_passes(self, client, monkeypatch):
         """Token corretto → 200, analisi procede."""
-        monkeypatch.setenv("TRELLIX_API_TOKEN", "secret-token")
+        monkeypatch.setattr(settings, "trellix_api_token", "secret-token")
 
         async def _fake_pipeline(*args, **kwargs):
             return "test-id"
@@ -66,7 +68,7 @@ class TestAuth:
 
     async def test_malformed_auth_header_returns_401(self, client, monkeypatch):
         """Header Authorization malformato (non inizia con 'Bearer ') → 401."""
-        monkeypatch.setenv("TRELLIX_API_TOKEN", "secret-token")
+        monkeypatch.setattr(settings, "trellix_api_token", "secret-token")
 
         res = await client.get(
             "/trellix/analyze?url=https://example.com",

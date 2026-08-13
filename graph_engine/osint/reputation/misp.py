@@ -8,18 +8,17 @@ senza tentare alcuna chiamata HTTP.
 
 from __future__ import annotations
 
-import os
-
 import httpx
 
+from graph_engine.config import settings
 from graph_engine.osint.reputation.base import ReputationProvider
 
 MISP_TIMEOUT = 15.0
 
 
 def _is_configured() -> bool:
-    """True se entrambe le variabili d'ambiente MISP sono presenti."""
-    return bool(os.environ.get("MISP_URL") and os.environ.get("MISP_API_KEY"))
+    """True se entrambe le variabili MISP sono presenti (vedi config)."""
+    return settings.misp_configured
 
 
 class MispProvider(ReputationProvider):
@@ -27,8 +26,8 @@ class MispProvider(ReputationProvider):
 
     def __init__(self) -> None:
         self._provider = "misp"
-        self._base_url = os.environ.get("MISP_URL", "")
-        self._api_key = os.environ.get("MISP_API_KEY", "")
+        self._base_url = settings.misp_url or ""
+        self._api_key = settings.misp_api_key or ""
 
     async def check(self, url: str, client: httpx.AsyncClient) -> dict:
         """Cerca *url* in MISP. Se non configurato, restituisce skipped."""

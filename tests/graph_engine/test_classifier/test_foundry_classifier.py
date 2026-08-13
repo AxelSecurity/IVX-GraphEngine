@@ -11,10 +11,10 @@ from __future__ import annotations
 import sys
 import uuid
 from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
+from graph_engine.config import settings
 from graph_engine.classifier.foundry_classifier import (
     _FoundryNotConfigured,
     classify,
@@ -147,7 +147,9 @@ class TestStatelessThreadCreation:
     """Every classify() call MUST create a fresh thread."""
 
     @pytest.mark.asyncio
-    async def test_real_code_never_reuses_thread_across_classify_calls(self):
+    async def test_real_code_never_reuses_thread_across_classify_calls(
+        self, monkeypatch
+    ):
         """Execute the REAL ``_new_thread_id`` and ``_call_foundry_agent``
         code path, faking only the Azure SDK boundary (``sys.modules``).
 
@@ -172,13 +174,18 @@ class TestStatelessThreadCreation:
 
         saved = _register_fake_azure_modules(_FakeClient)
         try:
-            with patch.dict("os.environ", {
-                "AZURE_FOUNDRY_ENDPOINT": "https://fake-fallback.openai.azure.com",
-                "AZURE_FOUNDRY_AGENT_ID": "fake-agent-id",
-            }):
-                v1 = await classify(_sample_bundle())
-                v2 = await classify(_sample_bundle())
-                v3 = await classify(_sample_bundle())
+            monkeypatch.setattr(
+                settings,
+                "azure_foundry_endpoint",
+                "https://fake-fallback.openai.azure.com",
+            )
+            monkeypatch.setattr(
+                settings, "azure_foundry_agent_id", "fake-agent-id"
+            )
+
+            v1 = await classify(_sample_bundle())
+            v2 = await classify(_sample_bundle())
+            v3 = await classify(_sample_bundle())
 
             # ── Assertions ──────────────────────────────────────────────
             # 1. create_thread called exactly 3 times
@@ -251,17 +258,19 @@ class TestStatelessThreadCreation:
         )
 
     @pytest.mark.asyncio
-    async def test_foundry_not_configured_falls_back(self):
+    async def test_foundry_not_configured_falls_back(self, monkeypatch):
         """When env vars are missing, return heuristic verdict (no crash)."""
-        with patch.dict("os.environ", {}, clear=True):
-            bundle = _sample_bundle()
-            verdict = await classify(bundle)
+        monkeypatch.setattr(settings, "azure_foundry_endpoint", None)
+        monkeypatch.setattr(settings, "azure_foundry_agent_id", None)
 
-            assert verdict is not None
-            assert verdict.classification == Classification.suspicious
-            assert verdict.produced_by == "heuristic_fallback"
-            assert verdict.confidence <= 0.3
-            assert "Heuristic fallback" in (verdict.rationale or "")
+        bundle = _sample_bundle()
+        verdict = await classify(bundle)
+
+        assert verdict is not None
+        assert verdict.classification == Classification.suspicious
+        assert verdict.produced_by == "heuristic_fallback"
+        assert verdict.confidence <= 0.3
+        assert "Heuristic fallback" in (verdict.rationale or "")
 
 
 # ---------------------------------------------------------------------------
@@ -339,15 +348,19 @@ class TestFoundryNotConfigured:
     """_call_foundry_agent must raise _FoundryNotConfigured cleanly."""
 
     @pytest.mark.asyncio
-    async def test_missing_env_vars_raises(self):
-        with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(_FoundryNotConfigured):
-                await _call_foundry_agent("prompt", [])
+    async def test_missing_env_vars_raises(self, monkeypatch):
+        monkeypatch.setattr(settings, "azure_foundry_endpoint", None)
+        monkeypatch.setattr(settings, "azure_foundry_agent_id", None)
+        with pytest.raises(_FoundryNotConfigured):
+            await _call_foundry_agent("prompt", [])
 
     @pytest.mark.asyncio
-    async def test_missing_agent_id_raises(self):
-        with patch.dict("os.environ", {
-            "AZURE_FOUNDRY_ENDPOINT": "https://example.openai.azure.com",
-        }, clear=True):
-            with pytest.raises(_FoundryNotConfigured):
-                await _call_foundry_agent("prompt", [])
+    async def test_missing_agent_id_raises(self, monkeypatch):
+        monkeypatch.setattr(
+            settings,
+            "azure_foundry_endpoint",
+            "https://example.openai.azure.com",
+        )
+        monkeypatch.setattr(settings, "azure_foundry_agent_id", None)
+        with pytest.raises(_FoundryNotConfigured):
+            await _call_foundry_agent("prompt", [])

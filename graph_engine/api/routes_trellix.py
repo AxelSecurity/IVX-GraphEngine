@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -41,6 +40,7 @@ from graph_engine.api.fast_profile import (
 )
 from graph_engine.api.pipeline_runner import run_full_analysis
 from graph_engine.api.trellix_verdict import build_trellix_response, entry_response
+from graph_engine.config import settings
 from graph_engine.models import AnalysisTarget
 from graph_engine.storage.repository import get_latest_for_url_hash, save_target
 from graph_engine.storage.schema import DEFAULT_DB_PATH
@@ -50,7 +50,6 @@ logger = logging.getLogger("graph_engine.api.trellix")
 # ── Costanti ────────────────────────────────────────────────────────────────
 
 _CACHE_TTL_HOURS = 24
-_AUTH_ENV = "TRELLIX_API_TOKEN"
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +98,7 @@ def build_trellix_router(
                  applichiamo ``unquote()`` una volta aggiuntiva.
         """
         # ── 0. Auth ────────────────────────────────────────────────────
-        token = os.environ.get(_AUTH_ENV)
+        token = settings.trellix_api_token
         if token:
             auth_header = request.headers.get("Authorization", "")
             if not _check_token(auth_header, token):

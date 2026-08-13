@@ -8,20 +8,17 @@ senza tentare alcuna chiamata HTTP.
 
 from __future__ import annotations
 
-import os
-
 import httpx
 
+from graph_engine.config import settings
 from graph_engine.osint.reputation.base import ReputationProvider
 
 OPENCTI_TIMEOUT = 15.0
 
 
 def _is_configured() -> bool:
-    """True se entrambe le variabili d'ambiente OpenCTI sono presenti."""
-    return bool(
-        os.environ.get("OPENCTI_URL") and os.environ.get("OPENCTI_API_KEY")
-    )
+    """True se entrambe le variabili OpenCTI sono presenti (vedi config)."""
+    return settings.opencti_configured
 
 
 class OpenCtiProvider(ReputationProvider):
@@ -29,8 +26,8 @@ class OpenCtiProvider(ReputationProvider):
 
     def __init__(self) -> None:
         self._provider = "opencti"
-        self._base_url = os.environ.get("OPENCTI_URL", "")
-        self._api_key = os.environ.get("OPENCTI_API_KEY", "")
+        self._base_url = settings.opencti_url or ""
+        self._api_key = settings.opencti_api_key or ""
 
     async def check(self, url: str, client: httpx.AsyncClient) -> dict:
         """Cerca *url* in OpenCTI. Se non configurato, restituisce skipped."""

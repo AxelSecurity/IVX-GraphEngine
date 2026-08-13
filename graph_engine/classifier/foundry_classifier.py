@@ -23,6 +23,7 @@ import logging
 import os
 from typing import Optional
 
+from graph_engine.config import settings
 from graph_engine.models import Classification, Verdict
 
 logger = logging.getLogger(__name__)
@@ -150,8 +151,8 @@ async def _call_foundry_agent(
     Raises ``_FoundryNotConfigured`` if env vars are missing.
     """
 
-    endpoint = os.getenv("AZURE_FOUNDRY_ENDPOINT", "").strip()
-    agent_id = os.getenv("AZURE_FOUNDRY_AGENT_ID", "").strip()
+    endpoint = settings.azure_foundry_endpoint or ""
+    agent_id = settings.azure_foundry_agent_id or ""
 
     if not endpoint or not agent_id:
         raise _FoundryNotConfigured("AZURE_FOUNDRY_ENDPOINT or AGENT_ID not set")

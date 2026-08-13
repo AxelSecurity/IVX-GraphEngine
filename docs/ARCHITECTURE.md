@@ -722,3 +722,70 @@ I test del wrapper sono in `tests/graph_engine/test_trellix/`:
   `run_full_analysis`, timeout fire-and-continue (il task completa DOPO la
   risposta e il risultato è su SQLite), URL doppio-encodato
 - `test_auth.py` — token richiesto quando configurato, assente altrimenti
+
+## Configurazione
+
+Tutta la configurazione dell'engine passa da **un unico modulo**:
+[`graph_engine/config.py`](../graph_engine/config.py) — single source of
+truth per endpoint e API key.  Nessuna lettura diretta di `os.environ` è
+più permessa nei moduli.
+
+### Come funziona
+
+- Classe `Settings(BaseSettings)` (pydantic-settings) con `env_file=".env"`,
+  `env_file_encoding="utf-8"`, `extra="ignore"` — variabili ignote non
+  causano errori.
+- Tutti i campi sono `Optional[str] = None`: senza alcuna configurazione
+  il progetto funziona degradato esattamente come prima (provider di
+  reputazione extra disabilitati, L5 con fallback euristico, endpoint
+  Trellix aperto).
+- I nomi di campo sono snake_case e si mappano alle variabili d'ambiente
+  MAIUSCOLE: `azure_foundry_endpoint` ← `AZURE_FOUNDRY_ENDPOINT`, ecc.
+- I valori stringa vengono strippati degli spazi accidentali (preserva il
+  comportamento storico del classificatore Foundry, che faceva
+  `os.getenv(...).strip()`).
+- Istanza singleton `settings = Settings()` — tutti i moduli importano
+  `from graph_engine.config import settings`.
+
+### Variabili
+
+| Variabile | Campo | Attiva | Note |
+|---|---|---|---|
+| `AZURE_FOUNDRY_ENDPOINT` | `azure_foundry_endpoint` | L5 Foundry | richiede anche `AGENT_ID` (`foundry_configured`) |
+| `AZURE_FOUNDRY_AGENT_ID` | `azure_foundry_agent_id` | L5 Foundry | richiede anche `ENDPOINT` |
+| `MISP_URL` | `misp_url` | provider MISP (L2) | richiede anche `MISP_API_KEY` (`misp_configured`) |
+| `MISP_API_KEY` | `misp_api_key` | provider MISP (L2) | richiede anche `MISP_URL` |
+| `OPENCTI_URL` | `opencti_url` | provider OpenCTI (L2) | richiede anche `OPENCTI_API_KEY` (`opencti_configured`) |
+| `OPENCTI_API_KEY` | `opencti_api_key` | provider OpenCTI (L2) | richiede anche `OPENCTI_URL` |
+| `TRELLIX_API_TOKEN` | `trellix_api_token` | auth Bearer su `/trellix/analyze` | campo singolo (`trellix_auth_required`) |
+
+Le property `foundry_configured` / `misp_configured` / `opencti_configured`
+richiedono **ENTRAMBE** le variabili della coppia (una sola non basta);
+`trellix_auth_required` è True se il token è impostato (e non vuoto).
+
+### Attivazione
+
+Copia `.env.example` in `.env` (il `.env` vero è in `.gitignore` — MAI
+committarlo) e valorizza le coppie che ti servono:
+
+```bash
+# .env
+AZURE_FOUNDRY_ENDPOINT=https://<progetto>.openai.azure.com
+AZURE_FOUNDRY_AGENT_ID=<agent-id>        # → L5 con Foundry invece del fallback
+MISP_URL=https://misp.example.org        # → provider MISP attivo in L2
+MISP_API_KEY=<api-key>
+OPENCTI_URL=https://opencti.example.org  # → provider OpenCTI attivo in L2
+OPENCTI_API_KEY=<api-key>
+TRELLIX_API_TOKEN=<token>                # → /trellix/analyze richiede Bearer
+```
+
+### Aggiungere un futuro provider a chiave
+
+Pattern da seguire (documentato anche in `.env.example`):
+
+1. Aggiungere il campo tipizzato in `graph_engine/config.py` (e, se serve
+   una coppia URL+key, la property `*_configured`).
+2. Leggere il valore nel provider via `from graph_engine.config import
+   settings` — mai `os.environ.get(...)` diretto.
+3. Documentare la variabile in `.env.example`.
+4. Aggiornare la tabella sopra.
