@@ -202,3 +202,115 @@ class TestAnalyzer:
         excessive_ev = [e for e in result["evidence"] if e["key"] == "excessive_redirects"]
         assert len(excessive_ev) == 1
         assert excessive_ev[0]["value"]["redirect_count"] == 6
+
+    async def test_first_hop_connection_failure_produces_active_probe_error(self):
+        """Caso reale: primo hop fallito (es. ConnectError/DNS).
+
+        trace_redirect_chain mette l'errore in hops[-1]["error"] con
+        status_code None — MAI in una chiave top-level. Il vecchio check
+        su "error" top-level non lo vedeva e produceva un
+        redirect_hop_count "pulito". Ora deve produrre active_probe_error
+        con il messaggio d'errore reale, NON un conteggio pulito.
+        """
+        with patch(
+            "graph_engine.active.analyzer.trace_redirect_chain",
+            return_value={
+                "hops": [{
+                    "status_code": None,
+                    "url": "https://rinnovospid.cc/pay",
+                    "error": (
+                        "connect error: [Errno 8] nodename nor servname "
+                        "provided, or not known"
+                    ),
+                }],
+                "final_url": "https://rinnovospid.cc/pay",
+                "hop_count": 1,
+                "redirect_count": 0,
+                "truncated": False,
+            },
+        ), patch(
+            "graph_engine.active.analyzer.fetch_favicon_hash",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.compute_jarm",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.differential_fetch",
+            return_value={"results": {}, "profiles_compared": 0},
+        ):
+            result = await analyze("https://rinnovospid.cc/pay")
+
+        error_ev = [e for e in result["evidence"] if e["key"] == "active_probe_error"]
+        assert len(error_ev) == 1
+        assert error_ev[0]["value"]["probe"] == "redirect_chain"
+        assert "connect error" in error_ev[0]["value"]["error"], (
+            f"Il messaggio d'errore reale deve essere propagato, "
+            f"ottenuto {error_ev[0]['value']['error']!r}"
+        )
+
+        # NIENTE redirect_hop_count "pulito": il fallimento non deve
+        # essere mascherato da successo
+        hop_ev = [e for e in result["evidence"] if e["key"] == "redirect_hop_count"]
+        assert len(hop_ev) == 0
+
+    async def test_clean_redirect_chain_still_produces_hop_count(self):
+        """Nessun hop con errore → redirect_hop_count come prima
+        (nessuna regressione sul percorso di successo vero)."""
+        with patch(
+            "graph_engine.active.analyzer.trace_redirect_chain",
+            return_value={
+                "hops": [{"status_code": 200, "url": "https://example.com"}],
+                "final_url": "https://example.com",
+                "hop_count": 1,
+                "redirect_count": 0,
+                "truncated": False,
+            },
+        ), patch(
+            "graph_engine.active.analyzer.fetch_favicon_hash",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.compute_jarm",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.differential_fetch",
+            return_value={"results": {}, "profiles_compared": 0},
+        ):
+            result = await analyze("https://example.com")
+
+        hop_ev = [e for e in result["evidence"] if e["key"] == "redirect_hop_count"]
+        assert len(hop_ev) == 1
+        assert hop_ev[0]["value"]["hop_count"] == 1
+
+        error_ev = [e for e in result["evidence"] if e["key"] == "active_probe_error"]
+        assert len(error_ev) == 0
+
+    async def test_empty_hops_treated_as_failure(self):
+        """hops=[] → fallimento pulito, non un crash su hops[-1]."""
+        with patch(
+            "graph_engine.active.analyzer.trace_redirect_chain",
+            return_value={
+                "hops": [],
+                "final_url": "https://example.com",
+                "hop_count": 0,
+                "redirect_count": 0,
+                "truncated": False,
+            },
+        ), patch(
+            "graph_engine.active.analyzer.fetch_favicon_hash",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.compute_jarm",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.differential_fetch",
+            return_value={"results": {}, "profiles_compared": 0},
+        ):
+            result = await analyze("https://example.com")
+
+        error_ev = [e for e in result["evidence"] if e["key"] == "active_probe_error"]
+        assert len(error_ev) == 1
+        assert error_ev[0]["value"]["probe"] == "redirect_chain"
+        assert "no hops recorded" in error_ev[0]["value"]["error"]
+
+        hop_ev = [e for e in result["evidence"] if e["key"] == "redirect_hop_count"]
+        assert len(hop_ev) == 0

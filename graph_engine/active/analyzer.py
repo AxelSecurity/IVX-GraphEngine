@@ -110,7 +110,30 @@ async def analyze(
         redirect_result, favicon_result, jarm_result, diff_result = results
 
         # ── Redirect chain ──────────────────────────────────────────────
-        if isinstance(redirect_result, dict) and "error" not in redirect_result:
+        # trace_redirect_chain NON produce mai una chiave top-level
+        # "error": un hop fallito (timeout, connessione rifiutata, DNS)
+        # è l'ULTIMO hop della lista, con status_code None e "error"
+        # valorizzato. hops vuoto = nessun hop registrato. Il check va
+        # fatto sull'ultimo hop, non sul dict intero.
+        if isinstance(redirect_result, dict):
+            hops = redirect_result.get("hops", [])
+            if hops and isinstance(hops[-1], dict):
+                last_hop_error = hops[-1].get("error")
+            elif not hops:
+                last_hop_error = "no hops recorded"
+            else:
+                last_hop_error = f"malformed hop: {hops[-1]!r}"
+        else:
+            hops = []
+            last_hop_error = str(redirect_result) or "unknown error"
+
+        if last_hop_error:
+            evidence.append(_make_evidence(
+                key="active_probe_error",
+                value={"probe": "redirect_chain", "error": last_hop_error},
+                weight=0.0,
+            ))
+        else:
             hop_count = redirect_result.get("hop_count", 0)
             redirect_count = redirect_result.get("redirect_count", 0)
             evidence.append(_make_evidence(
@@ -133,7 +156,7 @@ async def analyze(
                 ))
 
             # Registra i server header insoliti
-            for hop in redirect_result.get("hops", []):
+            for hop in hops:
                 server = hop.get("server")
                 if server and _is_unusual_server(server):
                     evidence.append(_make_evidence(
@@ -141,13 +164,6 @@ async def analyze(
                         value={"server": server, "hop_url": hop.get("url")},
                         weight=0.05,
                     ))
-        else:
-            err_msg = str(redirect_result) if not isinstance(redirect_result, dict) else "unknown"
-            evidence.append(_make_evidence(
-                key="active_probe_error",
-                value={"probe": "redirect_chain", "error": err_msg},
-                weight=0.0,
-            ))
 
         # ── Favicon hash ────────────────────────────────────────────────
         if isinstance(favicon_result, dict) and "favicon_hash" in favicon_result:
