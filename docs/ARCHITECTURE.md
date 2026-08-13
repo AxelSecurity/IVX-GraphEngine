@@ -272,6 +272,26 @@ d'ambiente corrispondenti. Nessuna modifica al codice necessaria: il
 Il punteggio è clampato a [0, 1]. **MAI** penalizzare per l'assenza di
 segnale — solo per la presenza.
 
+**Single source of truth**: lo score aggregato è derivato dai `weight`
+delle Evidence — stessa fonte, non due percorsi che condividono solo le
+costanti:
+
+```python
+risk = sum(ev["weight"] for ev in evidence)
+passive_risk_score = round(min(1.0, risk), 4)
+```
+
+Ogni segnale contribuente porta `weight > 0` sulla propria Evidence;
+le evidenze informative (`provider_unavailable`, `dns_a_records`,
+`dns_aaaa_records`) hanno `weight=0.0` e non pesano.  Non esiste alcun
+accumulo parallelo di `risk` accanto alla costruzione delle Evidence:
+un solo posto decide il contributo di ogni segnale, quindi i due non
+possono divergere.  La proprietà è garantita per costruzione da un
+test strutturale (`TestRiskScoreDerivedFromWeights` in
+`tests/graph_engine/test_osint/test_analyzer.py`) che verifica
+`passive_risk_score == sum(weight)` (salvo clamp) su scenari diversi,
+e fallirebbe se qualcuno reintroducesse due percorsi paralleli.
+
 ### Cache
 
 Cache filesystem sotto `data/osint_cache/<provider>/<hash>.json`.

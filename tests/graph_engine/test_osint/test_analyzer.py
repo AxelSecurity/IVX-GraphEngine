@@ -293,3 +293,130 @@ class TestAnalyzerIntegration:
             age_ev = [e for e in result["evidence"] if e["key"] == "domain_age_days"]
             assert len(age_ev) == 0
             assert result["passive_risk_score"] == 0.0
+
+
+class TestRiskScoreDerivedFromWeights:
+    """Proprietà strutturale: passive_risk_score È la somma dei weight
+    delle Evidence prodotte (single source of truth).
+
+    Non esiste un accumulo parallelo di ``risk`` accanto alla
+    costruzione delle Evidence: se qualcuno reintroducesse due percorsi
+    (es. ``risk += _W_X`` accanto a ``weight=_W_X``), questo test lo
+    intercetterebbe per costruzione, non per coincidenza del valore
+    atteso di un singolo caso.
+    """
+
+    _CRTSH_CLEAN = {
+        "sibling_domains": [], "truncated": False, "total_siblings": 0,
+        "newest_cert_days": None, "oldest_cert_days": None, "total_certs": 0,
+    }
+    _RDAP_YOUNG = {"domain_age_days": 7, "registrar": "R", "nameservers": []}
+    _RDAP_MODERATE = {"domain_age_days": 45, "registrar": "R", "nameservers": []}
+    _DNS_CLEAN = {"a_records": ["1.2.3.4"], "aaaa_records": [], "error": None}
+    _URLHAUS_CLEAN = {
+        "provider": "urlhaus", "listed": False,
+        "details": {"query_status": "no_results"},
+    }
+
+    async def _analyze(self, monkeypatch, crtsh_result, rdap_result,
+                       dns_result, urlhaus_result):
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        with patch(
+            "graph_engine.osint.analyzer.query_crtsh",
+            new_callable=AsyncMock,
+            return_value=crtsh_result,
+        ), patch(
+            "graph_engine.osint.analyzer.query_rdap",
+            new_callable=AsyncMock,
+            return_value=rdap_result,
+        ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value=dns_result,
+        ), patch(
+            "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
+            new_callable=AsyncMock,
+            return_value=urlhaus_result,
+        ):
+            return await analyze("https://evil.example.com/login")
+
+    @staticmethod
+    def _assert_score_equals_weight_sum(result):
+        """Lo score deve essere esattamente la somma dei weight delle
+        Evidence (unica trasformazione ammessa: il clamp a [0, 1])."""
+        weight_sum = sum(ev["weight"] for ev in result["evidence"])
+        assert result["passive_risk_score"] == round(
+            min(1.0, weight_sum), 4
+        )
+
+    async def test_young_only(self, monkeypatch):
+        """Young (0.35) → score == somma dei weight."""
+        result = await self._analyze(
+            monkeypatch,
+            self._CRTSH_CLEAN,
+            self._RDAP_YOUNG,
+            self._DNS_CLEAN,
+            self._URLHAUS_CLEAN,
+        )
+        self._assert_score_equals_weight_sum(result)
+        assert result["passive_risk_score"] == 0.35
+
+    async def test_young_plus_siblings(self, monkeypatch):
+        """Young + siblings (0.35 + 0.30) → score == somma."""
+        crtsh = {
+            "sibling_domains": ["sib1.example.com", "sib2.example.com"],
+            "truncated": False, "total_siblings": 2,
+            "newest_cert_days": 30, "oldest_cert_days": 60, "total_certs": 3,
+        }
+        result = await self._analyze(
+            monkeypatch, crtsh, self._RDAP_YOUNG,
+            self._DNS_CLEAN, self._URLHAUS_CLEAN,
+        )
+        self._assert_score_equals_weight_sum(result)
+        assert result["passive_risk_score"] == 0.65
+
+    async def test_moderate_plus_reputation(self, monkeypatch):
+        """Moderate + reputation hit (0.15 + 0.50) → score == somma."""
+        urlhaus_hit = {
+            "provider": "urlhaus", "listed": True,
+            "details": {"threat": "phishing"},
+        }
+        result = await self._analyze(
+            monkeypatch, self._CRTSH_CLEAN, self._RDAP_MODERATE,
+            self._DNS_CLEAN, urlhaus_hit,
+        )
+        self._assert_score_equals_weight_sum(result)
+        assert result["passive_risk_score"] == 0.65
+
+    async def test_sum_exceeding_one_still_clamped(self, monkeypatch):
+        """Somma > 1.0 → la proprietà vale salvo clamp (score == 1.0)."""
+        crtsh = {
+            "sibling_domains": ["sib.example.com"],
+            "truncated": False, "total_siblings": 1,
+            "newest_cert_days": 30, "oldest_cert_days": 60, "total_certs": 3,
+        }
+        urlhaus_hit = {
+            "provider": "urlhaus", "listed": True,
+            "details": {"threat": "phishing"},
+        }
+        result = await self._analyze(
+            monkeypatch, crtsh, self._RDAP_YOUNG,
+            self._DNS_CLEAN, urlhaus_hit,
+        )
+        self._assert_score_equals_weight_sum(result)
+        # 0.30 + 0.35 + 0.50 = 1.15 → clampato
+        assert result["passive_risk_score"] == 1.0
+
+    async def test_informative_zero_weight_evidence_do_not_affect_sum(
+        self, monkeypatch
+    ):
+        """Evidenze informative (provider_unavailable, dns_*) hanno
+        weight=0.0 e non alterano la somma."""
+        crtsh_error = {"error": "crt.sh down"}
+        result = await self._analyze(
+            monkeypatch, crtsh_error, self._RDAP_YOUNG,
+            self._DNS_CLEAN, self._URLHAUS_CLEAN,
+        )
+        self._assert_score_equals_weight_sum(result)
+        # Solo young (0.35): provider_unavailable e dns_a_records sono 0.0
+        assert result["passive_risk_score"] == 0.35

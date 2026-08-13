@@ -21,7 +21,11 @@ from graph_engine.osint.reputation.registry import get_enabled_providers
 # ---------------------------------------------------------------------------
 # Pesi per il passive_risk_score
 # ---------------------------------------------------------------------------
-# La somma pesata di tutti i segnali L2 è clampata a [0, 1].
+# Lo score aggregato È la somma dei ``weight`` delle Evidence prodotte
+# (single source of truth: non esiste un accumulo parallelo di risk).
+# Ogni segnale contribuente porta weight>0 sulla propria Evidence; le
+# evidenze informative (provider_unavailable, dns_*) hanno weight=0.0
+# e non pesano.  La somma è clampata a [0, 1].
 # Ogni peso è documentato con la propria semantica.
 # Principio: MAI penalizzare per l'assenza di segnale, solo per la presenza.
 
@@ -92,7 +96,6 @@ async def analyze(
         return {"evidence": [], "passive_risk_score": 0.0}
 
     evidence: list[dict] = []
-    risk = 0.0
 
     # Client HTTP condiviso con timeout
     async with httpx.AsyncClient(timeout=_HTTPX_TIMEOUT) as client:
@@ -123,7 +126,6 @@ async def analyze(
             else:
                 siblings = crtsh_result.get("sibling_domains", [])
                 if siblings:
-                    risk += _W_SIBLING_DOMAINS
                     evidence.append(_make_evidence(
                         key="sibling_domains",
                         value={
@@ -156,7 +158,6 @@ async def analyze(
                 age_days = rdap_result.get("domain_age_days")
                 if age_days is not None:
                     if age_days < _AGE_YOUNG_DAYS:
-                        risk += _W_DOMAIN_AGE_YOUNG
                         evidence.append(_make_evidence(
                             key="domain_age_days",
                             value={
@@ -168,7 +169,6 @@ async def analyze(
                             weight=_W_DOMAIN_AGE_YOUNG,
                         ))
                     elif age_days < _AGE_MODERATE_DAYS:
-                        risk += _W_DOMAIN_AGE_MODERATE
                         evidence.append(_make_evidence(
                             key="domain_age_days",
                             value={
@@ -254,7 +254,6 @@ async def analyze(
                 # Provider disabilitato — nessuna evidenza, è volontario
                 pass
             elif rep_result.get("listed"):
-                risk += _W_REPUTATION_HIT
                 evidence.append(_make_evidence(
                     key="reputation_hit",
                     value=rep_result["details"],
@@ -262,6 +261,14 @@ async def analyze(
                 ))
             # else: listed=False, nessun segnale → no evidence (principio:
             # l'assenza di segnale non è un segnale)
+
+    # ── Score aggregato: derivato dai weight (single source of truth) ──
+    # passive_risk_score È la somma dei weight delle Evidence prodotte:
+    # ogni segnale contribuente porta weight>0 sulla propria Evidence,
+    # le evidenze informative hanno weight=0.0.  Nessun accumulo
+    # parallelo di risk — un solo posto decide il contributo di ogni
+    # segnale.
+    risk = sum(ev["weight"] for ev in evidence)
 
     return {
         "evidence": evidence,
