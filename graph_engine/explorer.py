@@ -732,7 +732,13 @@ class StateGraphExplorer:
                 await route.continue_()
                 return
             if route.request.is_navigation_request():
-                if not self._our_goto_active:
+                # Only TOP-level navigations count as page-initiated
+                # redirects: subframe/iframe requests (CAPTCHA widgets,
+                # embeds) are not the page navigating away.
+                if (
+                    not self._our_goto_active
+                    and route.request.frame == page.main_frame
+                ):
                     self._intercepted_urls.append(
                         {"url": route.request.url, "method": "href_setter"}
                     )

@@ -35,12 +35,15 @@ _ROOT_PAGE = """\
        style="display:inline-block;padding:10px 24px;background:#0078d4;color:#fff;text-decoration:none;font-size:16px;">Next</a>
   </p>
   <script>
-    // Auto-resolve after 2 s — simulates an "invisible" Turnstile challenge.
+    // Auto-resolve after 3.5 s — simulates an "invisible" Turnstile
+    // challenge.  Must outlive the adaptive settle poll (quiet exit at
+    // ~2.5 s) so the explorer still detects the gate, and must finish
+    // within captcha_wait_s=5 used by this test.
     setTimeout(() => {
       const f = document.getElementById('cf-challenge');
       if (f) f.remove();
       document.getElementById('status').textContent = 'Verified';
-    }, 2000);
+    }, 3500);
   </script>
 </body>
 </html>"""
