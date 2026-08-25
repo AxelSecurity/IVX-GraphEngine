@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import http.server
+import threading
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from graph_engine.budget import Budget
 from graph_engine.explorer import StateGraphExplorer
-from graph_engine.models import TargetStatus
+from graph_engine.models import TargetStatus, TransitionKind
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +222,183 @@ class TestErrorRecording:
         err = explorer.evidence[0]
         assert err.key == "navigation_error"
         assert "Connection refused" in err.value
+
+
+# ---------------------------------------------------------------------------
+# Settle polling (adaptive post-goto wait) — real browser + local server
+# ---------------------------------------------------------------------------
+# Questi test usano un HTTPServer locale su 127.0.0.1 (porta random) e un
+# browser Chromium headless REALE: il polling del settle dipende da timing
+# reali (asyncio.sleep, setTimeout del browser), quindi asyncio.sleep NON
+# va mockato qui.
+
+
+def _make_local_handler(start_html: str):
+    """Costruisce un handler che serve *start_html* su /start e una
+    pagina fissa su /payload."""
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.startswith("/start"):
+                body = start_html.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+            elif self.path.startswith("/payload"):
+                body = b"<html><body>payload reached</body></html>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+            else:
+                body = b"not found"
+                self.send_response(404)
+                self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass  # silenzia i log del server
+
+    return _Handler
+
+
+def _delayed_redirect_html(delay_ms: int = 2000, target: str = "/payload") -> str:
+    """HTML che esegue window.location.href dopo *delay_ms* millisecondi —
+    replica esatta del pattern di evasione (2s) trovato su un kit TDS reale."""
+    return (
+        "<html><body>start page"
+        "<script>setTimeout(function () {"
+        f"window.location.href = {target!r};"
+        f"}}, {delay_ms});</script>"
+        "</body></html>"
+    )
+
+
+@pytest.fixture
+def local_server():
+    """Factory: avvia un HTTPServer locale in un thread separato e
+    restituisce l'URL base. I server vengono spenti a fine test."""
+    servers = []
+
+    def _start(start_html: str) -> str:
+        handler = _make_local_handler(start_html)
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        servers.append((server, thread))
+        return f"http://127.0.0.1:{port}"
+
+    try:
+        yield _start
+    finally:
+        for server, thread in servers:
+            server.shutdown()
+            thread.join()
+
+
+@pytest.fixture
+async def real_browser():
+    """Browser Chromium headless reale, chiuso a fine test."""
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            yield browser
+        finally:
+            await browser.close()
+
+
+class TestSettlePolling:
+    """Polling adattivo post-goto: redirect JS ritardati vs tetto massimo."""
+
+    async def test_delayed_js_redirect_captured(self, real_browser, local_server):
+        """Redirect setTimeout(2000ms) → transizione js_location.
+
+        Replica il caso reale (kit TDS con delay 2s): l'attesa fissa di
+        1.5s lo perdeva del tutto; il polling con tetto 4.0 lo cattura e
+        produce una transizione js_location verso la destinazione reale.
+        """
+        base = local_server(_delayed_redirect_html(2000, "/payload"))
+        explorer = StateGraphExplorer(real_browser)
+
+        target = await explorer.run(
+            base + "/start",
+            budget=Budget(max_depth=2, max_nodes=10, timeout_s=60),
+            capture_artifacts=False,
+            top_n_actions=0,
+            captcha_wait_s=0,
+            settle_max_wait_s=4.0,
+        )
+
+        assert target.status == TargetStatus.done
+        js_transitions = [
+            t for t in explorer.transitions
+            if t.kind == TransitionKind.js_location
+        ]
+        assert len(js_transitions) == 1, (
+            f"attesa 1 transizione js_location, ottenute "
+            f"{[(t.kind, t.to_state) for t in explorer.transitions]!r}"
+        )
+        dest_state = next(
+            s for s in explorer.states
+            if s.id == js_transitions[0].to_state
+        )
+        assert dest_state.url == base + "/payload"
+        assert dest_state.depth == 1
+
+    async def test_insufficient_settle_yields_leaf(self, real_browser, local_server):
+        """Con tetto 1.0s il redirect a 2s NON viene visto → stato foglia.
+
+        Comportamento del vecchio sleep fisso: nessuna transizione,
+        il target resta un singolo stato (foglia).
+        """
+        base = local_server(_delayed_redirect_html(2000, "/payload"))
+        explorer = StateGraphExplorer(real_browser)
+
+        target = await explorer.run(
+            base + "/start",
+            budget=Budget(max_depth=2, max_nodes=10, timeout_s=60),
+            capture_artifacts=False,
+            top_n_actions=0,
+            captcha_wait_s=0,
+            settle_max_wait_s=1.0,
+        )
+
+        assert target.status == TargetStatus.done
+        assert len(explorer.states) == 1
+        assert len(explorer.transitions) == 0
+
+    async def test_no_redirect_settles_early(self, real_browser, local_server):
+        """Pagina senza redirect → il poll esce per quiete, NON paga il tetto.
+
+        Con tetto 4.0 l'uscita attesa è ~2.5s (finestra minima di
+        osservazione + 2 cicli quieti). Il tetto pieno costerebbe >= 4.0s:
+        l'uscita anticipata deve essere verificabile sul tempo reale.
+        """
+        base = local_server("<html><body>static page</body></html>")
+        explorer = StateGraphExplorer(real_browser)
+
+        started = time.monotonic()
+        target = await explorer.run(
+            base + "/start",
+            budget=Budget(max_depth=2, max_nodes=10, timeout_s=60),
+            capture_artifacts=False,
+            top_n_actions=0,
+            captcha_wait_s=0,
+            settle_max_wait_s=4.0,
+        )
+        elapsed = time.monotonic() - started
+
+        assert target.status == TargetStatus.done
+        assert len(explorer.states) == 1
+        assert len(explorer.transitions) == 0
+        # Quiete: mai prima del minimo di osservazione (1.5s + 2 cicli
+        # da 0.5s), sempre molto sotto il tetto pieno (>= 4.0s).
+        assert 2.0 <= elapsed < 3.5, (
+            f"settle fuori dal range atteso di uscita per quiete: "
+            f"{elapsed:.2f}s (atteso tra 2.0 e 3.5)"
+        )
 
 
 # ---------------------------------------------------------------------------

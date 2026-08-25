@@ -79,6 +79,7 @@ class FakeExplorer:
         capture_artifacts: bool = True,
         top_n_actions: int = 3,
         captcha_wait_s: int = 8,
+        settle_max_wait_s: float = 4.0,
         profile=None,
         target_id=None,
     ) -> AnalysisTarget:

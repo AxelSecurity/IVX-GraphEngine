@@ -94,6 +94,7 @@ class TestCliEvidenceSerialization:
             timeout=30,
             no_artifacts=True,
             top_n_actions=0,
+            settle_max_wait=4.0,
             classify=False,
         )
 

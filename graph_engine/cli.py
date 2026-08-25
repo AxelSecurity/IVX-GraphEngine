@@ -187,6 +187,7 @@ async def _main(args: argparse.Namespace) -> None:
                 capture_artifacts=not args.no_artifacts,
                 top_n_actions=args.top_n_actions,
                 profile=l3_result["recommended_profile"],
+                settle_max_wait_s=args.settle_max_wait,
             )
 
             # ── Patch target with L0 fields ──────────────────────────────
@@ -362,6 +363,12 @@ def main() -> None:
         type=int,
         default=3,
         help="Max click candidates attempted per state (default: 3, 0 = disable)",
+    )
+    parser.add_argument(
+        "--settle-max-wait",
+        type=float,
+        default=4.0,
+        help="Max post-load wait for delayed JS redirects, in seconds (default: 4.0)",
     )
     parser.add_argument(
         "--debug",

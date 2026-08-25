@@ -92,6 +92,21 @@ _META_REFRESH_RE = re.compile(
 )
 
 # ---------------------------------------------------------------------------
+# Settle post-navigation — adaptive polling
+# ---------------------------------------------------------------------------
+# A delay of 2s+ before a JS redirect is a known evasion pattern against
+# crawlers with a short fixed settle wait: the old fixed 1.5s wait missed
+# it (found on a real TDS kit).  Same scheme as try_pass_gate() in
+# gate_solver.py: periodic poll, early exit, hard ceiling.
+
+_SETTLE_POLL_INTERVAL = 0.5    # seconds between polls
+_SETTLE_MIN_OBSERVE = 1.5      # minimum observation window: the "quiet"
+                               # early exit never fires before it (equals
+                               # the old fixed wait → no coverage regression)
+_SETTLE_QUIET_CYCLES = 2       # consecutive mature cycles with nothing
+                               # new → page is stable, stop waiting
+
+# ---------------------------------------------------------------------------
 # Explorer
 # ---------------------------------------------------------------------------
 
@@ -158,6 +173,7 @@ class StateGraphExplorer:
         capture_artifacts: bool = True,
         top_n_actions: int = 3,
         captcha_wait_s: int = 8,
+        settle_max_wait_s: float = 4.0,
         target_id: Optional[uuid.UUID] = None,
     ) -> AnalysisTarget:
         """Explore *start_url* passively and return the populated AnalysisTarget.
@@ -175,6 +191,13 @@ class StateGraphExplorer:
         *captcha_wait_s* is the max wait time for invisible gate auto-resolve
         (default 8).  Set to 0 to skip gate detection entirely.
 
+        *settle_max_wait_s* is the max post-load wait for delayed JS
+        redirects (default 4.0).  A delay of 2s+ before a JS redirect is a
+        known evasion pattern against crawlers with a short fixed settle
+        wait (the old fixed 1.5s missed it, found on a real TDS kit): the
+        settle poll exits early as soon as an interception appears, and
+        pages with no redirects never pay the full ceiling.
+
         *target_id* is the UUID to use for the ``AnalysisTarget`` created
         internally.  When ``None`` (default), a new UUID is generated — this
         preserves backward compatibility with all existing callers.  When
@@ -186,6 +209,7 @@ class StateGraphExplorer:
         self._capture_artifacts_flag = capture_artifacts
         self._top_n_actions = top_n_actions
         self._captcha_wait_s = captcha_wait_s
+        self._settle_max_wait_s = settle_max_wait_s
         if profile is not None:
             self._profile = profile
 
@@ -547,6 +571,63 @@ class StateGraphExplorer:
     # Navigation + state creation
     # ------------------------------------------------------------------
 
+    async def _settle_navigation_poll(
+        self,
+        page: Page,
+        settle_max_wait_s: float,
+    ) -> None:
+        """Adaptive post-goto settle (replaces the old fixed 1.5s wait).
+
+        Polls ``window.__ge_js_locations`` and ``self._intercepted_urls``
+        every ``_SETTLE_POLL_INTERVAL`` and exits IMMEDIATELY as soon as a
+        new interception appears — a redirect that fires before the ceiling
+        must not wait for it (same scheme as try_pass_gate() in
+        gate_solver.py: periodic poll, early exit, hard ceiling).
+
+        Otherwise keeps polling up to *settle_max_wait_s*, with an early
+        exit for quiet pages: after ``_SETTLE_MIN_OBSERVE``,
+        ``_SETTLE_QUIET_CYCLES`` consecutive cycles without anything new
+        mean the page has stabilised, so the full ceiling is only paid when
+        it is actually needed.
+
+        Deliberately does NOT clear the stash: ``_enumerate_passive_actions``
+        consumes the intercepts downstream.
+        """
+        started = time.monotonic()
+        deadline = started + settle_max_wait_s
+        seen_count = 0
+        quiet_cycles = 0
+        first_poll = True
+
+        while True:
+            if first_poll:
+                first_poll = False  # first check immediate: redirects fired
+            else:                   # during goto are seen right away
+                await asyncio.sleep(_SETTLE_POLL_INTERVAL)
+            if time.monotonic() >= deadline:
+                break
+
+            try:
+                js_stash: list[dict] = await page.evaluate(
+                    "() => window.__ge_js_locations || []"
+                )
+            except Exception:
+                # Page torn down mid-poll: nothing to read, keep waiting.
+                js_stash = []
+            current = len(js_stash) + len(self._intercepted_urls)
+
+            if current > seen_count:
+                break  # new interception: the redirect fired, exit now
+            seen_count = current
+
+            # Early exit for a stable page — never before the minimum
+            # observation window.  Strictly ">" so a redirect at exactly
+            # _SETTLE_MIN_OBSERVE still lands inside the watch window.
+            if time.monotonic() - started > _SETTLE_MIN_OBSERVE:
+                quiet_cycles += 1
+                if quiet_cycles >= _SETTLE_QUIET_CYCLES:
+                    break  # stable: don't pay the full ceiling
+
     async def _navigate_and_create_state(
         self,
         page: Page,
@@ -579,19 +660,11 @@ class StateGraphExplorer:
             response = await page.goto(url, wait_until="domcontentloaded")
             self._our_goto_active = False
 
-            # Settle: let on-load JS execute briefly.
-            await asyncio.sleep(1.5)
-
-            # Read back any JS-location intercepts the init script collected.
-            js_locations: list[dict] = await page.evaluate(
-                "() => window.__ge_js_locations || []"
-            )
-            # Combine with any URLs intercepted by the route guard.
-            js_locations += self._intercepted_urls
-            self._intercepted_urls.clear()
-
-            # Clear the stash so we don't re-read them for the next state.
-            await page.evaluate("() => { window.__ge_js_locations = []; }")
+            # Settle: adaptive poll (see _settle_navigation_poll).  A fixed
+            # short wait loses delayed JS redirects (2s+ evasion pattern).
+            # The poll never clears the stash — _enumerate_passive_actions
+            # consumes it downstream.
+            await self._settle_navigation_poll(page, self._settle_max_wait_s)
 
         except Exception as exc:
             if self._capture_artifacts_flag:
@@ -697,9 +770,33 @@ class StateGraphExplorer:
         except Exception:
             pass  # malformed HTML → skip meta detection for this state
 
-        # --- js_location (from init script) --------------------------------
-        # These were read back and cleared in _navigate_and_create_state().
-        # We don't re-read them here — they are per-navigation.
+        # --- js_location (from init script + route guard) ------------------
+        # Accumulated during the post-goto settle poll and left in place
+        # for consumption HERE (once), then cleared so the next state
+        # starts clean.  The interception data — not a re-read of the
+        # page — is what drives the js_location transition.
+        try:
+            js_locs: list[dict] = await page.evaluate(
+                "() => window.__ge_js_locations || []"
+            )
+        except Exception:
+            js_locs = []
+        js_locs += self._intercepted_urls
+        self._intercepted_urls.clear()
+        try:
+            await page.evaluate("() => { window.__ge_js_locations = []; }")
+        except Exception:
+            pass
+
+        seen_urls: set[str] = set()
+        for loc in js_locs:
+            url = loc.get("url")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            actions.append(
+                {"kind": "js_location", "url": url, "trigger": loc}
+            )
 
         return actions
 
