@@ -73,6 +73,8 @@ async def _run_classification(
     states: list[State],
     transitions: list[Transition],
     evidence: list[Evidence],
+    lexical_risk_score: Optional[float] = None,
+    passive_risk_score: Optional[float] = None,
 ) -> Optional[Verdict]:
     """Build evidence bundle, run prefilter + classifier, return Verdict.
 
@@ -125,6 +127,8 @@ async def _run_classification(
         leaf_form_fields=leaf_form_fields,
         leaf_visible_text=leaf_visible_text,
         leaf_titles=leaf_titles,
+        lexical_risk_score=lexical_risk_score,
+        passive_risk_score=passive_risk_score,
     )
     bundle["target_id"] = str(target.id)
 
@@ -324,6 +328,8 @@ async def run_full_analysis(
         if classify:
             verdict = await _run_classification(
                 analysis_target, states, transitions, evidence,
+                lexical_risk_score=l1_result["lexical_risk_score"],
+                passive_risk_score=l2_result["passive_risk_score"],
             )
 
         # ── Final save ────────────────────────────────────────────────────

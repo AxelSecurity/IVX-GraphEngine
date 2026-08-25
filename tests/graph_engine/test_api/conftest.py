@@ -147,7 +147,10 @@ class ExplodingAfterExplorer(PartialExplodingExplorer):
 # ---------------------------------------------------------------------------
 
 
-async def _fake_classification(target, states, transitions, evidence) -> Verdict:
+async def _fake_classification(
+    target, states, transitions, evidence,
+    lexical_risk_score=None, passive_risk_score=None,
+) -> Verdict:
     """Classificazione finta — restituisce sempre suspicious con conf 0.5."""
     return Verdict(
         target_id=target.id,

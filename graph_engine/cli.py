@@ -69,6 +69,8 @@ async def _run_classification(
     states: list[State],
     transitions: list[Transition],
     evidence: list[Evidence],
+    lexical_risk_score: Optional[float] = None,
+    passive_risk_score: Optional[float] = None,
 ) -> Optional[Verdict]:
     """Build evidence bundle, run prefilter + classifier, return Verdict."""
     import os
@@ -122,6 +124,8 @@ async def _run_classification(
         leaf_form_fields=leaf_form_fields,
         leaf_visible_text=leaf_visible_text,
         leaf_titles=leaf_titles,
+        lexical_risk_score=lexical_risk_score,
+        passive_risk_score=passive_risk_score,
     )
     # Inject target_id for the classifier
     bundle["target_id"] = str(target.id)
@@ -271,6 +275,8 @@ async def _main(args: argparse.Namespace) -> None:
                     explorer.states,
                     explorer.transitions,
                     explorer.evidence,
+                    lexical_risk_score=l1_result["lexical_risk_score"],
+                    passive_risk_score=l2_result["passive_risk_score"],
                 )
                 if verdict:
                     logging.info(

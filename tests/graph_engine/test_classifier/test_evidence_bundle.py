@@ -140,6 +140,71 @@ class TestBuildEvidenceBundle:
             assert "har" not in leaf, "Raw HAR in bundle"
             assert "dom_html" not in leaf, "Raw DOM in bundle"
 
+    def test_risk_scores_included_when_provided(self):
+        """lexical/passive_risk_score arrivano nel bundle (servono al
+        prefilter); senza input → None, non 0 ("non calcolato" ≠
+        "rischio zero")."""
+        s0 = _state("aaa", 0)
+        kwargs = dict(
+            target_url="https://example.com",
+            canonical_url=None,
+            states=[s0],
+            transitions=[],
+            evidence=[],
+            leaf_form_fields={},
+            leaf_visible_text={},
+            leaf_titles={},
+        )
+
+        with_scores = build_evidence_bundle(
+            **kwargs, lexical_risk_score=0.4, passive_risk_score=0.72
+        )
+        assert with_scores["lexical_risk_score"] == 0.4
+        assert with_scores["passive_risk_score"] == 0.72
+
+        without_scores = build_evidence_bundle(**kwargs)
+        assert without_scores["lexical_risk_score"] is None
+        assert without_scores["passive_risk_score"] is None
+
+    def test_strong_evidence_details_extracted_with_parsed_values(self):
+        """Le chiavi forti (L1/L2/L3) finiscono in strong_evidence_details
+        col value JSON deserializzato — il prefilter può valutare regole
+        dipendenti dal valore (typosquat distance == 1)."""
+        s0 = _state("aaa", 0)
+        evidence = [
+            _evidence(
+                "typosquat",
+                '{"domain": "rnnovospid.cc", "brand": "Aruba", "distance": 1}',
+            ),
+            _evidence(
+                "reputation_hit",
+                '{"provider": "urlhaus", "listed": true}',
+            ),
+            _evidence("cloaking_detected", "true"),
+            _evidence("navigation_error", "timeout"),  # non forte → esclusa
+        ]
+
+        bundle = build_evidence_bundle(
+            target_url="https://example.com",
+            canonical_url=None,
+            states=[s0],
+            transitions=[],
+            evidence=evidence,
+            leaf_form_fields={},
+            leaf_visible_text={},
+            leaf_titles={},
+        )
+
+        details = bundle["strong_evidence_details"]
+        assert details["typosquat"] == [
+            {"domain": "rnnovospid.cc", "brand": "Aruba", "distance": 1}
+        ]
+        assert details["reputation_hit"] == [
+            {"provider": "urlhaus", "listed": True}
+        ]
+        assert "cloaking_detected" in details
+        assert "navigation_error" not in details
+
     def test_flags_false_when_no_evidence(self):
         """All flags must be False when no Evidence entries exist."""
         s0 = _state("aaa", 0)

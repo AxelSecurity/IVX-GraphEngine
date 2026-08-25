@@ -11,9 +11,27 @@ structured *observations*, not data.
 
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from graph_engine.models import Evidence, State, Transition
+
+# Evidence keys that carry signal on their own (L1/L2/L3).  Their values
+# are extracted into ``bundle["strong_evidence_details"]`` so that
+# value-dependent prefilter rules (typosquat distance == 1) can run.
+# Keep in sync with graph_engine.classifier.prefilter.
+_STRONG_EVIDENCE_KEYS = ("typosquat", "reputation_hit", "cloaking_detected")
+
+
+def _coerce_evidence_value(value):
+    """Coerce an ``Evidence.value`` (str) back to structured data when it
+    is JSON-serialised — needed for value-dependent rules."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (ValueError, TypeError):
+            return value
+    return value
 
 
 def build_evidence_bundle(
@@ -25,6 +43,8 @@ def build_evidence_bundle(
     leaf_form_fields: dict[str, list[dict]],
     leaf_visible_text: dict[str, str],
     leaf_titles: dict[str, str],
+    lexical_risk_score: Optional[float] = None,
+    passive_risk_score: Optional[float] = None,
 ) -> dict:
     """Produce a compact, structured summary of the exploration.
 
@@ -46,6 +66,11 @@ def build_evidence_bundle(
         "num_states": len(states),
         "num_transitions": len(transitions),
         "max_depth_reached": max((s.depth for s in states), default=0),
+        # Raw L1/L2 risk scores — the prefilter needs them to decide
+        # whether L4 sparsity is really "insufficient data" or just a
+        # case where the signal lives in the other layers.
+        "lexical_risk_score": lexical_risk_score,
+        "passive_risk_score": passive_risk_score,
     }
 
     # ---- transition-kind counts -------------------------------------------
@@ -69,6 +94,15 @@ def build_evidence_bundle(
     for e in evidence:
         ev_summary[e.key] = ev_summary.get(e.key, 0) + 1
     bundle["evidence_summary"] = ev_summary
+
+    # ---- strong evidence details (L1/L2/L3 keys the prefilter needs) -------
+    strong_details: dict[str, list] = {}
+    for e in evidence:
+        if e.key in _STRONG_EVIDENCE_KEYS:
+            strong_details.setdefault(e.key, []).append(
+                _coerce_evidence_value(e.value)
+            )
+    bundle["strong_evidence_details"] = strong_details
 
     # ---- leaf states -------------------------------------------------------
     leaves: list[dict] = []
@@ -107,6 +141,10 @@ def bundle_to_prompt_text(bundle: dict) -> str:
     lines.append(f"States visited: {bundle['num_states']}")
     lines.append(f"Transitions recorded: {bundle['num_transitions']}")
     lines.append(f"Max depth reached: {bundle['max_depth_reached']}")
+    if bundle.get("lexical_risk_score") is not None:
+        lines.append(f"Lexical risk score (L1): {bundle['lexical_risk_score']}")
+    if bundle.get("passive_risk_score") is not None:
+        lines.append(f"Passive risk score (L2): {bundle['passive_risk_score']}")
 
     lines.append("")
     lines.append("=== TRANSITION TYPES ===")

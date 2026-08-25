@@ -15,6 +15,39 @@ from graph_engine.models import Classification
 # ---------------------------------------------------------------------------
 
 
+def _sparse_l4_bundle(**overrides) -> dict:
+    """Bundle con L4 "vuoto": 1 stato, nessun testo visibile, nessun
+    errore — il caso che il prefilter intercetterebbe come "dati
+    insufficienti" guardando SOLO L4."""
+    bundle = {
+        "target_id": str(uuid.uuid4()),
+        "input_url": "https://example.com",
+        "num_states": 1,
+        "num_transitions": 0,
+        "max_depth_reached": 0,
+        "transition_kinds_seen": {},
+        "flags": {
+            "had_gate": False,
+            "had_navigation_error": False,
+            "had_replay_fallback": False,
+            "had_unhandled_error": False,
+        },
+        "evidence_summary": {},
+        "leaf_states": [
+            {
+                "state_id": str(uuid.uuid4()),
+                "url": "https://example.com",
+                "depth": 0,
+                "title": "",
+                "visible_text": "",
+                "form_fields": [],
+            }
+        ],
+    }
+    bundle.update(overrides)
+    return bundle
+
+
 class TestPrefilterReturnsVerdict:
     """prefilter returns a Verdict when data is trivially insufficient."""
 
@@ -218,3 +251,85 @@ class TestPrefilterReturnsNone:
         assert verdict is not None
         assert verdict.classification == Classification.suspicious
         assert verdict.produced_by == "prefilter"
+
+
+class TestPrefilterStrongSignals:
+    """Segnali L1/L2/L3 forti → il prefilter NON deve intercettare.
+
+    Caso reale (2026-08): un dominio di phishing live aveva L4 ridotto a
+    un solo stato senza testo visibile, MA passive_risk_score alto.
+    Il prefilter guardava solo L4 e lo bollava "dati insufficienti"
+    senza mai arrivare a Foundry.
+    """
+
+    def test_sparse_l4_with_high_passive_risk_score_delegates(self):
+        """Caso reale di oggi: 1 stato, nessun testo, passive_risk_score
+        alto → None (delega a Foundry), non un Verdict euristico."""
+        bundle = _sparse_l4_bundle(passive_risk_score=0.72)
+
+        verdict = prefilter(bundle)
+        assert verdict is None, (
+            "passive_risk_score alto = segnale L2 reale: il prefilter "
+            "NON deve intercettare come 'dati insufficienti'"
+        )
+
+    def test_sparse_l4_with_high_lexical_risk_score_delegates(self):
+        """Stesso caso con lexical_risk_score sopra soglia."""
+        bundle = _sparse_l4_bundle(lexical_risk_score=0.65)
+
+        assert prefilter(bundle) is None
+
+    def test_sparse_l4_with_cloaking_detected_delegates(self):
+        """cloaking_detected (L3) presente → c'è segnale sufficiente."""
+        bundle = _sparse_l4_bundle(
+            evidence_summary={"cloaking_detected": 1},
+        )
+
+        assert prefilter(bundle) is None
+
+    def test_sparse_l4_with_reputation_hit_delegates(self):
+        """reputation_hit (L2) presente → c'è segnale sufficiente."""
+        bundle = _sparse_l4_bundle(
+            evidence_summary={"reputation_hit": 1},
+        )
+
+        assert prefilter(bundle) is None
+
+    def test_sparse_l4_with_typosquat_distance_1_delegates(self):
+        """Typosquat a distanza 1 (L1) → segnale forte, delega."""
+        bundle = _sparse_l4_bundle(
+            strong_evidence_details={
+                "typosquat": [
+                    {"domain": "rnnovospid.cc", "brand": "Aruba",
+                     "distance": 1},
+                ],
+            },
+        )
+
+        assert prefilter(bundle) is None
+
+    def test_typosquat_distance_2_does_not_bypass(self):
+        """Distanza 2 è un indizio debole: da sola NON basta a bypassare."""
+        bundle = _sparse_l4_bundle(
+            strong_evidence_details={
+                "typosquat": [
+                    {"domain": "rnnovospid.cc", "brand": "Aruba",
+                     "distance": 2},
+                ],
+            },
+        )
+
+        verdict = prefilter(bundle)
+        assert verdict is not None
+        assert verdict.produced_by == "prefilter"
+
+    def test_score_below_threshold_still_intercepted(self):
+        """Caso genuinamente vuoto: score SOTTO soglia da solo non è
+        segnale → il prefilter continua a intercettare (risparmio
+        chiamate preservato)."""
+        bundle = _sparse_l4_bundle(passive_risk_score=0.3)
+
+        verdict = prefilter(bundle)
+        assert verdict is not None
+        assert verdict.produced_by == "prefilter"
+        assert verdict.classification == Classification.suspicious
