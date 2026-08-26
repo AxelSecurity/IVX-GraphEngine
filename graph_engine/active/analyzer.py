@@ -69,10 +69,10 @@ async def analyze(
 
     Args:
         canonical_url: URL normalizzato (output di L0 canonicalize).
-        timeout_s: Timeout in secondi per JARM. Se ``None``, usa il
-                   default (10s). Le altre sonde (redirect_chain,
-                   favicon, differential_fetch) mantengono i propri
-                   timeout interni.
+        timeout_s: Timeout in secondi per JARM e ceiling del client
+                   HTTP condiviso (redirect_chain, favicon).  Se
+                   ``None``, usa i default (10s per JARM, 30s per il
+                   client).
 
     Returns:
         dict con chiavi:
@@ -97,7 +97,13 @@ async def analyze(
             "cloaking_profile": None,
         }
 
-    async with httpx.AsyncClient(timeout=_HTTPX_TIMEOUT) as client:
+    # Il ceiling del client condiviso segue il timeout dell'analisi:
+    # nel fast path (timeout_s=5.0) redirect_chain e favicon sono
+    # cappate a 5s per richiesta invece dei 30s di default.
+    # differential_fetch usa un client proprio (15s per profilo).
+    async with httpx.AsyncClient(
+        timeout=timeout_s if timeout_s is not None else _HTTPX_TIMEOUT
+    ) as client:
         # ── Lancio parallelo di TUTTE le sonde ───────────────────────────
         redirect_task = trace_redirect_chain(canonical_url, client)
         favicon_task = fetch_favicon_hash(canonical_url, client)

@@ -48,8 +48,10 @@ FAST_CAPTCHA_WAIT_S = 4
 # Default: CRTSH=15s, RDAP=15s, DNS=5s, JARM=10s.
 # Nel fast path li dimezziamo: se un provider non risponde in 5-8s,
 # probabilmente è inaccessibile o il target è già sospetto.
-# Le altre sonde L3 (redirect_chain, favicon, differential_fetch)
-# mantengono i propri timeout interni.
+# timeout_s fa anche da ceiling al client HTTP condiviso di L2 e L3
+# (redirect_chain, favicon): nel fast ogni richiesta è cappata a 5s
+# invece dei 30s di default.  Floor residuo: differential_fetch usa un
+# client proprio a 15s per profilo (i profili girano in parallelo).
 FAST_L2_TIMEOUT_S = 5.0
 FAST_L3_TIMEOUT_S = 5.0
 

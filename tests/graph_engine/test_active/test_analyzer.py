@@ -2,12 +2,30 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from graph_engine.active.analyzer import analyze
 from graph_engine.active.differential_fetch import PROFILES
+
+
+class _RecordingAsyncClient:
+    """Fake context manager al posto di ``httpx.AsyncClient`` — registra
+    i kwargs del costruttore così i test possono ispezionare il timeout
+    (ceiling del client condiviso)."""
+
+    created: list[dict] = []
+
+    def __init__(self, **kwargs):
+        type(self).created.append(kwargs)
+        self.client = MagicMock()
+
+    async def __aenter__(self):
+        return self.client
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 class TestAnalyzer:
@@ -364,3 +382,61 @@ class TestAnalyzer:
 
         hop_ev = [e for e in result["evidence"] if e["key"] == "redirect_hop_count"]
         assert len(hop_ev) == 0
+
+    async def test_client_timeout_follows_timeout_s(self):
+        """Il ceiling del client HTTP condiviso segue ``timeout_s``:
+        ``analyze(url, timeout_s=5.0)`` costruisce il client con
+        timeout 5.0 (fast path), senza parametro resta il default 30.0."""
+        _RecordingAsyncClient.created = []
+        with patch(
+            "graph_engine.active.analyzer.httpx.AsyncClient",
+            _RecordingAsyncClient,
+        ), patch(
+            "graph_engine.active.analyzer.trace_redirect_chain",
+            return_value={
+                "hops": [],
+                "final_url": "https://example.com",
+                "hop_count": 0,
+                "redirect_count": 0,
+                "truncated": False,
+            },
+        ), patch(
+            "graph_engine.active.analyzer.fetch_favicon_hash",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.compute_jarm",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.differential_fetch",
+            return_value={"results": {}, "profiles_compared": 0},
+        ):
+            await analyze("https://example.com", timeout_s=5.0)
+
+        assert _RecordingAsyncClient.created == [{"timeout": 5.0}]
+
+        _RecordingAsyncClient.created = []
+        with patch(
+            "graph_engine.active.analyzer.httpx.AsyncClient",
+            _RecordingAsyncClient,
+        ), patch(
+            "graph_engine.active.analyzer.trace_redirect_chain",
+            return_value={
+                "hops": [],
+                "final_url": "https://example.com",
+                "hop_count": 0,
+                "redirect_count": 0,
+                "truncated": False,
+            },
+        ), patch(
+            "graph_engine.active.analyzer.fetch_favicon_hash",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.compute_jarm",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.differential_fetch",
+            return_value={"results": {}, "profiles_compared": 0},
+        ):
+            await analyze("https://example.com")
+
+        assert _RecordingAsyncClient.created == [{"timeout": 30.0}]

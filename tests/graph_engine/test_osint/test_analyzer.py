@@ -8,6 +8,24 @@ from graph_engine.config import settings
 from graph_engine.osint.analyzer import analyze
 
 
+class _RecordingAsyncClient:
+    """Fake context manager al posto di ``httpx.AsyncClient`` — registra
+    i kwargs del costruttore così i test possono ispezionare il timeout
+    (ceiling del client condiviso)."""
+
+    created: list[dict] = []
+
+    def __init__(self, **kwargs):
+        type(self).created.append(kwargs)
+        self.client = MagicMock()
+
+    async def __aenter__(self):
+        return self.client
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class TestAnalyzerIntegration:
     async def test_all_sources_in_parallel(self, monkeypatch):
         """Verifica che le fonti vengano chiamate (anche se mockate)."""
@@ -293,6 +311,71 @@ class TestAnalyzerIntegration:
             age_ev = [e for e in result["evidence"] if e["key"] == "domain_age_days"]
             assert len(age_ev) == 0
             assert result["passive_risk_score"] == 0.0
+
+    async def test_client_timeout_follows_timeout_s(self, monkeypatch):
+        """Il ceiling del client HTTP condiviso segue ``timeout_s``:
+        ``analyze(url, timeout_s=5.0)`` costruisce il client con
+        timeout 5.0 (fast path), senza parametro resta il default 30.0."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        _RecordingAsyncClient.created = []
+        with patch(
+            "graph_engine.osint.analyzer.httpx.AsyncClient",
+            _RecordingAsyncClient,
+        ), patch(
+            "graph_engine.osint.analyzer.query_crtsh",
+            new_callable=AsyncMock,
+            return_value={"sibling_domains": [], "truncated": False,
+                          "total_siblings": 0, "newest_cert_days": None,
+                          "oldest_cert_days": None, "total_certs": 0},
+        ), patch(
+            "graph_engine.osint.analyzer.query_rdap",
+            new_callable=AsyncMock,
+            return_value={"domain_age_days": 365, "registrar": "OldReg",
+                          "nameservers": []},
+        ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value={"a_records": ["93.184.216.34"], "aaaa_records": [],
+                          "error": None},
+        ), patch(
+            "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
+            new_callable=AsyncMock,
+            return_value={"provider": "urlhaus", "listed": False,
+                          "details": {"query_status": "no_results"}},
+        ):
+            await analyze("https://old.example.com/login", timeout_s=5.0)
+
+        assert _RecordingAsyncClient.created == [{"timeout": 5.0}]
+
+        _RecordingAsyncClient.created = []
+        with patch(
+            "graph_engine.osint.analyzer.httpx.AsyncClient",
+            _RecordingAsyncClient,
+        ), patch(
+            "graph_engine.osint.analyzer.query_crtsh",
+            new_callable=AsyncMock,
+            return_value={"sibling_domains": [], "truncated": False,
+                          "total_siblings": 0, "newest_cert_days": None,
+                          "oldest_cert_days": None, "total_certs": 0},
+        ), patch(
+            "graph_engine.osint.analyzer.query_rdap",
+            new_callable=AsyncMock,
+            return_value={"domain_age_days": 365, "registrar": "OldReg",
+                          "nameservers": []},
+        ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value={"a_records": ["93.184.216.34"], "aaaa_records": [],
+                          "error": None},
+        ), patch(
+            "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
+            new_callable=AsyncMock,
+            return_value={"provider": "urlhaus", "listed": False,
+                          "details": {"query_status": "no_results"}},
+        ):
+            await analyze("https://old.example.com/login")
+
+        assert _RecordingAsyncClient.created == [{"timeout": 30.0}]
 
 
 class TestRiskScoreDerivedFromWeights:

@@ -98,8 +98,13 @@ async def analyze(
 
     evidence: list[dict] = []
 
-    # Client HTTP condiviso con timeout
-    async with httpx.AsyncClient(timeout=_HTTPX_TIMEOUT) as client:
+    # Client HTTP condiviso: il ceiling segue timeout_s, così nel fast
+    # path (timeout_s=5.0) ogni richiesta è cappata a 5s invece dei 30s
+    # di default (i provider hanno anche il proprio timeout
+    # per-chiamata, ugualmente parametrizzato).
+    async with httpx.AsyncClient(
+        timeout=timeout_s if timeout_s is not None else _HTTPX_TIMEOUT
+    ) as client:
         # ── Lancio parallelo di TUTTE le fonti ──────────────────────────
         providers = get_enabled_providers()
 
