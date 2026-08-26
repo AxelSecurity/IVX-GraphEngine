@@ -189,6 +189,7 @@ async def _main(args: argparse.Namespace) -> None:
                 top_n_actions=args.top_n_actions,
                 profile=l3_result["recommended_profile"],
                 settle_max_wait_s=args.settle_max_wait,
+                cloaking_profile=l3_result.get("cloaking_profile"),
             )
 
             # ── Patch target with L0 fields ──────────────────────────────

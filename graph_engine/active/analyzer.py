@@ -15,6 +15,7 @@ import httpx
 
 from graph_engine.active.differential_fetch import (
     PROFILES,
+    cloaking_probe_profile,
     detect_cloaking,
     differential_fetch,
     recommend_profile,
@@ -78,6 +79,8 @@ async def analyze(
         - ``evidence``: list[dict] — evidenze L3 raccolte
         - ``recommended_profile``: dict — profilo raccomandato per L4
           (``user_agent`` + ``headers``)
+        - ``cloaking_profile``: dict o None — profilo divergente più ricco
+          da esplorare come secondo ramo L4 (``None`` se nessun cloaking)
     """
     parsed = urlparse(canonical_url)
     hostname = parsed.hostname or ""
@@ -91,6 +94,7 @@ async def analyze(
                 "user_agent": PROFILES["desktop_chrome"]["user_agent"],
                 "headers": dict(PROFILES["desktop_chrome"].get("headers", {})),
             },
+            "cloaking_profile": None,
         }
 
     async with httpx.AsyncClient(timeout=_HTTPX_TIMEOUT) as client:
@@ -203,11 +207,13 @@ async def analyze(
             "user_agent": PROFILES["desktop_chrome"]["user_agent"],
             "headers": dict(PROFILES["desktop_chrome"].get("headers", {})),
         }
+        cloaking_profile = None
 
         if isinstance(diff_result, dict) and "results" in diff_result:
             diff_results = diff_result["results"]
             cloaking = detect_cloaking(diff_results)
             recommended_profile = recommend_profile(diff_results, cloaking)
+            cloaking_profile = cloaking_probe_profile(diff_results, cloaking)
 
             if cloaking.get("cloaking_detected"):
                 evidence.append(_make_evidence(
@@ -246,6 +252,7 @@ async def analyze(
     return {
         "evidence": evidence,
         "recommended_profile": recommended_profile,
+        "cloaking_profile": cloaking_profile,
     }
 
 

@@ -43,7 +43,7 @@ Tutti modelli Pydantic v2 con `from __future__ import annotations`:
 
 ### Enum
 
-- **`TransitionKind`** (9 valori): `http_3xx`, `meta_refresh`, `js_location`, `history_push`, `click`, `form_submit` (mantenuto per retrocompatibilità, **non più prodotto**), `new_tab`, `gate_solved`, `ws_message`
+- **`TransitionKind`** (10 valori): `http_3xx`, `meta_refresh`, `js_location`, `history_push`, `click`, `form_submit` (mantenuto per retrocompatibilità, **non più prodotto**), `new_tab`, `gate_solved`, `ws_message`, `cloaking_probe` (collegamento root primario → root del ramo col profilo divergente)
 - **`TargetStatus`**: `queued`, `running`, `done`, `error`
 - **`EvidenceScope`**: `target`, `state`, `transition`
 - **`Classification`**: `benign`, `suspicious`, `phishing` — **NON esiste `aitm`** (la classificazione riguarda *cosa* è il sito, non *come* esfiltra; la tecnica va in `kit_family`/`rationale`)
@@ -57,7 +57,7 @@ Tutti modelli Pydantic v2 con `from __future__ import annotations`:
 | `dom_hash.py` | 132 | Normalizzazione DOM + SHA-256 via lxml; rimuove nonce/CSRF/timestamp/UUID/hash, ordina attributi, elimina `value` da elementi con segnale effimero |
 | `actions.py` | 212 | Scoring elementi interagibili: `ActionCandidate` + `enumerate_actionable(page)` con script JS inlinato (keyword match W=0.50, salienza visiva 0.30, posizione 0.20); ~30 keyword; selettori `#id`, `tag:has-text(...)`, o tag+classe |
 | `gate_solver.py` | 116 | `detect_captcha(page)` (riconoscimento iframe: cloudflare_turnstile/hcaptcha/recaptcha) + `try_pass_gate(page, wait_seconds=8)` — attesa auto-risoluzione, singolo click checkbox, mai puzzle reali |
-| `explorer.py` | 1079 | `StateGraphExplorer` — il motore BFS principale (vedi sotto) |
+| `explorer.py` | 1392 | `StateGraphExplorer` — il motore BFS principale: loop estratto in `_bfs_loop` (riusabile) + secondo ramo cloaking `_explore_cloaking_branch` (vedi sotto) |
 | `cli.py` | 251 | CLI argparse: `python -m graph_engine.cli <url> [opzioni]` |
 | `classifier/__init__.py` | 1 | Marker: "L5 — Classification layer" |
 | `classifier/form_inventory.py` | 110 | `scan_form_fields(page)` — scansione passiva sola lettura via JS; enumera `{tag, type, name_or_id, nearby_label_text}` per input/select/textarea visibili; esclude hidden/submit/button/checkbox/radio/file |
@@ -75,7 +75,9 @@ Tutti modelli Pydantic v2 con `from __future__ import annotations`:
 - **`_execute_click_action`**: pagina fresca per click, replay path, confronto `dom_hash` pre/post + URL; nessun cambiamento → ramo scartato; stato post con depth+1
 - **Contenimento errori**: il loop BFS wrappa ogni stato in try/except → evidenza `unhandled_node_error`; un singolo fallimento non crasha l'esplorazione
 - **Cattura artefatti**: `_save_artifacts` scrive `data/graph_artifacts/<target_id>/<state_id>/` con `screenshot.png` (full_page), `dom.html`, `snapshot.har` (HAR 1.2 minimale costruito da listener request/response)
-- **Evidenze prodotte**: `navigation_error`, `replay_fallback_used`, `unhandled_node_error`, `blocked_by_gate`, `Artifact error — ...`
+- **`_bfs_loop(page, context, budget, start_state, max_depth_limit=None)`**: il corpo del BFS estratto da `run()` e riusabile sul secondo ramo; `max_depth_limit` riduce la profondità del sotto-albero (default: `budget.max_depth`); budget, dedup e conteggio nodi restano condivisi
+- **Ramo cloaking**: `run(cloaking_profile=...)` (dopo il BFS primario) → `_explore_cloaking_branch`: apre un secondo context col profilo divergente di L3, naviga lo stesso `start_url`, collega il nuovo root con `Transition(cloaking_probe)` ed esplora con `max_depth_limit=min(2, budget.max_depth)`. Budget residuo CONDIVISO con riserva di 2 nodi (altrimenti evidenza status `skipped`); dedup dom_hash → `deduped`; primario invariato (`root_state_id`/`final_url` del primo pass); replay senza modifiche (il goto del root sul context divergente incarna il cambio profilo)
+- **Evidenze prodotte**: `navigation_error`, `replay_fallback_used`, `unhandled_node_error`, `blocked_by_gate`, `cloaking_probe` (status `explored`/`deduped`/`skipped`/`error`, weight 0.0), `cloaking_probe_error`, `Artifact error — ...`
 
 ### Pipeline L5 a due stadi
 

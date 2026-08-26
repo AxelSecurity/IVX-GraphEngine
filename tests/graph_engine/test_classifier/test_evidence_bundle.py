@@ -452,3 +452,49 @@ class TestVisionEnrichment:
         assert text.index("Testo visibile nel DOM") < text.index(
             "Testo rilevato via OCR nello screenshot:"
         )
+
+
+class TestCloakingProbeInBundle:
+    """Il ramo divergente entra nel bundle senza modifiche: leaf detection
+    e transition_kinds_seen lo includono automaticamente."""
+
+    async def test_divergent_leaf_included_and_kind_counted(self):
+        s_root = _state("root", 0)
+        s_div = _state("div-root", 0, url="https://example.com/?bot=1")
+        s_leaf = _state("leaf", 1)
+        s_div_leaf = _state("div-leaf", 1, url="https://example.com/pay")
+
+        transitions = [
+            _transition(s_root.id, s_div.id, TransitionKind.cloaking_probe),
+            _transition(s_root.id, s_leaf.id, TransitionKind.click),
+            _transition(s_div.id, s_div_leaf.id, TransitionKind.http_3xx),
+        ]
+
+        bundle = await build_evidence_bundle(
+            target_url="https://example.com",
+            canonical_url="https://example.com",
+            states=[s_root, s_div, s_leaf, s_div_leaf],
+            transitions=transitions,
+            evidence=[],
+            leaf_form_fields={},
+            leaf_visible_text={
+                str(s_div_leaf.id): "Pagina di pagamento",
+            },
+            leaf_titles={},
+        )
+
+        # cloaking_probe conteggiato tra i tipi di transizione
+        assert bundle["transition_kinds_seen"]["cloaking_probe"] == 1
+
+        # Leaf = stato senza outbound: sia il leaf primario che quello
+        # del ramo divergente finiscono nel bundle
+        leaf_urls = {leaf["url"] for leaf in bundle["leaf_states"]}
+        assert leaf_urls == {
+            "https://example.com/page?d=1",
+            "https://example.com/pay",
+        }
+        div_leaf = next(
+            leaf for leaf in bundle["leaf_states"]
+            if leaf["url"] == "https://example.com/pay"
+        )
+        assert div_leaf["visible_text"] == "Pagina di pagamento"

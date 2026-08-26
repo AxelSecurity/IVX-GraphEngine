@@ -10,6 +10,7 @@ import pytest
 from graph_engine.active.differential_fetch import (
     PROFILES,
     _make_client_for_profile,
+    cloaking_probe_profile,
     detect_cloaking,
     differential_fetch,
     recommend_profile,
@@ -216,6 +217,57 @@ class TestRecommendProfile:
 
         # Deve scegliere mobile_safari (content_length 12000 > 5000)
         assert profile["user_agent"] == PROFILES["mobile_safari"]["user_agent"]
+
+
+class TestCloakingProbeProfile:
+    """Secondo ramo L4: profilo divergente più ricco da esplorare."""
+
+    def test_no_cloaking_returns_none(self):
+        cloaking = {"cloaking_detected": False}
+        assert cloaking_probe_profile({}, cloaking) is None
+
+    def test_cloaking_returns_richest_divergent_profile(self):
+        """Due divergenti → quello con content_length maggiore."""
+        results = {
+            "bot_googlebot": {
+                "status_code": 200,
+                "content_length": 86000,
+                "final_url": "https://example.com/",
+                "body_sha256": "aaa",
+            },
+            "mobile_safari": {
+                "status_code": 200,
+                "content_length": 1000,
+                "final_url": "https://example.com/",
+                "body_sha256": "bbb",
+            },
+        }
+        cloaking = {
+            "cloaking_detected": True,
+            "divergent_profiles": ["bot_googlebot", "mobile_safari"],
+        }
+
+        profile = cloaking_probe_profile(results, cloaking)
+
+        assert profile is not None
+        assert profile["user_agent"] == PROFILES["bot_googlebot"]["user_agent"]
+
+    def test_all_divergent_failed_returns_none(self):
+        results = {
+            "bot_googlebot": {"error": "timeout"},
+        }
+        cloaking = {
+            "cloaking_detected": True,
+            "divergent_profiles": ["bot_googlebot"],
+        }
+        assert cloaking_probe_profile(results, cloaking) is None
+
+    def test_unknown_divergent_profile_returns_none(self):
+        cloaking = {
+            "cloaking_detected": True,
+            "divergent_profiles": ["sconosciuto"],
+        }
+        assert cloaking_probe_profile({}, cloaking) is None
 
 
 class TestProfiles:

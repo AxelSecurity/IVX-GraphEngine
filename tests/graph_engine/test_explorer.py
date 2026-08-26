@@ -13,7 +13,7 @@ import pytest
 
 from graph_engine.budget import Budget
 from graph_engine.explorer import StateGraphExplorer, _request_post_data_text
-from graph_engine.models import TargetStatus, TransitionKind
+from graph_engine.models import AnalysisTarget, State, TargetStatus, TransitionKind
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +223,83 @@ class TestErrorRecording:
         err = explorer.evidence[0]
         assert err.key == "navigation_error"
         assert "Connection refused" in err.value
+
+
+# ---------------------------------------------------------------------------
+# _bfs_loop — limite di profondità per il sotto-albero cloaking
+# ---------------------------------------------------------------------------
+
+
+class TestBfsLoopDepthLimit:
+    """_bfs_loop riusabile: max_depth_limit (ramo cloaking) vs budget."""
+
+    def _make_explorer(self, browser) -> StateGraphExplorer:
+        explorer = StateGraphExplorer(browser)
+        explorer.target = AnalysisTarget(
+            input_url="https://x.com", status=TargetStatus.running
+        )
+        explorer._capture_artifacts_flag = False
+        explorer._top_n_actions = 0
+        explorer._captcha_wait_s = 0
+        explorer._settle_max_wait_s = 0.0
+        explorer._node_count = 1
+        explorer._start_ts = time.monotonic()
+        return explorer
+
+    def _make_root(self, explorer) -> State:
+        root = State(
+            target_id=explorer.target.id,
+            url="https://x.com/root",
+            dom_hash="root-hash",
+            depth=0,
+        )
+        explorer.states.append(root)
+        return root
+
+    def _make_expanding_page_mocks(self, explorer):
+        """Il loop espande ogni stato in un figlio a depth+1."""
+        processed = []
+
+        async def _fake_execute(page, context, state, action):
+            processed.append(state.dom_hash)
+            return State(
+                target_id=explorer.target.id,
+                url=state.url + "/child",
+                dom_hash="child-of-" + state.dom_hash,
+                depth=state.depth + 1,
+            )
+
+        explorer._enumerate_passive_actions = AsyncMock(return_value=[object()])
+        explorer._execute_action = AsyncMock(side_effect=_fake_execute)
+        return processed
+
+    async def test_max_depth_limit_caps_branch_depth(self):
+        """max_depth_limit=1 → solo il root (depth 0) viene espanso."""
+        page = _mock_page()
+        browser, context = _mock_browser(page)
+        explorer = self._make_explorer(browser)
+        root = self._make_root(explorer)
+        processed = self._make_expanding_page_mocks(explorer)
+
+        budget = Budget(max_nodes=40, max_depth=5, timeout_s=60)
+        await explorer._bfs_loop(page, context, budget, root, max_depth_limit=1)
+
+        # Il figlio a depth 1 NON viene elaborato (depth >= depth_limit)
+        assert processed == ["root-hash"]
+
+    async def test_default_depth_limit_is_budget_max_depth(self):
+        """Senza max_depth_limit il limite è budget.max_depth."""
+        page = _mock_page()
+        browser, context = _mock_browser(page)
+        explorer = self._make_explorer(browser)
+        root = self._make_root(explorer)
+        processed = self._make_expanding_page_mocks(explorer)
+
+        budget = Budget(max_nodes=40, max_depth=2, timeout_s=60)
+        await explorer._bfs_loop(page, context, budget, root)
+
+        # max_depth=2 → root (0) e figlio (1) espansi, nipote (2) no
+        assert processed == ["root-hash", "child-of-root-hash"]
 
 
 # ---------------------------------------------------------------------------

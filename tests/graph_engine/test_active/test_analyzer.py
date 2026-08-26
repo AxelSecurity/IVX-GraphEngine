@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from graph_engine.active.analyzer import analyze
+from graph_engine.active.differential_fetch import PROFILES
 
 
 class TestAnalyzer:
@@ -62,6 +63,9 @@ class TestAnalyzer:
         assert "user_agent" in result["recommended_profile"]
         assert "headers" in result["recommended_profile"]
 
+        # Nessun cloaking → nessun profilo divergente per il secondo ramo
+        assert result["cloaking_profile"] is None
+
     async def test_one_module_failure_does_not_block_others(self):
         """Un fallimento (JARM) non impedisce agli altri di produrre risultati."""
         with patch(
@@ -116,6 +120,7 @@ class TestAnalyzer:
 
         assert result["evidence"] == []
         assert result["recommended_profile"]["user_agent"] is not None
+        assert result["cloaking_profile"] is None
 
     async def test_cloaking_detected_produces_evidence(self):
         """Cloaking rilevato → evidenza cloaking_detected."""
@@ -159,6 +164,51 @@ class TestAnalyzer:
         cloaking_ev = [e for e in result["evidence"] if e["key"] == "cloaking_detected"]
         assert len(cloaking_ev) == 1
         assert cloaking_ev[0]["value"]["divergent_profiles"]
+
+        # Il profilo divergente più ricco (bot_googlebot, 8000 bytes)
+        # diventa il cloaking_profile per il secondo ramo L4
+        assert result["cloaking_profile"] is not None
+        assert result["cloaking_profile"]["user_agent"] == (
+            PROFILES["bot_googlebot"]["user_agent"]
+        )
+
+    async def test_cloaking_profile_none_without_divergent_success(self):
+        """Profilo divergente fallito → cloaking_profile resta None."""
+        with patch(
+            "graph_engine.active.analyzer.trace_redirect_chain",
+            return_value={
+                "hops": [{"status_code": 200, "url": "https://example.com"}],
+                "final_url": "https://example.com",
+                "hop_count": 1,
+                "redirect_count": 0,
+                "truncated": False,
+            },
+        ), patch(
+            "graph_engine.active.analyzer.fetch_favicon_hash",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.compute_jarm",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.differential_fetch",
+            return_value={
+                "results": {
+                    "desktop_chrome": {
+                        "status_code": 200,
+                        "final_url": "https://example.com",
+                        "content_length": 5000,
+                        "body_sha256": "abc123",
+                    },
+                    "bot_googlebot": {
+                        "error": "Connection refused",
+                    },
+                },
+                "profiles_compared": 1,
+            },
+        ):
+            result = await analyze("https://example.com")
+
+        assert result["cloaking_profile"] is None
 
     async def test_excessive_redirects_produce_evidence(self):
         """>= 5 redirect → evidenza excessive_redirects."""

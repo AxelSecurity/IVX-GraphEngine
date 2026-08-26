@@ -258,6 +258,7 @@ async def run_full_analysis(
                     captcha_wait_s=captcha_wait_s,
                     profile=l3_result["recommended_profile"],
                     target_id=analysis_target.id,
+                    cloaking_profile=l3_result.get("cloaking_profile"),
                 )
             finally:
                 await browser.close()

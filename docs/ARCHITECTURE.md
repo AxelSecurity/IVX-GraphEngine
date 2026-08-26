@@ -41,6 +41,7 @@ serializzato su richiesta). Artefatti binari (HAR, screenshot, DOM) su filesyste
 | `new_tab` | Apertura nuovo contesto/tab (`target=_blank`, `window.open`) |
 | `gate_solved` | Superamento di CAPTCHA / challenge anti-bot |
 | `ws_message` | Cambio di stato guidato da messaggio WebSocket (tipico AiTM) |
+| `cloaking_probe` | Collegamento dal root primario al root del ramo esplorato col profilo divergente (L3 cloaking) |
 
 ### Normalizzazione DOM (dom_hash)
 
@@ -71,6 +72,33 @@ while frontier and within_budget():
             frontier.push(s2)
     if stop_condition(s): break
 ```
+
+### Cloaking probe (secondo ramo)
+
+Quando L3 rileva cloaking, il contenuto servito al profilo divergente
+(es. Googlebot) non è mai visibile al visitatore normale. Il motore
+esplora quindi un SECONDO albero col profilo divergente:
+
+1. L3 produce `cloaking_profile` (`cloaking_probe_profile` in
+   `differential_fetch.py`): il profilo divergente con content_length
+   maggiore, o `None` se nessun cloaking / divergenti tutti falliti.
+2. `StateGraphExplorer.run(cloaking_profile=...)` — dopo il BFS
+   primario — apre un secondo context Playwright con user_agent/header
+   del profilo divergente e naviga lo stesso `start_url`
+   (`_explore_cloaking_branch`).
+3. Il nuovo root è collegato al root primario da una
+   `Transition(cloaking_probe)`; il sotto-albero riusa lo stesso loop
+   BFS (`_bfs_loop`) con max_depth ridotta a `min(2, budget.max_depth)`.
+4. Budget residuo CONDIVISO con riserva di 2 nodi: se il ramo non
+   partirebbe con abbastanza budget, viene registrata evidenza
+   `cloaking_probe` status `skipped` e non si apre alcun context.
+5. Replay: nessuna modifica necessaria — il goto del root sul context
+   divergente incarna il cambio profilo; gli stati del ramo si
+   raggiungono via click/gate sul context divergente stesso.
+
+Il primario resta invariato: `root_state_id` e `final_url` del target
+sono del primo pass. I leaf del ramo divergente entrano nel bundle L5
+automaticamente (leaf = stato senza transizioni outbound).
 
 ## Interaction engine (fasi successive, non in questo primo batch)
 
@@ -473,6 +501,11 @@ raccomandato il profilo che ha ricevuto la risposta "più ricca"
 **Recommend profile**: restituisce un dict `{user_agent, headers}` pronto
 per `browser.new_context()` di Playwright in L4.
 
+**Cloaking probe profile** (`cloaking_probe_profile`): il profilo
+divergente più ricco (content_length maggiore, esclusi quelli con
+`error`) da esplorare come secondo ramo L4. Ritorna `None` quando non
+c'è cloaking o nessun divergente ha avuto successo.
+
 ### Orchestratore (`graph_engine/active/analyzer.py`)
 
 `analyze(canonical_url)` esegue tutte e quattro le sonde IN PARALLELO.
@@ -503,6 +536,11 @@ Playwright applica questi header a OGNI richiesta HTTP del browser,
 permettendo di emulare il profilo che L3 ha determinato essere il più
 adatto per quel target (es. il profilo che ha ricevuto la risposta
 "più ricca" in caso di cloaking).
+
+In caso di cloaking, l'analyzer produce anche `cloaking_profile` che
+viene passato a `StateGraphExplorer.run(cloaking_profile=...)` per il
+secondo ramo (vedi "Cloaking probe (secondo ramo)" nella sezione del
+motore di esplorazione).
 
 ### Architettura del package
 

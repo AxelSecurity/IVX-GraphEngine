@@ -82,6 +82,7 @@ class FakeExplorer:
         settle_max_wait_s: float = 4.0,
         profile=None,
         target_id=None,
+        cloaking_profile=None,
     ) -> AnalysisTarget:
         import uuid as _uuid
 
