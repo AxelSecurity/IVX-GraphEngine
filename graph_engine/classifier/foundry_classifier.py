@@ -127,6 +127,19 @@ def _new_thread_id(client) -> str:
     return thread.id
 
 
+def _is_image_content_error(exc: Exception) -> bool:
+    """True for service errors rejecting image content blocks, e.g.
+
+    "(invalid_type) Invalid model: gpt-5-mini-2025-08-07 does not
+    support image message content types."
+    """
+    text = str(exc).lower()
+    return (
+        "does not support image" in text
+        or ("image" in text and "invalid" in text)
+    )
+
+
 def _build_user_message(bundle: dict) -> str:
     """Convert bundle to prompt text and wrap it for the agent."""
     from graph_engine.classifier.evidence_bundle import bundle_to_prompt_text
@@ -174,8 +187,17 @@ async def _call_foundry_agent(
     client = AgentsClient(endpoint=endpoint, credential=credential)
 
     # ── CRITICAL: always create a NEW thread ─────────────────────────────
-    # See module-level docstring for the rationale.
-    thread_id = _new_thread_id(client)
+    # See module-level docstring for the rationale.  Track every thread
+    # created so the finally block can clean them all up (the image-retry
+    # path below may create a second one).
+    created_thread_ids: list[str] = []
+
+    def _fresh_thread() -> str:
+        tid = _new_thread_id(client)
+        created_thread_ids.append(tid)
+        return tid
+
+    thread_id = _fresh_thread()
     # ─────────────────────────────────────────────────────────────────────
 
     system_prompt = _load_system_prompt()
@@ -197,6 +219,7 @@ async def _call_foundry_agent(
         #  - the SDK exposes MessageInputImageFileBlock /
         #    MessageImageFileParam — the standard vision pattern is an
         #    image_file content block, not a tool attachment.
+        attached_any = False
         for sp in screenshot_paths:
             if os.path.isfile(sp):
                 try:
@@ -226,13 +249,38 @@ async def _call_foundry_agent(
                     logger.warning(
                         "Failed to attach screenshot %s: %s", sp, exc
                     )
+                else:
+                    attached_any = True
 
-        # Create and wait for the run
-        run = client.runs.create_and_process(
-            thread_id=thread_id,
-            agent_id=agent_id,
-            instructions=system_prompt,
-        )
+        # Create and wait for the run.  If the agent's model rejects
+        # image content blocks (e.g. gpt-5-mini without vision), retry
+        # once on a FRESH thread with the text-only prompt — screenshots
+        # must never kill the classification.
+        try:
+            run = client.runs.create_and_process(
+                thread_id=thread_id,
+                agent_id=agent_id,
+                instructions=system_prompt,
+            )
+        except Exception as exc:
+            if not attached_any or not _is_image_content_error(exc):
+                raise
+            logger.warning(
+                "Agent model rejects image content — retrying on a fresh "
+                "thread with text-only prompt (screenshots discarded): %s",
+                exc,
+            )
+            thread_id = _fresh_thread()
+            client.messages.create(
+                thread_id=thread_id,
+                role="user",
+                content=prompt,
+            )
+            run = client.runs.create_and_process(
+                thread_id=thread_id,
+                agent_id=agent_id,
+                instructions=system_prompt,
+            )
 
         if run.status not in ("completed", "requires_action"):
             logger.warning("Foundry run ended with status: %s", run.status)
@@ -276,11 +324,12 @@ async def _call_foundry_agent(
         return ""
 
     finally:
-        # Clean up the ephemeral thread — no cross-session leakage
-        try:
-            client.threads.delete(thread_id)
-        except Exception:
-            pass
+        # Clean up the ephemeral thread(s) — no cross-session leakage
+        for tid in created_thread_ids:
+            try:
+                client.threads.delete(tid)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
