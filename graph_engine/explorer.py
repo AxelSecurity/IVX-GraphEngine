@@ -8,6 +8,7 @@ first interactive transition: click on scored actionable elements.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import time
@@ -109,6 +110,25 @@ _SETTLE_QUIET_CYCLES = 2       # consecutive mature cycles with nothing
 # ---------------------------------------------------------------------------
 # Explorer
 # ---------------------------------------------------------------------------
+
+
+def _request_post_data_text(request) -> Optional[str]:
+    """POST body di una richiesta Playwright come testo, senza crashare.
+
+    ``request.post_data`` decodifica il body base64 come UTF-8 e lancia
+    ``UnicodeDecodeError`` sui body binari (es. gzip — magic byte 0x8b):
+    un POST del genere faceva esplodere il callback pyee del listener HAR
+    (visto live su google.com, POST compresso).  In quel caso si registra
+    il buffer codificato in base64 con prefisso ``<base64>`` invece di
+    perdere l'entry o propagare l'eccezione.
+    """
+    try:
+        return request.post_data
+    except UnicodeDecodeError:
+        raw = request.post_data_buffer
+        if not raw:
+            return None
+        return "<base64>" + base64.b64encode(raw).decode("ascii")
 
 
 class StateGraphExplorer:
@@ -1047,7 +1067,7 @@ class StateGraphExplorer:
                 "url": request.url,
                 "method": request.method,
                 "headers": dict(request.headers),
-                "postData": request.post_data,
+                "postData": _request_post_data_text(request),
                 "startedDateTime": datetime.now(timezone.utc).isoformat(),
                 "_start_ms": time.monotonic(),
             })

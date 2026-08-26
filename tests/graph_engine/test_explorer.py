@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import http.server
 import threading
 import time
@@ -11,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from graph_engine.budget import Budget
-from graph_engine.explorer import StateGraphExplorer
+from graph_engine.explorer import StateGraphExplorer, _request_post_data_text
 from graph_engine.models import TargetStatus, TransitionKind
 
 
@@ -222,6 +223,55 @@ class TestErrorRecording:
         err = explorer.evidence[0]
         assert err.key == "navigation_error"
         assert "Connection refused" in err.value
+
+
+# ---------------------------------------------------------------------------
+# HAR capture — POST body non-UTF8 (visto live: POST gzip → UnicodeDecodeError)
+# ---------------------------------------------------------------------------
+
+
+class _DummyRequest:
+    """Fake Playwright Request minimale: ``post_data`` strettamente UTF-8,
+    ``post_data_buffer`` con i bytes grezzi (entrambe le property lanciano
+    lo stesso pattern della API reale)."""
+
+    def __init__(self, post_data=None, raw: bytes | None = None, binary=False):
+        self._post_data = post_data
+        self._raw = raw
+        self._binary = binary
+
+    @property
+    def post_data(self):
+        if self._binary:
+            raise UnicodeDecodeError(
+                "utf-8", self._raw or b"\x1f\x8b", 1, 2, "invalid start byte"
+            )
+        return self._post_data
+
+    @property
+    def post_data_buffer(self):
+        return self._raw
+
+
+class TestRequestPostDataText:
+    def test_text_post_data_returned_as_is(self):
+        req = _DummyRequest(post_data="user=foo&pass=bar")
+        assert _request_post_data_text(req) == "user=foo&pass=bar"
+
+    def test_no_post_data_returns_none(self):
+        req = _DummyRequest(post_data=None)
+        assert _request_post_data_text(req) is None
+
+    def test_binary_body_returns_base64_marker(self):
+        """Body gzip (magic byte 0x8b) → base64 marcato, nessuna eccezione."""
+        raw = b"\x1f\x8b\x08\x00gzipped-body"
+        req = _DummyRequest(binary=True, raw=raw)
+        expected = "<base64>" + base64.b64encode(raw).decode("ascii")
+        assert _request_post_data_text(req) == expected
+
+    def test_binary_body_without_buffer_returns_none(self):
+        req = _DummyRequest(binary=True, raw=None)
+        assert _request_post_data_text(req) is None
 
 
 # ---------------------------------------------------------------------------
