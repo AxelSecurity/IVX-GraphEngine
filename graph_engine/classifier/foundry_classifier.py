@@ -23,6 +23,7 @@ CRITICAL DESIGN CONSTRAINT — read before modifying:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -153,8 +154,27 @@ def _build_user_message(bundle: dict) -> str:
 
 
 async def _call_foundry_agent(prompt: str) -> str:
+    """Run the (blocking) Foundry SDK flow in a worker thread.
+
+    The AgentsClient SDK is fully synchronous: ``create_and_process``
+    blocks for the whole run duration.  Running it on the event loop
+    would freeze the entire API server (10-40s+ with a real agent) and
+    prevent the Trellix 48s response timeout from ever firing — the
+    frontdoor deadline would be missed silently.  ``asyncio.to_thread``
+    keeps the loop responsive while the agent runs.
+
+    NO ``asyncio.wait_for`` around the thread: the Foundry run has no
+    time cap by design (user decision — L5 must not be limited).  The
+    caller (``classify``) stays cancellable-cooperative on the loop.
+    """
+    # NESSUN wait_for: il run Foundry resta senza tetto (decisione utente)
+    return await asyncio.to_thread(_call_foundry_agent_sync, prompt)
+
+
+def _call_foundry_agent_sync(prompt: str) -> str:
     """Create a fresh thread, send the prompt, run, and return the reply.
 
+    Blocking body executed in a worker thread (see ``_call_foundry_agent``).
     Raises ``_FoundryNotConfigured`` if env vars are missing.
     """
 
