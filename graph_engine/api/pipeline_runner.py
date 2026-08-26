@@ -21,6 +21,7 @@ classificatore legge DOM snapshot da disco e strutture in memoria.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -225,20 +226,16 @@ async def run_full_analysis(
             ingested["nested_payloads"],
         )
 
-        # ── L2 passive OSINT (async, rete) ─────────────────────────────────
+        # ── L2 passive OSINT ∥ L3 active low-interaction (async, rete) ───
+        # Nessuno scambio dati tra i due strati → corrono in PARALLELO
+        # (gather, non sequenziali): nel fast path Trellix il tempo
+        # L2+L3 si dimezza (entrambi cappati a FAST_*_TIMEOUT_S).
         from graph_engine.osint.analyzer import analyze as l2_analyze
-
-        l2_result = await l2_analyze(
-            ingested["canonical_url"],
-            timeout_s=l2_timeout_s,
-        )
-
-        # ── L3 active low-interaction (async, rete) ────────────────────────
         from graph_engine.active.analyzer import analyze as l3_analyze
 
-        l3_result = await l3_analyze(
-            ingested["canonical_url"],
-            timeout_s=l3_timeout_s,
+        l2_result, l3_result = await asyncio.gather(
+            l2_analyze(ingested["canonical_url"], timeout_s=l2_timeout_s),
+            l3_analyze(ingested["canonical_url"], timeout_s=l3_timeout_s),
         )
 
         budget_obj = budget or Budget()

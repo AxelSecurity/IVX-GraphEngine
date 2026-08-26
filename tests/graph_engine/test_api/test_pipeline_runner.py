@@ -259,3 +259,55 @@ class TestPipelineRunner:
             f"trovato {type(stored).__name__}"
         )
         assert json.loads(stored) == crtsh_error
+
+    async def test_l2_and_l3_run_in_parallel(
+        self, fake_pipeline, tmp_path, monkeypatch
+    ):
+        """Handshake deterministico: L3 termina subito e L2 aspetta un
+        release che il test concede SOLO dopo aver visto L3 finire.
+
+        Se il runner eseguisse L2 e L3 in sequenza (L2 prima), L2
+        resterebbe bloccato in attesa del release → ``wait_for`` scadrebbe
+        e il target andrebbe in error prima ancora che L3 venga chiamato:
+        il test fallirebbe sul ``l3_done`` che non scatta mai.
+        """
+        import asyncio
+
+        from graph_engine.api.pipeline_runner import run_full_analysis
+
+        l3_done = asyncio.Event()
+        release_l2 = asyncio.Event()
+
+        async def _handshake_l2(url, timeout_s=None):
+            # 3s di margine: se L2 girasse PRIMA di L3, esploderebbe qui
+            # per timeout ben prima del wait_for esterno del test.
+            await asyncio.wait_for(release_l2.wait(), timeout=3.0)
+            return {"evidence": [], "passive_risk_score": 0.0}
+
+        async def _handshake_l3(url, timeout_s=None):
+            l3_done.set()
+            return {"evidence": [], "recommended_profile": {}}
+
+        monkeypatch.setattr(
+            "graph_engine.osint.analyzer.analyze", _handshake_l2
+        )
+        monkeypatch.setattr(
+            "graph_engine.active.analyzer.analyze", _handshake_l3
+        )
+
+        db = str(tmp_path / "test.db")
+        task = asyncio.create_task(
+            run_full_analysis(
+                "https://example.com",
+                db_path=db,
+                classify=False,
+            )
+        )
+
+        # Prova che L3 è partito senza aspettare la fine di L2
+        await asyncio.wait_for(l3_done.wait(), timeout=2.0)
+        release_l2.set()
+
+        target_id = await asyncio.wait_for(task, timeout=5.0)
+        data = await get_target_by_id(target_id, db_path=db)
+        assert data["target"].status == TargetStatus.done

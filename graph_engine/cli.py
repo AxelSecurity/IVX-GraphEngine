@@ -162,15 +162,15 @@ async def _main(args: argparse.Namespace) -> None:
         ingested["nested_payloads"],
     )
 
-    # ── L2 passive OSINT (crt.sh, RDAP, URLhaus, MISP/OpenCTI adapter) ──
+    # ── L2 passive OSINT ∥ L3 active low-interaction (async, rete) ──────
+    # Nessuno scambio dati tra i due strati → corrono in PARALLELO.
     from graph_engine.osint.analyzer import analyze as l2_analyze
-
-    l2_result = await l2_analyze(ingested["canonical_url"])
-
-    # ── L3 active low-interaction (redirect chain, favicon, JARM, diff fetch) ─
     from graph_engine.active.analyzer import analyze as l3_analyze
 
-    l3_result = await l3_analyze(ingested["canonical_url"])
+    l2_result, l3_result = await asyncio.gather(
+        l2_analyze(ingested["canonical_url"]),
+        l3_analyze(ingested["canonical_url"]),
+    )
 
     budget = Budget(
         max_depth=args.max_depth,
