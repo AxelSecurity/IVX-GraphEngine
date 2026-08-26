@@ -79,7 +79,14 @@ async def classify(
     try:
         data = json.loads(raw_json)
     except json.JSONDecodeError:
-        logger.warning("Foundry returned invalid JSON — falling back")
+        # TEMPORARY DIAGNOSTIC LOGGING — print the FULL raw model text
+        # before discarding it, to understand why the JSON parse failed.
+        # Remove once the parsing issue is understood.
+        logger.warning(
+            "Foundry returned invalid JSON — falling back. Raw model "
+            "text (untruncated, diagnostic):\n%s",
+            raw_json,
+        )
         return _heuristic_fallback(bundle)
 
     # Coerce classification string to enum
@@ -199,7 +206,11 @@ async def _call_foundry_agent(
                     with open(sp, "rb") as fh:
                         file_ref = client.files.upload(
                             file=fh,
-                            purpose="vision",
+                            # NOTE: "vision" was rejected by the service on
+                            # the live endpoint (invalidPayload: "purpose
+                            # contains an invalid purpose") — use the
+                            # standard agent-file purpose instead.
+                            purpose="assistants",
                         )
                     client.messages.create(
                         thread_id=thread_id,
