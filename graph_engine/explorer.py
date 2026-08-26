@@ -227,11 +227,15 @@ class StateGraphExplorer:
         need for post-hoc re-parenting.
 
         *cloaking_profile* is the divergent profile detected by L3
-        (``{"user_agent", "headers"}``).  When set, after the primary tree
-        is explored a SECOND branch is explored with this profile, linked
+        (``{"user_agent", "headers"}``).  When set, a SECOND branch is
+        explored with this profile BEFORE the primary BFS loop, linked
         to the primary root by a ``TransitionKind.cloaking_probe``
         transition.  Budget is shared (residual) and the branch max depth
-        is capped at ``min(2, budget.max_depth)``.
+        is capped at ``min(2, budget.max_depth)``.  The branch runs first
+        so it is guaranteed a budget window: after the primary loop it
+        would never start on targets that redirect to "infinite" sites
+        (e.g. Google), where the primary tree consumes the whole global
+        timeout.
         """
         budget = budget or Budget()
         self._capture_artifacts_flag = capture_artifacts
@@ -284,13 +288,17 @@ class StateGraphExplorer:
             self.states.append(root_state)
             self._node_count += 1
 
-            # --- BFS loop --------------------------------------------------
-            await self._bfs_loop(page, context, budget, root_state)
-
             # --- secondo ramo cloaking (profilo divergente) ----------------
+            # PRIMA del BFS primario: il ramo ha così una finestra di
+            # budget garantita. Dopo il primario non partirebbe mai sui
+            # target che reindirizzano a siti "infiniti" (es. Google):
+            # il primario consumerebbe l'intero timeout globale.
             await self._explore_cloaking_branch(
-                start_url, budget, cloaking_profile
+                start_url, budget, cloaking_profile, root_state
             )
+
+            # --- BFS loop primario -----------------------------------------
+            await self._bfs_loop(page, context, budget, root_state)
 
             self.target.status = TargetStatus.done
 
@@ -465,6 +473,7 @@ class StateGraphExplorer:
         start_url: str,
         budget: Budget,
         cloaking_profile: Optional[dict],
+        root_state: State,
     ) -> None:
         """Secondo ramo L4 col profilo divergente rilevato da L3.
 
@@ -473,11 +482,18 @@ class StateGraphExplorer:
         normale: qui viene esplorato come albero parallelo collegato al
         root primario da una ``Transition(cloaking_probe)``.
 
+        Viene eseguito subito dopo la navigazione del root primario,
+        PRIMA del BFS primario: così il ramo ha una finestra di budget
+        garantita (il primario, su target che reindirizzano a siti
+        infiniti, consumerebbe l'intero timeout globale).
+
         Vincoli:
-        - budget residuo CONDIVISO (stessi ``_node_count``/``_start_ts``);
+        - budget CONDIVISO (stessi ``_node_count``/``_start_ts``);
         - riserva di 2 nodi: il ramo parte solo con abbastanza budget,
           altrimenti evidenza status ``skipped``;
         - max_depth del sotto-albero ridotta a ``min(2, budget.max_depth)``;
+        - dedup contro il root primario (non ancora in ``self._visited``)
+          e contro gli stati già visitati;
         - contenimento errori: un fallimento produce evidenza
           ``cloaking_probe_error`` e MAI una eccezione verso l'esterno.
         """
@@ -524,7 +540,10 @@ class StateGraphExplorer:
                 )
                 return
 
-            if div_root.dom_hash in self._visited:
+            if (
+                div_root.dom_hash == root_state.dom_hash
+                or div_root.dom_hash in self._visited
+            ):
                 self._record_cloaking_probe_evidence(
                     status="deduped",
                     reason="duplicate_dom",

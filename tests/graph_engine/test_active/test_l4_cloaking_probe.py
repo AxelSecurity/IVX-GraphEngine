@@ -39,8 +39,12 @@ class TestCloakingProbeBranch:
     """Comportamento di _explore_cloaking_branch attraverso run()."""
 
     async def test_divergent_branch_creates_probe_transition(self):
-        """Secondo context col profilo divergente + transizione cloaking_probe."""
-        browser, _, _, context2, page2 = _make_browser()
+        """Secondo context col profilo divergente + transizione cloaking_probe.
+
+        Il ramo viene esplorato PRIMA del BFS primario (finestra di budget
+        garantita — vedi docstring di run()).
+        """
+        browser, context1, page1, context2, page2 = _make_browser()
 
         root = State(
             target_id=uuid.uuid4(),
@@ -111,13 +115,19 @@ class TestCloakingProbeBranch:
         assert len(probe_ev) == 1
         assert json.loads(probe_ev[0].value)["status"] == "explored"
 
-        # Secondo BFS sul context2 con profondità ridotta min(2, max_depth)
+        # Il ramo è il PRIMO BFS: context2, profondità ridotta min(2, max_depth)
         assert len(bfs_calls) == 2
-        second_call = bfs_calls[1]
-        assert second_call[0] is page2
-        assert second_call[1] is context2
-        assert second_call[2] is div_root
-        assert second_call[3] == 2  # min(2, budget.max_depth=6)
+        first_call = bfs_calls[0]
+        assert first_call[0] is page2
+        assert first_call[1] is context2
+        assert first_call[2] is div_root
+        assert first_call[3] == 2  # min(2, budget.max_depth=6)
+        # Il BFS primario arriva DOPO il ramo, senza limite di profondità
+        primary_call = bfs_calls[1]
+        assert primary_call[0] is page1
+        assert primary_call[1] is context1
+        assert primary_call[2] is root
+        assert primary_call[3] is None
         assert context2.close.await_count == 1
 
     async def test_dedup_divergent_root_creates_no_transition(self):

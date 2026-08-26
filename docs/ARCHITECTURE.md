@@ -82,10 +82,14 @@ esplora quindi un SECONDO albero col profilo divergente:
 1. L3 produce `cloaking_profile` (`cloaking_probe_profile` in
    `differential_fetch.py`): il profilo divergente con content_length
    maggiore, o `None` se nessun cloaking / divergenti tutti falliti.
-2. `StateGraphExplorer.run(cloaking_profile=...)` — dopo il BFS
-   primario — apre un secondo context Playwright con user_agent/header
-   del profilo divergente e naviga lo stesso `start_url`
-   (`_explore_cloaking_branch`).
+2. `StateGraphExplorer.run(cloaking_profile=...)` — subito dopo la
+   navigazione del root primario, PRIMA del BFS primario — apre un
+   secondo context Playwright con user_agent/header del profilo
+   divergente e naviga lo stesso `start_url`
+   (`_explore_cloaking_branch`). L'ordine è deliberato: dopo il BFS
+   primario il ramo non partirebbe mai sui target che reindirizzano a
+   siti "infiniti" (es. Google), dove il primario consuma l'intero
+   timeout globale.
 3. Il nuovo root è collegato al root primario da una
    `Transition(cloaking_probe)`; il sotto-albero riusa lo stesso loop
    BFS (`_bfs_loop`) con max_depth ridotta a `min(2, budget.max_depth)`.
