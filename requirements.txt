@@ -12,6 +12,10 @@ pytest-asyncio
 # Required only when --classify is used; the engine works without it.
 azure-ai-projects>=0.1.0
 azure-identity>=1.16.0
+# Azure AI Vision SDK — arricchimento L5 (OCR sugli screenshot).
+# Opzionale: senza di essa l'OCR degrada a error nel dict del bundle,
+# ma la Brand Detection (REST legacy) e la classificazione funzionano.
+azure-ai-vision-imageanalysis>=1.0.0
 pyyaml>=6.0
 tldextract>=5.0  # Public Suffix List ufficiale — sostituisce lista TLD manuale incompleta
 httpx>=0.28.0  # HTTP client asincrono — L2 OSINT, coerenza con architettura async
