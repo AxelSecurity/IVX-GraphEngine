@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from unittest.mock import AsyncMock, patch
 
@@ -452,6 +453,108 @@ class TestVisionEnrichment:
         assert text.index("Testo visibile nel DOM") < text.index(
             "Testo rilevato via OCR nello screenshot:"
         )
+
+    async def test_vision_calls_run_concurrently_across_leaves(self):
+        """Con più foglie con screenshot, ``analyze_screenshot`` gira in
+        PARALLELO (max_active >= 2): in sequenza N foglie costerebbero
+        N× il tempo di una singola chiamata Vision."""
+        s0 = self._leaf_state_with_screenshot()
+        s1 = State(
+            target_id=s0.target_id,
+            url="https://example.com/second-canvas",
+            dom_hash="vision-2",
+            depth=0,
+            screenshot_ref="/nonexistent/screenshot-2.png",
+        )
+
+        active = 0
+        max_active = 0
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def _tracked_vision(screenshot_ref):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            started.set()
+            # Blocca finché il test non rilascia: se le chiamate fossero
+            # sequenziali, la seconda non partirebbe MAI e il gather
+            # resterebbe appeso → il test fallirebbe in timeout.
+            await asyncio.wait_for(release.wait(), timeout=2.0)
+            active -= 1
+            return {"ocr_text": f"OCR di {screenshot_ref}", "brands": []}
+
+        with patch(
+            "graph_engine.classifier.evidence_bundle.analyze_screenshot",
+            new=_tracked_vision,
+        ):
+            bundle_task = asyncio.create_task(
+                build_evidence_bundle(
+                    target_url="https://example.com",
+                    canonical_url=None,
+                    states=[s0, s1],
+                    transitions=[],
+                    evidence=[],
+                    leaf_form_fields={},
+                    leaf_visible_text={},
+                    leaf_titles={},
+                )
+            )
+
+            # Aspetta la PRIMA chiamata, poi lascia il tempo alla seconda
+            # di accumularsi in parallelo prima di rilasciare.
+            await asyncio.wait_for(started.wait(), timeout=2.0)
+            await asyncio.sleep(0.1)
+            release.set()
+
+            bundle = await asyncio.wait_for(bundle_task, timeout=2.0)
+
+        assert max_active >= 2, (
+            f"Vision chiamate in sequenza (max_active={max_active}) — "
+            "il gather parallelo sui leaf non è attivo"
+        )
+
+        leaves = bundle["leaf_states"]
+        assert leaves[0]["ocr_text"] == "OCR di /nonexistent/screenshot.png"
+        assert leaves[1]["ocr_text"] == "OCR di /nonexistent/screenshot-2.png"
+
+    async def test_vision_failure_keeps_empty_fields_for_that_leaf(self):
+        """Una foglia con Vision che esplode → campi vuoti per quella
+        foglia, le altre restano popolate (contenimento errori, coerente
+        col comportamento sequenziale pre-refactor)."""
+        s0 = self._leaf_state_with_screenshot()
+        s1 = State(
+            target_id=s0.target_id,
+            url="https://example.com/second-canvas",
+            dom_hash="vision-2",
+            depth=0,
+            screenshot_ref="/nonexistent/screenshot-2.png",
+        )
+
+        async def _flaky_vision(screenshot_ref):
+            if "screenshot-2" in screenshot_ref:
+                raise RuntimeError("Vision exploded")
+            return {"ocr_text": "OCR ok", "brands": []}
+
+        with patch(
+            "graph_engine.classifier.evidence_bundle.analyze_screenshot",
+            new=_flaky_vision,
+        ):
+            bundle = await build_evidence_bundle(
+                target_url="https://example.com",
+                canonical_url=None,
+                states=[s0, s1],
+                transitions=[],
+                evidence=[],
+                leaf_form_fields={},
+                leaf_visible_text={},
+                leaf_titles={},
+            )
+
+        leaves = bundle["leaf_states"]
+        assert leaves[0]["ocr_text"] == "OCR ok"
+        assert leaves[1]["ocr_text"] == ""
+        assert leaves[1]["brands"] == []
 
 
 class TestCloakingProbeInBundle:

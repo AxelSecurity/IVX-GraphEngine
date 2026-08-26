@@ -11,6 +11,7 @@ structured *observations*, not data.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Optional
 
@@ -115,6 +116,10 @@ async def build_evidence_bundle(
     leaves: list[dict] = []
     # A state is a leaf when it has zero OUTbound transitions.
     from_state_ids = {str(t.from_state) for t in transitions}
+    # Vision (OCR + Brand) sugli screenshot dei leaf: i task partono
+    # TUTTI insieme (gather finale) invece che in sequenza — con N
+    # foglie il costo passa da N×2-4s a ~1×2-4s nel full path.
+    pending: dict[int, asyncio.Task] = {}
     for s in states:
         sid = str(s.id)
         if sid in from_state_ids:
@@ -133,10 +138,23 @@ async def build_evidence_bundle(
             "brands": [],
         }
         if analyze_screenshots and s.screenshot_ref:
-            vision = await analyze_screenshot(s.screenshot_ref)
-            leaf["ocr_text"] = vision.get("ocr_text", "") or ""
-            leaf["brands"] = vision.get("brands", []) or []
+            pending[len(leaves)] = asyncio.create_task(
+                analyze_screenshot(s.screenshot_ref)
+            )
         leaves.append(leaf)
+
+    if pending:
+        results = await asyncio.gather(
+            *pending.values(), return_exceptions=True
+        )
+        for idx, result in zip(pending.keys(), results):
+            if isinstance(result, BaseException):
+                # Leaf con Vision fallita → campi vuoti (stesso
+                # comportamento del percorso sequenziale pre-refactor).
+                continue
+            leaves[idx]["ocr_text"] = result.get("ocr_text", "") or ""
+            leaves[idx]["brands"] = result.get("brands", []) or []
+
     bundle["leaf_states"] = leaves
 
     return bundle
