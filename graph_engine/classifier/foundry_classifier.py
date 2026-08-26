@@ -79,14 +79,7 @@ async def classify(
     try:
         data = json.loads(raw_json)
     except json.JSONDecodeError:
-        # TEMPORARY DIAGNOSTIC LOGGING — print the FULL raw model text
-        # before discarding it, to understand why the JSON parse failed.
-        # Remove once the parsing issue is understood.
-        logger.warning(
-            "Foundry returned invalid JSON — falling back. Raw model "
-            "text (untruncated, diagnostic):\n%s",
-            raw_json,
-        )
+        logger.warning("Foundry returned invalid JSON — falling back")
         return _heuristic_fallback(bundle)
 
     # Coerce classification string to enum
@@ -197,9 +190,9 @@ async def _call_foundry_agent(
 
         # Attach screenshots as separate messages when supported
         #
-        # TEMPORARILY DISABLED for the diagnostic run: the live service
-        # rejects the current attachment pattern — first "purpose contains
-        # an invalid purpose" (fixed by purpose="assistants"), now
+        # DISABLED pending the real SDK surface: the live service rejects
+        # the current attachment pattern — first "purpose contains an
+        # invalid purpose" (fixed by purpose="assistants"), then
         # "Attachment must be added to at least one tool" (tools=[] is
         # not accepted).  Re-enable with the correct attachment API once
         # the real SDK surface is known.
@@ -247,45 +240,40 @@ async def _call_foundry_agent(
             raise RuntimeError(f"Agent run failed: {run.status}")
 
         # Collect the agent's text response.  Current SDK returns an
-        # ItemPaged — materialize it once so the diagnostic dump below
-        # can re-inspect the same messages.
+        # ItemPaged — materialize it once.
+        #
+        # LIVE SDK FACTS (learned 2026-08-26 via diagnostic dump):
+        #  - msg.role is a MessageRole ENUM whose value is 'assistant';
+        #    str(role) is "MessageRole.AGENT", so only .value comparisons
+        #    work.
+        #  - text blocks are MessageTextContent with the text directly in
+        #    .value (no .text.value wrapper).
         messages = list(client.messages.list(thread_id=thread_id))
         for msg in messages:
-            # NB: role may be a plain string or an SDK enum — compare
-            # case-insensitively against both known spellings.
-            if str(msg.role).lower() in ("agent", "assistant") and msg.content:
-                text_parts = []
-                for block in msg.content:
-                    if hasattr(block, "text") and hasattr(block.text, "value"):
-                        text_parts.append(block.text.value)
-                if text_parts:
-                    return "\n".join(text_parts)
+            role_value = getattr(msg.role, "value", msg.role)
+            if str(role_value).lower() not in ("agent", "assistant"):
+                continue
+            if not msg.content:
+                continue
+            text_parts = []
+            for block in msg.content:
+                # Current SDK: MessageTextContent.value holds the text.
+                # Legacy variants: block.text may be a plain str or an
+                # annotation block exposing .text.value.
+                value = getattr(block, "value", None)
+                if isinstance(value, str):
+                    text_parts.append(value)
+                    continue
+                text = getattr(block, "text", None)
+                if isinstance(text, str):
+                    text_parts.append(text)
+                elif hasattr(text, "value") and isinstance(
+                    getattr(text, "value", None), str
+                ):
+                    text_parts.append(text.value)
+            if text_parts:
+                return "\n".join(text_parts)
 
-        # TEMPORARY DIAGNOSTIC LOGGING — dump every message we got back
-        # (role + block types) to understand why no agent text was found.
-        # Remove once the extraction issue is understood.
-        dumped = []
-        for msg in messages:
-            blocks = []
-            for block in (msg.content or []):
-                info = type(block).__name__
-                if hasattr(block, "text"):
-                    info += f"(value={getattr(block.text, 'value', block.text)!r})"
-                elif hasattr(block, "image_file"):
-                    info += (
-                        f"(file_id="
-                        f"{getattr(block.image_file, 'file_id', block.image_file)!r})"
-                    )
-                elif hasattr(block, "image_url"):
-                    info += "(image_url)"
-                blocks.append(info)
-            dumped.append(f"role={msg.role!r} content={blocks}")
-        logger.warning(
-            "No agent text found in thread messages (run status=%r) — "
-            "diagnostic dump: %s",
-            run.status,
-            " | ".join(dumped) or "<no messages>",
-        )
         return ""
 
     finally:

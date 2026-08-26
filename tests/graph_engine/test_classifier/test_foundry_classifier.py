@@ -8,6 +8,7 @@ All Azure API calls are mocked.  The primary concerns:
 
 from __future__ import annotations
 
+import enum
 import sys
 import uuid
 from types import ModuleType, SimpleNamespace
@@ -138,6 +139,29 @@ class _FakeThreads:
         self._r.thread_ids_delete.append(thread_id)
 
 
+class _FakeMessageRole(enum.Enum):
+    """Mirror of the REAL SDK surface (learned live 2026-08-26 via
+    diagnostic dump on the configured Foundry endpoint):
+
+    ``msg.role`` is a ``MessageRole`` ENUM whose ``.value`` is
+    ``'assistant'``; ``str(role)`` is ``"MessageRole.AGENT"``.  A plain
+    ``msg.role == "agent"`` comparison in the classifier silently matches
+    NOTHING — this fake uses a real enum (not a str) so that any
+    regression to string comparison breaks the tests loudly.
+    """
+
+    AGENT = "assistant"
+    USER = "user"
+
+
+class _FakeMessageTextContent:
+    """Mirror of the REAL ``MessageTextContent`` block: the text sits in
+    ``.value`` directly (no ``.text.value`` wrapper)."""
+
+    def __init__(self, value: str):
+        self.value = value
+
+
 class _FakeMessages:
     """Stub for ``client.messages``."""
 
@@ -149,11 +173,10 @@ class _FakeMessages:
 
     def list(self, thread_id):
         self._r.thread_ids_list.append(thread_id)
-        block = SimpleNamespace()
-        block.text = SimpleNamespace(
-            value='{"classification":"phishing","confidence":0.92,"rationale":"mock"}'
+        block = _FakeMessageTextContent(
+            '{"classification":"phishing","confidence":0.92,"rationale":"mock"}'
         )
-        msg = SimpleNamespace(role="agent", content=[block])
+        msg = SimpleNamespace(role=_FakeMessageRole.AGENT, content=[block])
         # Current SDK returns an ItemPaged — iterable, no .data attribute.
         return [msg]
 
