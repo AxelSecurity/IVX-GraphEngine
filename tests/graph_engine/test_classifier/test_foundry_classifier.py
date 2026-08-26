@@ -74,13 +74,18 @@ def _register_fake_azure_modules(fake_client_class):
     local imports inside ``_call_foundry_agent`` succeed without the
     real SDK installed."""
     saved = {}
-    for name in ("azure", "azure.ai", "azure.ai.projects", "azure.identity"):
+    for name in ("azure", "azure.ai", "azure.ai.agents", "azure.identity"):
         saved[name] = sys.modules.get(name)
         mod = ModuleType(name)
         if name in ("azure", "azure.ai"):
             mod.__path__ = []
         sys.modules[name] = mod
-    sys.modules["azure.ai.projects"].AIProjectsClient = fake_client_class
+    # Injected under the REAL SDK class name (AgentsClient), NOT under
+    # whatever name the code under test happens to import: if the
+    # classifier ever misspells the import again, the in-function
+    # `from azure.ai.agents import <wrong name>` fails here too and the
+    # test breaks loudly instead of silently self-fulfilling.
+    sys.modules["azure.ai.agents"].AgentsClient = fake_client_class
     sys.modules["azure.identity"].DefaultAzureCredential = lambda: None
     return saved
 
@@ -94,12 +99,13 @@ def _unregister_fake_azure_modules(saved):
             sys.modules[name] = original
 
 
-class _FakeAgents:
-    """Stub for ``client.agents`` — records every ``thread_id`` it sees.
+class _FakeAgentsClient:
+    """Stub for ``AgentsClient`` — records every ``thread_id`` it sees.
 
     A *single* instance is shared across all fake client instances so
     the test can inspect the full call history across multiple
-    ``classify()`` invocations.
+    ``classify()`` invocations.  Mirrors the current SDK surface:
+    namespaced sub-clients ``threads``/``messages``/``runs``/``files``.
     """
 
     def __init__(self):
@@ -109,33 +115,68 @@ class _FakeAgents:
         self.thread_ids_run: list[str] = []
         self.thread_ids_list: list[str] = []
         self.thread_ids_delete: list[str] = []
+        self.threads = _FakeThreads(self)
+        self.messages = _FakeMessages(self)
+        self.runs = _FakeRuns(self)
+        self.files = _FakeFiles(self)
 
-    # -- methods called by _new_thread_id ---------------------------------
-    def create_thread(self):
-        self._counter += 1
-        tid = f"thread-{self._counter}"
-        self.thread_ids_created.append(tid)
+
+class _FakeThreads:
+    """Stub for ``client.threads``."""
+
+    def __init__(self, recorder: "_FakeAgentsClient"):
+        self._r = recorder
+
+    # -- called by _new_thread_id ------------------------------------------
+    def create(self):
+        self._r._counter += 1
+        tid = f"thread-{self._r._counter}"
+        self._r.thread_ids_created.append(tid)
         return SimpleNamespace(id=tid)
 
-    # -- methods called by _call_foundry_agent ----------------------------
-    def create_message(self, thread_id, role, content, attachments=None):
-        self.thread_ids_message.append(thread_id)
+    def delete(self, thread_id):
+        self._r.thread_ids_delete.append(thread_id)
 
-    def create_and_process_run(self, thread_id, agent_id, instructions):
-        self.thread_ids_run.append(thread_id)
-        return SimpleNamespace(status="completed")
 
-    def list_messages(self, thread_id):
-        self.thread_ids_list.append(thread_id)
+class _FakeMessages:
+    """Stub for ``client.messages``."""
+
+    def __init__(self, recorder: "_FakeAgentsClient"):
+        self._r = recorder
+
+    def create(self, thread_id, role, content, attachments=None):
+        self._r.thread_ids_message.append(thread_id)
+
+    def list(self, thread_id):
+        self._r.thread_ids_list.append(thread_id)
         block = SimpleNamespace()
         block.text = SimpleNamespace(
             value='{"classification":"phishing","confidence":0.92,"rationale":"mock"}'
         )
         msg = SimpleNamespace(role="agent", content=[block])
-        return SimpleNamespace(data=[msg])
+        # Current SDK returns an ItemPaged — iterable, no .data attribute.
+        return [msg]
 
-    def delete_thread(self, thread_id):
-        self.thread_ids_delete.append(thread_id)
+
+class _FakeRuns:
+    """Stub for ``client.runs``."""
+
+    def __init__(self, recorder: "_FakeAgentsClient"):
+        self._r = recorder
+
+    def create_and_process(self, thread_id, agent_id, instructions):
+        self._r.thread_ids_run.append(thread_id)
+        return SimpleNamespace(status="completed")
+
+
+class _FakeFiles:
+    """Stub for ``client.files``."""
+
+    def __init__(self, recorder: "_FakeAgentsClient"):
+        self._r = recorder
+
+    def upload(self, file, purpose):
+        return SimpleNamespace(id=f"file-{self._r._counter}")
 
 
 # ---------------------------------------------------------------------------
@@ -153,24 +194,27 @@ class TestStatelessThreadCreation:
         """Execute the REAL ``_new_thread_id`` and ``_call_foundry_agent``
         code path, faking only the Azure SDK boundary (``sys.modules``).
 
-        Every ``classify()`` invocation creates a fresh ``AIProjectsClient``,
-        so the fake client reuses a single shared ``_FakeAgents`` instance
-        to accumulate the full call history across all three calls.
+        Every ``classify()`` invocation creates a fresh ``AgentsClient``,
+        so the fake client reuses a single shared ``_FakeAgentsClient``
+        instance to accumulate the full call history across all three calls.
 
         Assertions verify that:
 
-        1. ``create_thread`` is called exactly once per ``classify()``.
-        2. Every ``thread_id`` returned by ``create_thread`` is distinct.
+        1. ``threads.create`` is called exactly once per ``classify()``.
+        2. Every ``thread_id`` returned by ``threads.create`` is distinct.
         3. The SAME ``thread_id`` flows through the entire call chain
-           (create_message → create_and_process_run → list_messages →
-           delete_thread), in order, with no reuse or misalignment.
+           (messages.create → runs.create_and_process → messages.list →
+           threads.delete), in order, with no reuse or misalignment.
         """
-        fake_agents = _FakeAgents()
+        fake_agents = _FakeAgentsClient()
 
-        # -- fake client constructor, captures the shared agents ----------
+        # -- fake client constructor, exposes the shared sub-clients -------
         class _FakeClient:
             def __init__(self, endpoint, credential):
-                self.agents = fake_agents
+                self.threads = fake_agents.threads
+                self.messages = fake_agents.messages
+                self.runs = fake_agents.runs
+                self.files = fake_agents.files
 
         saved = _register_fake_azure_modules(_FakeClient)
         try:
@@ -364,3 +408,44 @@ class TestFoundryNotConfigured:
         monkeypatch.setattr(settings, "azure_foundry_agent_id", None)
         with pytest.raises(_FoundryNotConfigured):
             await _call_foundry_agent("prompt", [])
+
+
+# ---------------------------------------------------------------------------
+# Smoke test — REAL SDK import (integration)
+# ---------------------------------------------------------------------------
+
+
+def _purge_injected_azure_modules():
+    """Remove any fake ``azure.*`` modules from ``sys.modules`` so a REAL
+    import below can never silently resolve to a test double."""
+    for name in list(sys.modules):
+        if name == "azure" or name.startswith("azure."):
+            sys.modules.pop(name, None)
+
+
+@pytest.mark.integration
+def test_real_sdk_exposes_ai_project_client():
+    """REAL import of ``AIProjectClient`` — no ``sys.modules`` injection.
+
+    Safety net against exactly the bug this file fixed: the fake-module
+    registry used to inject the stub under whatever name the classifier
+    imported, so a typo in the SDK class name could ship silently.
+
+    Requires the real ``azure-ai-projects`` SDK installed; excluded from
+    the default suite (pytest.ini ``addopts = -m "not integration"``).
+    """
+    _purge_injected_azure_modules()
+    from azure.ai.projects import AIProjectClient  # noqa: F401
+
+    assert AIProjectClient is not None
+
+
+@pytest.mark.integration
+def test_real_sdk_exposes_agents_client():
+    """REAL import of ``AgentsClient`` — the conversational client the
+    classifier now talks to (``azure-ai-agents``, split out of
+    ``azure-ai-projects`` in current SDK versions)."""
+    _purge_injected_azure_modules()
+    from azure.ai.agents import AgentsClient  # noqa: F401
+
+    assert AgentsClient is not None

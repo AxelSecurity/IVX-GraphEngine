@@ -123,7 +123,7 @@ def _new_thread_id(client) -> str:
     Extracted as a separate function so tests can mock it directly and
     verify that *every* call produces a fresh, distinct thread ID.
     """
-    thread = client.agents.create_thread()
+    thread = client.threads.create()
     return thread.id
 
 
@@ -159,16 +159,19 @@ async def _call_foundry_agent(
 
     # Import here so the module is importable without the SDK installed
     try:
-        from azure.ai.projects import AIProjectsClient
+        from azure.ai.agents import AgentsClient
         from azure.identity import DefaultAzureCredential
     except ImportError:
         raise _FoundryNotConfigured(
-            "azure-ai-projects SDK not installed; run: "
-            "pip install azure-ai-projects azure-identity"
+            "Azure Agents SDK not installed; run: "
+            "pip install azure-ai-agents azure-ai-projects azure-identity"
         )
 
     credential = DefaultAzureCredential()
-    client = AIProjectsClient(endpoint=endpoint, credential=credential)
+    # AgentsClient (azure-ai-agents) is the CONVERSATIONAL client — threads,
+    # messages, runs.  It is split out of azure-ai-projects in current SDK
+    # versions: AIProjectClient.agents there only manages agent DEFINITIONS.
+    client = AgentsClient(endpoint=endpoint, credential=credential)
 
     # ── CRITICAL: always create a NEW thread ─────────────────────────────
     # See module-level docstring for the rationale.
@@ -179,7 +182,7 @@ async def _call_foundry_agent(
 
     try:
         # Post the user message
-        client.agents.create_message(
+        client.messages.create(
             thread_id=thread_id,
             role="user",
             content=prompt,
@@ -194,11 +197,11 @@ async def _call_foundry_agent(
                 # attachment pattern as a reasonable default.
                 try:
                     with open(sp, "rb") as fh:
-                        file_ref = client.agents.upload_file(
+                        file_ref = client.files.upload(
                             file=fh,
                             purpose="vision",
                         )
-                    client.agents.create_message(
+                    client.messages.create(
                         thread_id=thread_id,
                         role="user",
                         content=(
@@ -215,7 +218,7 @@ async def _call_foundry_agent(
                     )
 
         # Create and wait for the run
-        run = client.agents.create_and_process_run(
+        run = client.runs.create_and_process(
             thread_id=thread_id,
             agent_id=agent_id,
             instructions=system_prompt,
@@ -225,9 +228,10 @@ async def _call_foundry_agent(
             logger.warning("Foundry run ended with status: %s", run.status)
             raise RuntimeError(f"Agent run failed: {run.status}")
 
-        # Collect the agent's text response
-        messages = client.agents.list_messages(thread_id=thread_id)
-        for msg in messages.data:
+        # Collect the agent's text response.  Current SDK returns an
+        # ItemPaged — iterate it directly (no .data attribute).
+        messages = client.messages.list(thread_id=thread_id)
+        for msg in messages:
             if msg.role == "agent" and msg.content:
                 text_parts = []
                 for block in msg.content:
@@ -241,7 +245,7 @@ async def _call_foundry_agent(
     finally:
         # Clean up the ephemeral thread — no cross-session leakage
         try:
-            client.agents.delete_thread(thread_id)
+            client.threads.delete(thread_id)
         except Exception:
             pass
 
