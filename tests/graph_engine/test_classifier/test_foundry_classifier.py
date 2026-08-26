@@ -4,6 +4,10 @@ All Azure API calls are mocked.  The primary concerns:
 1. Every classify() call creates a NEW thread (no thread_id reuse).
 2. The prompt built from the bundle does NOT leak data from previous runs.
 3. When Foundry is not configured, the heuristic fallback is used.
+4. The credential is selected from configuration: full service principal
+   → ClientSecretCredential; otherwise DefaultAzureCredential.
+5. classify() never sends image attachments (removed 2026-08-26 —
+   visual content arrives as TEXT via Azure AI Vision).
 """
 
 from __future__ import annotations
@@ -73,7 +77,31 @@ def _sample_bundle() -> dict:
 def _register_fake_azure_modules(fake_client_class):
     """Register fake ``azure.*`` modules in ``sys.modules`` so the
     local imports inside ``_call_foundry_agent`` succeed without the
-    real SDK installed."""
+    real SDK installed.
+
+    Returns ``(saved, credential_log)`` where ``credential_log`` is a
+    list of ``(kind, kwargs)`` tuples recording every credential the
+    classifier constructs — lets tests assert WHICH credential type
+    (and with which values) was selected."""
+    credential_log: list[tuple] = []
+
+    class _DefaultCredential:
+        def __init__(self):
+            credential_log.append(("default", {}))
+
+    class _ClientSecretCredential:
+        def __init__(self, tenant_id=None, client_id=None, client_secret=None):
+            credential_log.append(
+                (
+                    "client_secret",
+                    {
+                        "tenant_id": tenant_id,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                    },
+                )
+            )
+
     saved = {}
     for name in ("azure", "azure.ai", "azure.ai.agents", "azure.identity"):
         saved[name] = sys.modules.get(name)
@@ -81,14 +109,16 @@ def _register_fake_azure_modules(fake_client_class):
         if name in ("azure", "azure.ai"):
             mod.__path__ = []
         sys.modules[name] = mod
-    # Injected under the REAL SDK class name (AgentsClient), NOT under
-    # whatever name the code under test happens to import: if the
-    # classifier ever misspells the import again, the in-function
-    # `from azure.ai.agents import <wrong name>` fails here too and the
-    # test breaks loudly instead of silently self-fulfilling.
+    # Injected under the REAL SDK class names (AgentsClient,
+    # ClientSecretCredential, DefaultAzureCredential), NOT under
+    # whatever names the code under test happens to import: if the
+    # classifier ever misspells an import, the in-function import fails
+    # here too and the test breaks loudly instead of silently
+    # self-fulfilling.
     sys.modules["azure.ai.agents"].AgentsClient = fake_client_class
-    sys.modules["azure.identity"].DefaultAzureCredential = lambda: None
-    return saved
+    sys.modules["azure.identity"].DefaultAzureCredential = _DefaultCredential
+    sys.modules["azure.identity"].ClientSecretCredential = _ClientSecretCredential
+    return saved, credential_log
 
 
 def _unregister_fake_azure_modules(saved):
@@ -119,7 +149,6 @@ class _FakeAgentsClient:
         self.threads = _FakeThreads(self)
         self.messages = _FakeMessages(self)
         self.runs = _FakeRuns(self)
-        self.files = _FakeFiles(self)
 
 
 class _FakeThreads:
@@ -168,7 +197,7 @@ class _FakeMessages:
     def __init__(self, recorder: "_FakeAgentsClient"):
         self._r = recorder
 
-    def create(self, thread_id, role, content, attachments=None):
+    def create(self, thread_id, role, content):
         self._r.thread_ids_message.append(thread_id)
 
     def list(self, thread_id):
@@ -190,38 +219,6 @@ class _FakeRuns:
     def create_and_process(self, thread_id, agent_id, instructions):
         self._r.thread_ids_run.append(thread_id)
         return SimpleNamespace(status="completed")
-
-
-class _FakeRunsRejectImages(_FakeRuns):
-    """Stub runs that rejects the FIRST ``create_and_process`` with the
-    real gpt-5-mini image error, then behaves normally."""
-
-    def __init__(self, recorder: "_FakeAgentsClient"):
-        super().__init__(recorder)
-        self._calls = 0
-
-    def create_and_process(self, thread_id, agent_id, instructions):
-        self._calls += 1
-        self._r.thread_ids_run.append(thread_id)
-        if self._calls == 1:
-            raise RuntimeError(
-                "(invalid_type) Invalid model: gpt-5-mini-2025-08-07 does "
-                "not support image message content types.\n"
-                "Code: invalid_type\n"
-                "Message: Invalid model: gpt-5-mini-2025-08-07 does not "
-                "support image message content types."
-            )
-        return SimpleNamespace(status="completed")
-
-
-class _FakeFiles:
-    """Stub for ``client.files``."""
-
-    def __init__(self, recorder: "_FakeAgentsClient"):
-        self._r = recorder
-
-    def upload(self, file, purpose):
-        return SimpleNamespace(id=f"file-{self._r._counter}")
 
 
 # ---------------------------------------------------------------------------
@@ -259,9 +256,8 @@ class TestStatelessThreadCreation:
                 self.threads = fake_agents.threads
                 self.messages = fake_agents.messages
                 self.runs = fake_agents.runs
-                self.files = fake_agents.files
 
-        saved = _register_fake_azure_modules(_FakeClient)
+        saved, _ = _register_fake_azure_modules(_FakeClient)
         try:
             monkeypatch.setattr(
                 settings,
@@ -344,6 +340,11 @@ class TestStatelessThreadCreation:
         assert "session_id" not in param_names, (
             f"classify() must NOT accept session_id — "
             f"signature is ({', '.join(param_names)})"
+        )
+        assert "screenshot_paths" not in param_names, (
+            f"classify() must NOT accept screenshot_paths — image "
+            f"attachments were removed (visual content arrives as TEXT "
+            f"via Azure AI Vision); signature is ({', '.join(param_names)})"
         )
 
     @pytest.mark.asyncio
@@ -441,7 +442,7 @@ class TestFoundryNotConfigured:
         monkeypatch.setattr(settings, "azure_foundry_endpoint", None)
         monkeypatch.setattr(settings, "azure_foundry_agent_id", None)
         with pytest.raises(_FoundryNotConfigured):
-            await _call_foundry_agent("prompt", [])
+            await _call_foundry_agent("prompt")
 
     @pytest.mark.asyncio
     async def test_missing_agent_id_raises(self, monkeypatch):
@@ -452,75 +453,101 @@ class TestFoundryNotConfigured:
         )
         monkeypatch.setattr(settings, "azure_foundry_agent_id", None)
         with pytest.raises(_FoundryNotConfigured):
-            await _call_foundry_agent("prompt", [])
+            await _call_foundry_agent("prompt")
 
 
 # ---------------------------------------------------------------------------
-# Tests — image content rejection → text-only retry
+# Tests — credential selection (service principal vs DefaultAzureCredential)
 # ---------------------------------------------------------------------------
 
 
-class TestImageContentRejectionRetry:
-    """If the agent model rejects image content blocks (gpt-5-mini without
-    vision), the classifier retries on a FRESH thread with the text-only
-    prompt — screenshots must never kill the classification."""
+class TestCredentialSelection:
+    """Il classificatore seleziona la credential dalla configurazione:
+    service principal completo → ClientSecretCredential coi valori del
+    config; altrimenti → DefaultAzureCredential.  Nessun'altra chiamata
+    Azure viene fatta."""
 
-    @pytest.mark.asyncio
-    async def test_image_error_triggers_fresh_thread_text_only_retry(
-        self, monkeypatch, tmp_path
-    ):
+    async def _classify_with_fake_and_return_credential_log(self, monkeypatch):
+        """Esegue classify() con i moduli Azure fake, ritorna il log delle
+        credential costruite dal codice di produzione."""
+        monkeypatch.setattr(
+            settings,
+            "azure_foundry_endpoint",
+            "https://fake-foundry.openai.azure.com",
+        )
+        monkeypatch.setattr(settings, "azure_foundry_agent_id", "fake-agent-id")
+
         fake_agents = _FakeAgentsClient()
-        fake_agents.runs = _FakeRunsRejectImages(fake_agents)
 
         class _FakeClient:
             def __init__(self, endpoint, credential):
                 self.threads = fake_agents.threads
                 self.messages = fake_agents.messages
                 self.runs = fake_agents.runs
-                self.files = fake_agents.files
 
-        saved = _register_fake_azure_modules(_FakeClient)
+        saved, credential_log = _register_fake_azure_modules(_FakeClient)
         try:
-            monkeypatch.setattr(
-                settings,
-                "azure_foundry_endpoint",
-                "https://fake-fallback.openai.azure.com",
-            )
-            monkeypatch.setattr(
-                settings, "azure_foundry_agent_id", "fake-agent-id"
-            )
-
-            png = tmp_path / "screenshot.png"
-            png.write_bytes(b"\x89PNG\r\n\x1a\nfakepng")
-
-            verdict = await classify(
-                _sample_bundle(), screenshot_paths=[str(png)]
-            )
-
-            # The retry succeeded — verdict still comes from Foundry
-            assert verdict.produced_by == "foundry"
-            assert verdict.classification == Classification.phishing
-
-            # TWO fresh threads: image attempt + text-only retry
-            assert fake_agents.thread_ids_created == ["thread-1", "thread-2"]
-
-            # First run failed (image rejected), second succeeded —
-            # each received its own thread_id, in order
-            assert fake_agents.thread_ids_run == ["thread-1", "thread-2"]
-
-            # Message flow: prompt on t1, screenshot attach on t1,
-            # text-only prompt on t2
-            assert fake_agents.thread_ids_message == [
-                "thread-1", "thread-1", "thread-2",
-            ]
-
-            # The final message list read happened on the RETRY thread
-            assert fake_agents.thread_ids_list == ["thread-2"]
-
-            # Both ephemeral threads cleaned up
-            assert fake_agents.thread_ids_delete == ["thread-1", "thread-2"]
+            verdict = await classify(_sample_bundle())
         finally:
             _unregister_fake_azure_modules(saved)
+
+        assert verdict.produced_by == "foundry"
+        return credential_log
+
+    @pytest.mark.asyncio
+    async def test_service_principal_uses_client_secret_credential(
+        self, monkeypatch
+    ):
+        """Tenant+client+secret → ClientSecretCredential costruita coi
+        valori del config; DefaultAzureCredential MAI toccata."""
+        monkeypatch.setattr(settings, "azure_tenant_id", "tenant-123")
+        monkeypatch.setattr(settings, "azure_client_id", "client-456")
+        monkeypatch.setattr(settings, "azure_client_secret", "secret-789")
+
+        log = await self._classify_with_fake_and_return_credential_log(
+            monkeypatch
+        )
+
+        assert log == [
+            (
+                "client_secret",
+                {
+                    "tenant_id": "tenant-123",
+                    "client_id": "client-456",
+                    "client_secret": "secret-789",
+                },
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_service_principal_uses_default_credential(self, monkeypatch):
+        """Senza le tre variabili → DefaultAzureCredential (es. az login,
+        managed identity); ClientSecretCredential MAI toccata."""
+        monkeypatch.setattr(settings, "azure_tenant_id", None)
+        monkeypatch.setattr(settings, "azure_client_id", None)
+        monkeypatch.setattr(settings, "azure_client_secret", None)
+
+        log = await self._classify_with_fake_and_return_credential_log(
+            monkeypatch
+        )
+
+        assert log == [("default", {})]
+
+    @pytest.mark.asyncio
+    async def test_partial_service_principal_falls_back_to_default(
+        self, monkeypatch
+    ):
+        """Coppia incompleta (manca il secret) → DefaultAzureCredential:
+        la property richiede TUTTE e tre le variabili."""
+        monkeypatch.setattr(settings, "azure_tenant_id", "tenant-123")
+        monkeypatch.setattr(settings, "azure_client_id", "client-456")
+        monkeypatch.setattr(settings, "azure_client_secret", None)
+
+        log = await self._classify_with_fake_and_return_credential_log(
+            monkeypatch
+        )
+
+        assert log == [("default", {})]
 
 
 # ---------------------------------------------------------------------------

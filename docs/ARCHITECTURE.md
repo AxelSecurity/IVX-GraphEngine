@@ -147,7 +147,12 @@ Il livello L5 trasforma i dati grezzi raccolti durante l'esplorazione L4 in un
 2. **Classificatore Foundry** (`graph_engine/classifier/foundry_classifier.py`):
    chiama un Azure AI Foundry Agent con un *evidence bundle* compatto. Il
    modello riceve solo osservazioni strutturate — mai DOM grezzo, mai HAR
-   completi, mai screenshot in alta risoluzione non necessari.
+   completi, mai immagini allegate. Dal 2026-08-26 l'attach degli
+   screenshot è stato RIMOSSO del tutto: il modello configurato
+   (gpt-5-mini) rifiuta gli image content block e il contenuto visivo
+   arriva comunque come TESTO nel bundle (OCR + Brand Detection via
+   Azure AI Vision — vedi sotto). La firma è `classify(bundle)` senza
+   parametri immagine.
 
 ### Evidence bundle (compatto)
 
@@ -217,6 +222,24 @@ caso phishing precedente (form con campi email+password) "inquinava"
 l'analisi di un URL benigno successivo, portando a verdict `phishing` ad
 alta confidenza per siti legittimi. L'isolamento stateless è l'unica
 garanzia di correttezza.
+
+### Autenticazione Foundry — ClientSecretCredential o DefaultAzureCredential
+
+Il classificatore seleziona la credential dalla configurazione
+(`settings.service_principal_configured`):
+
+- **Service principal completo** (`AZURE_TENANT_ID` + `AZURE_CLIENT_ID` +
+  `AZURE_CLIENT_SECRET` nel `.env`) → `ClientSecretCredential` con quei
+  valori: autenticazione stabile e riproducibile, senza dipendere da
+  sessioni interattive.
+- **Altrimenti** → `DefaultAzureCredential` (Azure CLI loggata, managed
+  identity, ecc.).
+
+NOTA: pydantic-settings NON esporta i valori del `.env` in `os.environ` —
+`EnvironmentCredential` non li vedrebbe mai; è `foundry_classifier.py` a
+passarli esplicitamente a `ClientSecretCredential`. Prima di questo
+cambiamento i run remoti richiedevano `set -a; source .env; set +a` o
+`az login`.
 
 ### Semplificazione del Classification enum
 
@@ -818,6 +841,9 @@ più permessa nei moduli.
 |---|---|---|---|
 | `AZURE_FOUNDRY_ENDPOINT` | `azure_foundry_endpoint` | L5 Foundry | richiede anche `AGENT_ID` (`foundry_configured`) |
 | `AZURE_FOUNDRY_AGENT_ID` | `azure_foundry_agent_id` | L5 Foundry | richiede anche `ENDPOINT` |
+| `AZURE_TENANT_ID` | `azure_tenant_id` | auth Foundry (service principal) | richiede anche `CLIENT_ID` + `CLIENT_SECRET` (`service_principal_configured`) |
+| `AZURE_CLIENT_ID` | `azure_client_id` | auth Foundry (service principal) | richiede anche `TENANT_ID` + `CLIENT_SECRET` |
+| `AZURE_CLIENT_SECRET` | `azure_client_secret` | auth Foundry (service principal) | richiede anche `TENANT_ID` + `CLIENT_ID`; senza la terna completa → `DefaultAzureCredential` |
 | `AZURE_VISION_ENDPOINT` | `azure_vision_endpoint` | arricchimento L5 (OCR + Brand Detection) | richiede anche `AZURE_VISION_KEY` (`vision_configured`); riusa la risorsa Cognitive Services già attiva (italynorth) |
 | `AZURE_VISION_KEY` | `azure_vision_key` | arricchimento L5 (OCR + Brand Detection) | richiede anche `AZURE_VISION_ENDPOINT`; chiave della risorsa (header `Ocp-Apim-Subscription-Key` per la REST legacy v3.2, `AzureKeyCredential` per la SDK moderna) |
 | `MISP_URL` | `misp_url` | provider MISP (L2) | richiede anche `MISP_API_KEY` (`misp_configured`) |
@@ -829,7 +855,8 @@ più permessa nei moduli.
 
 Le property `foundry_configured` / `vision_configured` / `misp_configured`
 / `opencti_configured` richiedono **ENTRAMBE** le variabili della coppia
-(una sola non basta); `urlhaus_configured` e `trellix_auth_required`
+(una sola non basta); `service_principal_configured` richiede **TUTTE e
+tre** le variabili AAD; `urlhaus_configured` e `trellix_auth_required`
 sono True con il singolo valore impostato (e non vuoto).
 
 ### Attivazione
@@ -841,6 +868,9 @@ committarlo) e valorizza le coppie che ti servono:
 # .env
 AZURE_FOUNDRY_ENDPOINT=https://<progetto>.openai.azure.com
 AZURE_FOUNDRY_AGENT_ID=<agent-id>        # → L5 con Foundry invece del fallback
+AZURE_TENANT_ID=<tenant-id>              # → auth Foundry via ClientSecretCredential
+AZURE_CLIENT_ID=<client-id>              #   (terna completa → niente `az login`)
+AZURE_CLIENT_SECRET=<secret>             #   senza terna → DefaultAzureCredential
 AZURE_VISION_ENDPOINT=https://<risorsa>.cognitiveservices.azure.com  # → OCR + Brand Detection sugli screenshot
 AZURE_VISION_KEY=<chiave-risorsa>        #   (risorsa Cognitive Services riusata)
 MISP_URL=https://misp.example.org        # → provider MISP attivo in L2

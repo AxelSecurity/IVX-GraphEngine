@@ -139,12 +139,10 @@ async def _run_classification(
 
     from graph_engine.classifier.foundry_classifier import classify
 
-    screenshot_paths: list[str] = []
-    for s in leaf_states:
-        if s.screenshot_ref and os.path.isfile(s.screenshot_ref):
-            screenshot_paths.append(s.screenshot_ref)
-
-    return await classify(bundle, screenshot_paths)
+    # Nota: il contenuto visivo raggiunge il modello come TESTO nel
+    # bundle (OCR + Brand Detection via Azure AI Vision) — nessuno
+    # screenshot viene allegato alla chiamata Foundry.
+    return await classify(bundle)
 
 
 # ---------------------------------------------------------------------------

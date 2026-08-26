@@ -18,6 +18,11 @@ from graph_engine.config import Settings, settings
 ALL_ENV_VARS = {
     "azure_foundry_endpoint": "AZURE_FOUNDRY_ENDPOINT",
     "azure_foundry_agent_id": "AZURE_FOUNDRY_AGENT_ID",
+    "azure_tenant_id": "AZURE_TENANT_ID",
+    "azure_client_id": "AZURE_CLIENT_ID",
+    "azure_client_secret": "AZURE_CLIENT_SECRET",
+    "azure_vision_endpoint": "AZURE_VISION_ENDPOINT",
+    "azure_vision_key": "AZURE_VISION_KEY",
     "misp_url": "MISP_URL",
     "misp_api_key": "MISP_API_KEY",
     "opencti_url": "OPENCTI_URL",
@@ -160,6 +165,22 @@ class TestConfiguredProperties:
         assert s.trellix_auth_required is False
         assert s.urlhaus_configured is False
 
+    def test_service_principal_requires_all_three(self):
+        """Service principal AAD: servono TUTTE e tre le credenziali —
+        una coppia parziale NON configura ClientSecretCredential."""
+        s = _clean_settings(
+            azure_tenant_id="tenant-1",
+            azure_client_id="client-1",
+            azure_client_secret="secret-1",
+        )
+        assert s.service_principal_configured is True
+
+        s = _clean_settings(azure_tenant_id="tenant-1", azure_client_id="client-1")
+        assert s.service_principal_configured is False
+
+        s = _clean_settings(azure_client_id="client-1")
+        assert s.service_principal_configured is False
+
 
 class TestModuleSingleton:
     def test_singleton_is_settings_instance(self):
@@ -174,3 +195,5 @@ class TestModuleSingleton:
         assert isinstance(settings.opencti_configured, bool)
         assert isinstance(settings.urlhaus_configured, bool)
         assert isinstance(settings.trellix_auth_required, bool)
+        assert isinstance(settings.vision_configured, bool)
+        assert isinstance(settings.service_principal_configured, bool)

@@ -14,6 +14,11 @@ CRITICAL DESIGN CONSTRAINT — read before modifying:
 
     Stateless isolation is therefore NON-NEGOTIABLE for correctness.
     See docs/ARCHITECTURE.md § L5 — Classificazione.
+
+    NOTE — no image attachments: visual content reaches the model as
+    TEXT inside the bundle (OCR + Brand Detection via Azure AI Vision).
+    The configured model (gpt-5-mini) rejects image content types, so
+    screenshot upload/attach was removed entirely (2026-08-26).
 """
 
 from __future__ import annotations
@@ -21,7 +26,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Optional
 
 from graph_engine.config import settings
 from graph_engine.models import Classification, Verdict
@@ -47,11 +51,12 @@ def _load_system_prompt() -> str:
 # ---------------------------------------------------------------------------
 
 
-async def classify(
-    bundle: dict,
-    screenshot_paths: Optional[list[str]] = None,
-) -> Verdict:
-    """Send *bundle* (plus optional screenshots) to Foundry Agent, return Verdict.
+async def classify(bundle: dict) -> Verdict:
+    """Send *bundle* to the Foundry Agent, return Verdict.
+
+    Visual content reaches the agent as TEXT inside the bundle (OCR +
+    Brand Detection via Azure AI Vision) — no image attachments are
+    ever sent (see module docstring).
 
     The agent is expected to return a JSON object matching the Verdict
     schema (see ``system_prompt.txt``).  This function parses that JSON
@@ -65,7 +70,7 @@ async def classify(
     target_id = bundle.get("target_id", "")
 
     try:
-        raw_json = await _call_foundry_agent(prompt_text, screenshot_paths or [])
+        raw_json = await _call_foundry_agent(prompt_text)
     except _FoundryNotConfigured:
         logger.warning(
             "Azure Foundry not configured — falling back to heuristic verdict"
@@ -127,19 +132,6 @@ def _new_thread_id(client) -> str:
     return thread.id
 
 
-def _is_image_content_error(exc: Exception) -> bool:
-    """True for service errors rejecting image content blocks, e.g.
-
-    "(invalid_type) Invalid model: gpt-5-mini-2025-08-07 does not
-    support image message content types."
-    """
-    text = str(exc).lower()
-    return (
-        "does not support image" in text
-        or ("image" in text and "invalid" in text)
-    )
-
-
 def _build_user_message(bundle: dict) -> str:
     """Convert bundle to prompt text and wrap it for the agent."""
     from graph_engine.classifier.evidence_bundle import bundle_to_prompt_text
@@ -155,11 +147,8 @@ def _build_user_message(bundle: dict) -> str:
     )
 
 
-async def _call_foundry_agent(
-    prompt: str,
-    screenshot_paths: list[str],
-) -> str:
-    """Create a fresh thread, send prompt + screenshots, run, and return the reply.
+async def _call_foundry_agent(prompt: str) -> str:
+    """Create a fresh thread, send the prompt, run, and return the reply.
 
     Raises ``_FoundryNotConfigured`` if env vars are missing.
     """
@@ -173,31 +162,33 @@ async def _call_foundry_agent(
     # Import here so the module is importable without the SDK installed
     try:
         from azure.ai.agents import AgentsClient
-        from azure.identity import DefaultAzureCredential
+        from azure.identity import ClientSecretCredential, DefaultAzureCredential
     except ImportError:
         raise _FoundryNotConfigured(
             "Azure Agents SDK not installed; run: "
             "pip install azure-ai-agents azure-ai-projects azure-identity"
         )
 
-    credential = DefaultAzureCredential()
+    if settings.service_principal_configured:
+        # Credenziali dal .env: pydantic-settings NON le esporta in
+        # os.environ, quindi DefaultAzureCredential non le vedrebbe —
+        # si costruisce esplicitamente il ClientSecretCredential.
+        credential = ClientSecretCredential(
+            tenant_id=settings.azure_tenant_id,
+            client_id=settings.azure_client_id,
+            client_secret=settings.azure_client_secret,
+        )
+    else:
+        credential = DefaultAzureCredential()
     # AgentsClient (azure-ai-agents) is the CONVERSATIONAL client — threads,
     # messages, runs.  It is split out of azure-ai-projects in current SDK
     # versions: AIProjectClient.agents there only manages agent DEFINITIONS.
     client = AgentsClient(endpoint=endpoint, credential=credential)
 
     # ── CRITICAL: always create a NEW thread ─────────────────────────────
-    # See module-level docstring for the rationale.  Track every thread
-    # created so the finally block can clean them all up (the image-retry
-    # path below may create a second one).
-    created_thread_ids: list[str] = []
-
-    def _fresh_thread() -> str:
-        tid = _new_thread_id(client)
-        created_thread_ids.append(tid)
-        return tid
-
-    thread_id = _fresh_thread()
+    # See module-level docstring for the rationale.  One thread per call,
+    # deleted in the finally block below — never reused.
+    thread_id = _new_thread_id(client)
     # ─────────────────────────────────────────────────────────────────────
 
     system_prompt = _load_system_prompt()
@@ -210,77 +201,12 @@ async def _call_foundry_agent(
             content=prompt,
         )
 
-        # Attach screenshots as image_file CONTENT blocks (vision).
-        # Live-service facts (azure-ai-agents 1.1.0, learned 2026-08-26):
-        #  - upload purpose "vision" is rejected ("purpose contains an
-        #    invalid purpose"); "assistants" is accepted;
-        #  - the attachments=[{"file_id", "tools": []}] pattern is
-        #    rejected ("Attachment must be added to at least one tool");
-        #  - the SDK exposes MessageInputImageFileBlock /
-        #    MessageImageFileParam — the standard vision pattern is an
-        #    image_file content block, not a tool attachment.
-        attached_any = False
-        for sp in screenshot_paths:
-            if os.path.isfile(sp):
-                try:
-                    with open(sp, "rb") as fh:
-                        file_ref = client.files.upload(
-                            file=fh,
-                            purpose="assistants",
-                        )
-                    client.messages.create(
-                        thread_id=thread_id,
-                        role="user",
-                        content=[
-                            {
-                                "type": "text",
-                                "text": (
-                                    "Screenshot attached for visual "
-                                    "context during classification."
-                                ),
-                            },
-                            {
-                                "type": "image_file",
-                                "image_file": {"file_id": file_ref.id},
-                            },
-                        ],
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to attach screenshot %s: %s", sp, exc
-                    )
-                else:
-                    attached_any = True
-
-        # Create and wait for the run.  If the agent's model rejects
-        # image content blocks (e.g. gpt-5-mini without vision), retry
-        # once on a FRESH thread with the text-only prompt — screenshots
-        # must never kill the classification.
-        try:
-            run = client.runs.create_and_process(
-                thread_id=thread_id,
-                agent_id=agent_id,
-                instructions=system_prompt,
-            )
-        except Exception as exc:
-            if not attached_any or not _is_image_content_error(exc):
-                raise
-            logger.warning(
-                "Agent model rejects image content — retrying on a fresh "
-                "thread with text-only prompt (screenshots discarded): %s",
-                exc,
-            )
-            thread_id = _fresh_thread()
-            client.messages.create(
-                thread_id=thread_id,
-                role="user",
-                content=prompt,
-            )
-            run = client.runs.create_and_process(
-                thread_id=thread_id,
-                agent_id=agent_id,
-                instructions=system_prompt,
-            )
+        # Create and wait for the run
+        run = client.runs.create_and_process(
+            thread_id=thread_id,
+            agent_id=agent_id,
+            instructions=system_prompt,
+        )
 
         if run.status not in ("completed", "requires_action"):
             logger.warning("Foundry run ended with status: %s", run.status)
@@ -324,12 +250,11 @@ async def _call_foundry_agent(
         return ""
 
     finally:
-        # Clean up the ephemeral thread(s) — no cross-session leakage
-        for tid in created_thread_ids:
-            try:
-                client.threads.delete(tid)
-            except Exception:
-                pass
+        # Clean up the ephemeral thread — no cross-session leakage
+        try:
+            client.threads.delete(thread_id)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

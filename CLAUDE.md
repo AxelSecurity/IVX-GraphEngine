@@ -63,7 +63,7 @@ Tutti modelli Pydantic v2 con `from __future__ import annotations`:
 | `classifier/form_inventory.py` | 110 | `scan_form_fields(page)` — scansione passiva sola lettura via JS; enumera `{tag, type, name_or_id, nearby_label_text}` per input/select/textarea visibili; esclude hidden/submit/button/checkbox/radio/file |
 | `classifier/evidence_bundle.py` | 156 | `build_evidence_bundle(...)` — dict semplice (NON Pydantic); `bundle_to_prompt_text(bundle)` — sezioni testuali etichettate, deliberatamente non JSON |
 | `classifier/prefilter.py` | 88 | `prefilter(bundle)` → Verdict o None; intercetta solo casi banalmente inconclusivi; restituisce `suspicious` conf 0.05, `produced_by="prefilter"` |
-| `classifier/foundry_classifier.py` | 303 | `classify(bundle, screenshot_paths)` → Verdict; richiede env `AZURE_FOUNDRY_ENDPOINT` e `AZURE_FOUNDRY_AGENT_ID`; fallback `_heuristic_fallback` se non configurato |
+| `classifier/foundry_classifier.py` | 315 | `classify(bundle)` → Verdict; richiede env `AZURE_FOUNDRY_ENDPOINT` e `AZURE_FOUNDRY_AGENT_ID`; fallback `_heuristic_fallback` se non configurato. **Nessun allegato immagine**: il contenuto visivo arriva come TESTO nel bundle via Azure AI Vision (il modello gpt-5-mini non supporta immagini). Auth: `ClientSecretCredential` se service principal completo, altrimenti `DefaultAzureCredential` |
 | `classifier/system_prompt.txt` | 55 | System prompt per l'agente Foundry |
 
 ### `StateGraphExplorer` (explorer.py) — meccanismi chiave
@@ -131,6 +131,8 @@ azure-identity>=1.16.0     # opzionale — solo per --classify
 Solo per `--classify`:
 - `AZURE_FOUNDRY_ENDPOINT` — endpoint del progetto Azure AI Foundry
 - `AZURE_FOUNDRY_AGENT_ID` — ID dell'agente Foundry configurato
+- `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` — service principal AAD; se TUTTE e tre presenti il classificatore usa `ClientSecretCredential` (autenticazione stabile via `.env`, senza `az login`), altrimenti `DefaultAzureCredential`. NOTA: pydantic-settings non esporta i valori del `.env` in `os.environ` — è `foundry_classifier.py` a passarli esplicitamente a `ClientSecretCredential`
+- `AZURE_VISION_ENDPOINT` / `AZURE_VISION_KEY` — arricchimento Vision (OCR + Brand Detection) sugli screenshot; vedi `.env.example`
 
 `.env` è in `.gitignore`. Nessuna credenziale viene mai hardcodata o committata.
 

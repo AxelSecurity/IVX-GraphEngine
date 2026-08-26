@@ -28,6 +28,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _CONFIG_FIELDS = (
     "azure_foundry_endpoint",
     "azure_foundry_agent_id",
+    "azure_tenant_id",
+    "azure_client_id",
+    "azure_client_secret",
     "azure_vision_endpoint",
     "azure_vision_key",
     "misp_url",
@@ -51,6 +54,18 @@ class Settings(BaseSettings):
     # ── Azure AI Foundry (classificazione L5) ───────────────────────
     azure_foundry_endpoint: Optional[str] = None
     azure_foundry_agent_id: Optional[str] = None
+
+    # ── Service principal AAD (autenticazione Foundry) ───────────────
+    # Le tre credenziali del service principal usate da
+    # ClientSecretCredential.  NOTA: pydantic-settings NON esporta i
+    # valori del .env in os.environ — senza questo passaggio esplicito
+    # DefaultAzureCredential/EnvironmentCredential non li vedrebbero
+    # mai.  Se presenti tutte e tre, il classificatore Foundry usa
+    # ClientSecretCredential; altrimenti ripiega su
+    # DefaultAzureCredential (az login, managed identity, ecc.).
+    azure_tenant_id: Optional[str] = None
+    azure_client_id: Optional[str] = None
+    azure_client_secret: Optional[str] = None
 
     # ── Azure AI Vision (arricchimento bundle L5) ───────────────────
     # Riusa la risorsa Cognitive Services già attiva
@@ -97,6 +112,14 @@ class Settings(BaseSettings):
     def vision_configured(self) -> bool:
         """True se endpoint e key Azure AI Vision sono entrambi presenti."""
         return bool(self.azure_vision_endpoint and self.azure_vision_key)
+
+    @property
+    def service_principal_configured(self) -> bool:
+        """True se tenant/client/secret del service principal AAD sono
+        tutti presenti (→ ClientSecretCredential per Foundry)."""
+        return bool(
+            self.azure_tenant_id and self.azure_client_id and self.azure_client_secret
+        )
 
     @property
     def misp_configured(self) -> bool:
