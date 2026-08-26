@@ -121,12 +121,13 @@ lxml>=5.1.0
 pytest
 pytest-asyncio
 azure-ai-projects>=0.1.0   # opzionale — solo per --classify
+azure-ai-agents>=1.0.0     # opzionale — solo per --classify (AgentsClient conversazionale: threads/messages/runs)
 azure-identity>=1.16.0     # opzionale — solo per --classify
 ```
 
 - **Python 3.9.6** (venv di sistema macOS CommandLineTools). `from __future__ import annotations` è usato ovunque; `asyncio.Queue[int]` funziona su 3.9.
 - **Non esiste `pyproject.toml`** — per aggiungere dipendenze si modifica `requirements.txt`
-- I moduli Azure NON sono installati nel venv; il classificatore degrada a fallback euristico senza
+- Senza i moduli Azure (`azure-ai-agents` in particolare) il classificatore degrada a fallback euristico anche con `.env` completo — il warning logga il motivo reale (SDK mancante vs env mancanti)
 
 ## Variabili d'ambiente
 

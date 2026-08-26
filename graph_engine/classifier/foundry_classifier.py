@@ -71,9 +71,14 @@ async def classify(bundle: dict) -> Verdict:
 
     try:
         raw_json = await _call_foundry_agent(prompt_text)
-    except _FoundryNotConfigured:
+    except _FoundryNotConfigured as exc:
+        # Il motivo reale (env mancanti O SDK non installato) è nel
+        # messaggio dell'eccezione: loggarlo evita il falso allarme
+        # "not configured" quando il .env è a posto ma manca un pacchetto.
         logger.warning(
-            "Azure Foundry not configured — falling back to heuristic verdict"
+            "Azure Foundry unavailable (%s) — falling back to "
+            "heuristic verdict",
+            exc,
         )
         return _heuristic_fallback(bundle)
     except Exception as exc:
