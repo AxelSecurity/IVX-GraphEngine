@@ -115,7 +115,7 @@ async def _run_classification(
                     leaf_visible_text[sid] = _extract_visible_text(html)
 
     # ---- bundle -----------------------------------------------------------
-    bundle = build_evidence_bundle(
+    bundle = await build_evidence_bundle(
         target_url=target.input_url,
         canonical_url=target.final_url,
         states=states,

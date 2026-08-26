@@ -28,6 +28,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _CONFIG_FIELDS = (
     "azure_foundry_endpoint",
     "azure_foundry_agent_id",
+    "azure_vision_endpoint",
+    "azure_vision_key",
     "misp_url",
     "misp_api_key",
     "opencti_url",
@@ -49,6 +51,14 @@ class Settings(BaseSettings):
     # ── Azure AI Foundry (classificazione L5) ───────────────────────
     azure_foundry_endpoint: Optional[str] = None
     azure_foundry_agent_id: Optional[str] = None
+
+    # ── Azure AI Vision (arricchimento bundle L5) ───────────────────
+    # Riusa la risorsa Cognitive Services già attiva
+    # (aigpt-pr-it-intelivx-resource, regione italynorth) — nessuna
+    # risorsa nuova da creare.  Alimenta OCR (SDK moderna) e Brand
+    # Detection (REST legacy v3.2) sugli screenshot degli stati foglia.
+    azure_vision_endpoint: Optional[str] = None
+    azure_vision_key: Optional[str] = None
 
     # ── MISP (provider reputazione L2) ──────────────────────────────
     misp_url: Optional[str] = None
@@ -82,6 +92,11 @@ class Settings(BaseSettings):
         return bool(
             self.azure_foundry_endpoint and self.azure_foundry_agent_id
         )
+
+    @property
+    def vision_configured(self) -> bool:
+        """True se endpoint e key Azure AI Vision sono entrambi presenti."""
+        return bool(self.azure_vision_endpoint and self.azure_vision_key)
 
     @property
     def misp_configured(self) -> bool:

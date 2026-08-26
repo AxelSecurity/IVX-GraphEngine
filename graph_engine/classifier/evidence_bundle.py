@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
+from graph_engine.classifier.vision_analysis import analyze_screenshot
 from graph_engine.models import Evidence, State, Transition
 
 # Evidence keys that carry signal on their own (L1/L2/L3).  Their values
@@ -34,7 +35,7 @@ def _coerce_evidence_value(value):
     return value
 
 
-def build_evidence_bundle(
+async def build_evidence_bundle(
     target_url: str,
     canonical_url: Optional[str],
     states: list[State],
@@ -45,8 +46,9 @@ def build_evidence_bundle(
     leaf_titles: dict[str, str],
     lexical_risk_score: Optional[float] = None,
     passive_risk_score: Optional[float] = None,
+    analyze_screenshots: bool = True,
 ) -> dict:
-    """Produce a compact, structured summary of the exploration.
+    """Produce un riepilogo compatto e strutturato dell'esplorazione.
 
     Parameters
     ----------
@@ -57,6 +59,11 @@ def build_evidence_bundle(
         stripped of script/style/markup, truncated to ~1500 chars).
     leaf_titles:
         Mapping ``state_id_str → document.title`` for leaf states.
+    analyze_screenshots:
+        Se True, per ogni stato foglia con ``screenshot_ref`` viene
+        eseguito l'arricchimento Azure AI Vision (OCR + Brand Detection)
+        e il risultato finisce nei campi ``ocr_text``/``brands`` della
+        entry — MAI fuso con ``visible_text`` (provenienza distinta).
     """
 
     # ---- basics -----------------------------------------------------------
@@ -112,14 +119,24 @@ def build_evidence_bundle(
         sid = str(s.id)
         if sid in from_state_ids:
             continue  # has outbound transitions → not a leaf
-        leaves.append({
+        leaf: dict = {
             "state_id": sid,
             "url": s.url,
             "depth": s.depth,
             "title": leaf_titles.get(sid, ""),
             "visible_text": leaf_visible_text.get(sid, ""),
             "form_fields": leaf_form_fields.get(sid, []),
-        })
+            # Arricchimento Azure AI Vision — campi SEMPRE presenti
+            # (anche vuoti) ma MAI fusi con visible_text: la provenienza
+            # del testo resta distinguibile per il modello.
+            "ocr_text": "",
+            "brands": [],
+        }
+        if analyze_screenshots and s.screenshot_ref:
+            vision = await analyze_screenshot(s.screenshot_ref)
+            leaf["ocr_text"] = vision.get("ocr_text", "") or ""
+            leaf["brands"] = vision.get("brands", []) or []
+        leaves.append(leaf)
     bundle["leaf_states"] = leaves
 
     return bundle
@@ -183,12 +200,30 @@ def bundle_to_prompt_text(bundle: dict) -> str:
             lines.append("  Form fields: none")
         text = leaf.get("visible_text", "")
         if text:
-            lines.append("  Visible text (truncated):")
+            lines.append("  Testo visibile nel DOM (truncated):")
             # Indent the visible text for readability
             for tline in text.split("\n"):
                 stripped = tline.strip()
                 if stripped:
                     lines.append(f"    {stripped[:200]}")
+        ocr_text = leaf.get("ocr_text", "")
+        if ocr_text:
+            # Provenienza DIVERSA dal visible_text: OCR sullo screenshot
+            # (cattura anche testo renderizzato via canvas/immagini).
+            lines.append("  Testo rilevato via OCR nello screenshot:")
+            for tline in ocr_text.split("\n"):
+                stripped = tline.strip()
+                if stripped:
+                    lines.append(f"    {stripped[:200]}")
+        brands = leaf.get("brands", [])
+        if brands:
+            lines.append("  Brand rilevati nello screenshot:")
+            for brand in brands:
+                if not isinstance(brand, dict):
+                    continue
+                name = brand.get("name", "?")
+                confidence = brand.get("confidence", 0.0)
+                lines.append(f"    - {name} (confidence {confidence:.2f})")
         lines.append("")
 
     return "\n".join(lines)

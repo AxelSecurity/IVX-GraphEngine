@@ -159,7 +159,44 @@ Il bundle (`graph_engine/classifier/evidence_bundle.py`) contiene:
   `had_replay_fallback`, `had_unhandled_error`
 - Per ogni stato foglia (senza transizioni in uscita): URL, titolo pagina,
   testo visibile estratto (troncato a ~1500 caratteri, strip di
-  script/style/tag), risultato di `scan_form_fields()` (sola lettura)
+  script/style/tag), risultato di `scan_form_fields()` (sola lettura),
+  più i campi di arricchimento visivo `ocr_text` e `brands` (vedi sotto)
+
+### Arricchimento Azure AI Vision (OCR + Brand Detection)
+
+`graph_engine/classifier/vision_analysis.py` arricchisce gli screenshot
+degli stati foglia usando la risorsa Azure AI Vision **già esistente**
+(`aigpt-pr-it-intelivx-resource.cognitiveservices.azure.com`, regione
+italynorth — nessuna risorsa nuova da creare). Due capacità, due
+superfici API DIVERSE della stessa risorsa:
+
+- **OCR** — SDK moderna `azure-ai-vision-imageanalysis` (client async
+  nativo `azure.ai.vision.imageanalysis.aio.ImageAnalysisClient` +
+  `VisualFeatures.READ`). Cattura il testo renderizzato via
+  canvas/immagini, invisibile al DOM.
+- **Brand Detection** — REST legacy v3.2
+  `POST {endpoint}/vision/v3.2/analyze?visualFeatures=Brands`, perché la
+  SDK moderna (API v4) NON espone più i brand. Autenticazione a chiave
+  della risorsa (header `Ocp-Apim-Subscription-Key` — diversa dall'AAD
+  usata per Foundry) e body `application/octet-stream` con i byte
+  grezzi del file: gli screenshot sono PNG locali su disco, non URL
+  pubblici.
+
+I risultati entrano nel bundle come campi **separati** per ogni stato
+foglia: `ocr_text` e `brands` non vengono MAI fusi con `visible_text`
+— la provenienza resta distinguibile. Nel prompt per Foundry le tre
+fonti sono etichettate distintamente ("Testo visibile nel DOM:",
+"Testo rilevato via OCR nello screenshot:", "Brand rilevati nello
+screenshot:"). Il prefilter considera anche `ocr_text` prima di
+dichiarare "nessun testo visibile" (una pagina canvas-only NON è
+"dati insufficienti").
+
+Contratto di resilienza: nessuna funzione del modulo lancia mai
+eccezioni (tornano dict con chiave `error`); le due chiamate girano in
+parallelo con `asyncio.gather(..., return_exceptions=True)` — il
+fallimento di una non blocca l'altra; senza `AZURE_VISION_ENDPOINT` +
+`AZURE_VISION_KEY` (property `vision_configured`) non viene tentata
+alcuna chiamata di rete.
 
 ### `scan_form_fields` — inventario passivo
 
@@ -781,6 +818,8 @@ più permessa nei moduli.
 |---|---|---|---|
 | `AZURE_FOUNDRY_ENDPOINT` | `azure_foundry_endpoint` | L5 Foundry | richiede anche `AGENT_ID` (`foundry_configured`) |
 | `AZURE_FOUNDRY_AGENT_ID` | `azure_foundry_agent_id` | L5 Foundry | richiede anche `ENDPOINT` |
+| `AZURE_VISION_ENDPOINT` | `azure_vision_endpoint` | arricchimento L5 (OCR + Brand Detection) | richiede anche `AZURE_VISION_KEY` (`vision_configured`); riusa la risorsa Cognitive Services già attiva (italynorth) |
+| `AZURE_VISION_KEY` | `azure_vision_key` | arricchimento L5 (OCR + Brand Detection) | richiede anche `AZURE_VISION_ENDPOINT`; chiave della risorsa (header `Ocp-Apim-Subscription-Key` per la REST legacy v3.2, `AzureKeyCredential` per la SDK moderna) |
 | `MISP_URL` | `misp_url` | provider MISP (L2) | richiede anche `MISP_API_KEY` (`misp_configured`) |
 | `MISP_API_KEY` | `misp_api_key` | provider MISP (L2) | richiede anche `MISP_URL` |
 | `OPENCTI_URL` | `opencti_url` | provider OpenCTI (L2) | richiede anche `OPENCTI_API_KEY` (`opencti_configured`) |
@@ -788,10 +827,10 @@ più permessa nei moduli.
 | `URLHAUS_API_KEY` | `urlhaus_api_key` | provider URLhaus (L2) | campo singolo (`urlhaus_configured`); endpoint fisso `urlhaus-api.abuse.ch`, chiave gratuita da https://auth.abuse.ch/ |
 | `TRELLIX_API_TOKEN` | `trellix_api_token` | auth Bearer su `/trellix/analyze` | campo singolo (`trellix_auth_required`) |
 
-Le property `foundry_configured` / `misp_configured` / `opencti_configured`
-richiedono **ENTRAMBE** le variabili della coppia (una sola non basta);
-`urlhaus_configured` e `trellix_auth_required` sono True con il singolo
-valore impostato (e non vuoto).
+Le property `foundry_configured` / `vision_configured` / `misp_configured`
+/ `opencti_configured` richiedono **ENTRAMBE** le variabili della coppia
+(una sola non basta); `urlhaus_configured` e `trellix_auth_required`
+sono True con il singolo valore impostato (e non vuoto).
 
 ### Attivazione
 
@@ -802,6 +841,8 @@ committarlo) e valorizza le coppie che ti servono:
 # .env
 AZURE_FOUNDRY_ENDPOINT=https://<progetto>.openai.azure.com
 AZURE_FOUNDRY_AGENT_ID=<agent-id>        # → L5 con Foundry invece del fallback
+AZURE_VISION_ENDPOINT=https://<risorsa>.cognitiveservices.azure.com  # → OCR + Brand Detection sugli screenshot
+AZURE_VISION_KEY=<chiave-risorsa>        #   (risorsa Cognitive Services riusata)
 MISP_URL=https://misp.example.org        # → provider MISP attivo in L2
 MISP_API_KEY=<api-key>
 OPENCTI_URL=https://opencti.example.org  # → provider OpenCTI attivo in L2

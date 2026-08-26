@@ -228,6 +228,30 @@ class TestPrefilterReturnsNone:
             "the model may recognize the brand"
         )
 
+    def test_single_state_no_dom_text_but_ocr_text(self):
+        """Single state, visible_text VUOTO ma ocr_text presente (pagina
+        che rende testo via canvas/immagine) → delegare a Foundry:
+        l'OCR è testo visibile a tutti gli effetti."""
+        bundle = _sparse_l4_bundle(
+            leaf_states=[
+                {
+                    "state_id": str(uuid.uuid4()),
+                    "url": "https://example.com/canvas-login",
+                    "depth": 0,
+                    "title": "",
+                    "visible_text": "",
+                    "ocr_text": "Accedi al tuo account Microsoft",
+                    "form_fields": [],
+                }
+            ],
+        )
+
+        verdict = prefilter(bundle)
+        assert verdict is None, (
+            "OCR text is visible content: single state with OCR text "
+            "must go to Foundry"
+        )
+
     def test_empty_states_unhandled_error_no_signals(self):
         """Edge: 0 states, unhandled error → insufficient."""
         bundle = {

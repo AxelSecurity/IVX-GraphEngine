@@ -91,9 +91,15 @@ def prefilter(bundle: dict) -> Optional[Verdict]:
     num_states = bundle.get("num_states", 0)
     transition_kinds = bundle.get("transition_kinds_seen", {})
 
-    # Extract all visible text from leaves
+    # Extract all visible text from leaves: DOM text AND OCR text from
+    # screenshots.  Una pagina che rende testo solo via canvas/immagini
+    # ha visible_text vuoto ma ocr_text non vuoto — NON è "nessun testo
+    # visibile" (il DOM da solo non basta più a giudicare la sparsità).
     all_visible_text = " ".join(
-        leaf.get("visible_text", "") for leaf in leaves
+        (leaf.get("visible_text", "") or "")
+        + " "
+        + (leaf.get("ocr_text", "") or "")
+        for leaf in leaves
     ).strip()
 
     # Count total form fields
