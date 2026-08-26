@@ -65,7 +65,9 @@ class FakeExplorer:
     """Sostituisce ``StateGraphExplorer``: ``run()`` popola target e stati
     senza aprire un browser.  Accetta ``target_id`` come l'esploratore reale."""
 
-    def __init__(self, browser):
+    def __init__(self, browser, **kwargs):
+        # **kwargs: il runner passa page_timeout_ms al costruttore
+        # (plumb L4 fast) — il fake lo accetta e lo ignora.
         self.browser = browser
         self.states: list[State] = []
         self.transitions: list[Transition] = []

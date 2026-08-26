@@ -162,6 +162,8 @@ async def run_full_analysis(
     captcha_wait_s: int = 8,
     l2_timeout_s: Optional[float] = None,
     l3_timeout_s: Optional[float] = None,
+    settle_max_wait_s: float = 4.0,
+    page_timeout_ms: int = 30000,
 ) -> str:
     """Esegue la pipeline completa L0→L5 e persiste tutto su SQLite.
 
@@ -182,11 +184,15 @@ async def run_full_analysis(
         captcha_wait_s: Secondi di attesa per auto-risoluzione CAPTCHA
                         (default: 8s; fast path Trellix: 4s).
         l2_timeout_s: Timeout in secondi per le query OSINT L2
-                      (crt.sh, RDAP, DNS).  Se ``None``, ogni provider
-                      usa il proprio default.
+                      (crt.sh, RDAP, DNS e reputation provider).  Se
+                      ``None``, ogni provider usa il proprio default.
         l3_timeout_s: Timeout in secondi per JARM (L3).  Se ``None``,
                       usa il default (10s).  Le altre sonde L3
                       mantengono i propri timeout interni.
+        settle_max_wait_s: Tetto massimo del settle post-navigazione di
+                           L4 (default: 4.0s; fast path Trellix: 3.0s).
+        page_timeout_ms: Timeout di navigazione Playwright in ms
+                         (default: 30000; fast path Trellix: 15000).
 
     Returns:
         ``str(target.id)`` — l'UUID dell'analisi persistita.
@@ -246,13 +252,16 @@ async def run_full_analysis(
             try:
                 from graph_engine.explorer import StateGraphExplorer
 
-                explorer = StateGraphExplorer(browser)
+                explorer = StateGraphExplorer(
+                    browser, page_timeout_ms=page_timeout_ms
+                )
                 explored = await explorer.run(
                     ingested["canonical_url"],
                     budget=budget_obj,
                     capture_artifacts=capture_artifacts,
                     top_n_actions=top_n_actions,
                     captcha_wait_s=captcha_wait_s,
+                    settle_max_wait_s=settle_max_wait_s,
                     profile=l3_result["recommended_profile"],
                     target_id=analysis_target.id,
                     cloaking_profile=l3_result.get("cloaking_profile"),

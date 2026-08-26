@@ -35,6 +35,8 @@ from graph_engine.api.fast_profile import (
     FAST_CAPTCHA_WAIT_S,
     FAST_L2_TIMEOUT_S,
     FAST_L3_TIMEOUT_S,
+    FAST_PAGE_TIMEOUT_MS,
+    FAST_SETTLE_MAX_WAIT_S,
     FAST_TOP_N_ACTIONS,
     TRELLIX_RESPONSE_TIMEOUT_S,
 )
@@ -169,6 +171,8 @@ def build_trellix_router(
                 captcha_wait_s=FAST_CAPTCHA_WAIT_S,
                 l2_timeout_s=FAST_L2_TIMEOUT_S,
                 l3_timeout_s=FAST_L3_TIMEOUT_S,
+                settle_max_wait_s=FAST_SETTLE_MAX_WAIT_S,
+                page_timeout_ms=FAST_PAGE_TIMEOUT_MS,
                 capture_artifacts=False,
             )
         )

@@ -71,12 +71,14 @@ async def detect_captcha(page: Page) -> Optional[str]:
     return None
 
 
-async def try_pass_gate(page: Page, wait_seconds: int = 8) -> bool:
+async def try_pass_gate(
+    page: Page, wait_seconds: int = 8, settle_s: float = 3.0
+) -> bool:
     """Attempt to pass a detected gate by waiting + optional checkbox click.
 
     1. Poll for up to *wait_seconds* — many invisible challenges auto-resolve.
     2. If still present, try a single checkbox click inside the provider iframe.
-    3. Wait a few more seconds, then check again.
+    3. Wait *settle_s* more seconds, then check again.
 
     Returns ``True`` when the gate has disappeared, ``False`` otherwise.
     Never attempts real puzzle solving (image / audio challenges).
@@ -111,6 +113,6 @@ async def try_pass_gate(page: Page, wait_seconds: int = 8) -> bool:
             break
 
     # ---- phase 3: brief settle + final check ------------------------------
-    await asyncio.sleep(3.0)
+    await asyncio.sleep(settle_s)
 
     return await detect_captcha(page) is None

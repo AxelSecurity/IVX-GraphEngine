@@ -6,7 +6,12 @@ import uuid
 
 import pytest
 
-from graph_engine.models import AnalysisTarget, EvidenceScope, TargetStatus
+from graph_engine.models import (
+    AnalysisTarget,
+    EvidenceScope,
+    State,
+    TargetStatus,
+)
 from graph_engine.storage.repository import get_target_by_id, save_target
 
 # ---------------------------------------------------------------------------
@@ -22,7 +27,9 @@ class _ExplodingImmediatelyExplorer:
     """StateGraphExplorer finto che esplode appena costruito (run non
     verrà mai chiamato).  Simula un errore in L0/L1/L2."""
 
-    def __init__(self, browser):
+    def __init__(self, browser, **kwargs):
+        # **kwargs: il runner passa page_timeout_ms al costruttore —
+        # il fake lo accetta e lo ignora.
         self.browser = browser
         self.states = []
         self.transitions = []
@@ -31,6 +38,40 @@ class _ExplodingImmediatelyExplorer:
 
     async def run(self, *args, **kwargs):
         raise RuntimeError("Boom! Should never be called")
+
+
+class _RecordingExplorer:
+    """StateGraphExplorer finto che registra i parametri ricevuti dal
+    runner (costruttore e run) — per verificare il plumb dei parametri
+    fast di L4 (settle_max_wait_s, page_timeout_ms)."""
+
+    init_kwargs: dict = {}
+    run_kwargs: dict = {}
+
+    def __init__(self, browser, **kwargs):
+        type(self).init_kwargs = kwargs
+        self.browser = browser
+
+    async def run(self, start_url, **kwargs):
+        type(self).run_kwargs = kwargs
+        tid = kwargs.get("target_id")
+        self.target = AnalysisTarget(
+            id=tid if tid is not None else uuid.uuid4(),
+            input_url=start_url,
+            final_url=start_url,
+            status=TargetStatus.done,
+        )
+        root = State(
+            target_id=self.target.id,
+            url=start_url,
+            dom_hash="h0",
+            depth=0,
+        )
+        self.target.root_state_id = root.id
+        self.states = [root]
+        self.transitions = []
+        self.evidence = []
+        return self.target
 
 
 class TestPipelineRunner:
@@ -311,3 +352,31 @@ class TestPipelineRunner:
         target_id = await asyncio.wait_for(task, timeout=5.0)
         data = await get_target_by_id(target_id, db_path=db)
         assert data["target"].status == TargetStatus.done
+
+    async def test_fast_l4_params_forwarded_to_explorer(
+        self, fake_pipeline, tmp_path, monkeypatch
+    ):
+        """Plumb fast L4: ``page_timeout_ms`` deve arrivare al costruttore
+        di StateGraphExplorer e ``settle_max_wait_s`` a ``explorer.run()``
+        (parametri usati dal path Trellix)."""
+        from graph_engine.api.pipeline_runner import run_full_analysis
+
+        _RecordingExplorer.init_kwargs = {}
+        _RecordingExplorer.run_kwargs = {}
+
+        monkeypatch.setattr(
+            "graph_engine.explorer.StateGraphExplorer",
+            _RecordingExplorer,
+        )
+
+        db = str(tmp_path / "test.db")
+        await run_full_analysis(
+            "https://example.com",
+            db_path=db,
+            classify=False,
+            settle_max_wait_s=3.0,
+            page_timeout_ms=15000,
+        )
+
+        assert _RecordingExplorer.init_kwargs == {"page_timeout_ms": 15000}
+        assert _RecordingExplorer.run_kwargs["settle_max_wait_s"] == 3.0

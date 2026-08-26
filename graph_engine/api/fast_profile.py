@@ -5,15 +5,17 @@ Trellix attende una risposta entro ~60 secondi. Il budget qui sotto
 
     L0+L1 (sync, locali)          ~1s
     L2+L3 (rete, in parallelo)    ≤ 5s  (timeout espliciti)
-    L4  (BFS Playwright)          ≤ 30s (FAST_BUDGET.timeout_s)
+    L4  (BFS Playwright)          ≤ 25s (FAST_BUDGET.timeout_s, settle
+                                         ridotto e page timeout 15s)
     L5  (prefilter/fallback)      ~1s
                                 ------
-                                 ~37s < 48s (attesa del wrapper)
+                                 ~32s < 48s (attesa del wrapper)
                                  < 60s (deadline Trellix)
 
 La classificazione Foundry NON rientra nella garanzia: se configurata
 può sforare la finestra → il wrapper risponde "Analysis-Incomplete"
-onestamente e il task continua in background.
+onestamente e il task continua in background (in un worker thread,
+senza mai congelare il loop dell'API).
 """
 
 from __future__ import annotations
@@ -38,6 +40,8 @@ FAST_TOP_N_ACTIONS = 1
 # ── Attesa CAPTCHA ────────────────────────────────────────────────────────
 # Metà dell'attesa standard (8s).  I gate CAPTCHA richiedono interazione
 # umana reale; 4s bastano per rilevare il blocco senza sprecare budget.
+# Con captcha_wait_s <= 4 l'explorer usa anche il settle gate ridotto
+# (_GATE_SETTLE_FAST_S = 1.5s invece di 3.0s).
 FAST_CAPTCHA_WAIT_S = 4
 
 # ── Timeout di rete L2/L3 ─────────────────────────────────────────────────
@@ -48,6 +52,17 @@ FAST_CAPTCHA_WAIT_S = 4
 # mantengono i propri timeout interni.
 FAST_L2_TIMEOUT_S = 5.0
 FAST_L3_TIMEOUT_S = 5.0
+
+# ── Settle post-navigazione (L4) ──────────────────────────────────────────
+# Default: 4.0s per stato.  Il fast lo riduce a 3.0s — resta sopra il
+# floor di ~2.5s del polling adattivo (il redirect JS ritardato a 2s dei
+# kit TDS reali continua a essere catturato).
+FAST_SETTLE_MAX_WAIT_S = 3.0
+
+# ── Timeout di navigazione Playwright (L4) ────────────────────────────────
+# Default: 30000ms per goto.  Il fast lo dimezza: un target lento che non
+# risponde in 15s è di per sé un segnale, non vale la pena aspettarlo.
+FAST_PAGE_TIMEOUT_MS = 15000
 
 # ── Timeout attesa wrapper ────────────────────────────────────────────────
 # L'attesa massima del wrapper Trellix per il completamento del task.

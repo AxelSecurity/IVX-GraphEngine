@@ -108,6 +108,15 @@ _SETTLE_QUIET_CYCLES = 2       # consecutive mature cycles with nothing
                                # new → page is stable, stop waiting
 
 # ---------------------------------------------------------------------------
+# Gate settle — fase 3 di try_pass_gate() (attesa post-click del checkbox)
+# ---------------------------------------------------------------------------
+# Ridotta nel fast path (captcha_wait_s <= 4, es. Trellix) per non bruciare
+# budget sul secondo rilevamento; standard altrimenti.
+
+_GATE_SETTLE_FAST_S = 1.5
+_GATE_SETTLE_DEFAULT_S = 3.0
+
+# ---------------------------------------------------------------------------
 # Explorer
 # ---------------------------------------------------------------------------
 
@@ -242,6 +251,11 @@ class StateGraphExplorer:
         self._top_n_actions = top_n_actions
         self._captcha_wait_s = captcha_wait_s
         self._settle_max_wait_s = settle_max_wait_s
+        self._gate_settle_s = (
+            _GATE_SETTLE_FAST_S
+            if captcha_wait_s <= 4
+            else _GATE_SETTLE_DEFAULT_S
+        )
         if profile is not None:
             self._profile = profile
 
@@ -357,7 +371,9 @@ class StateGraphExplorer:
                     captcha = await detect_captcha(page)
                     if captcha is not None:
                         gate_passed = await try_pass_gate(
-                            page, self._captcha_wait_s
+                            page,
+                            self._captcha_wait_s,
+                            settle_s=self._gate_settle_s,
                         )
                         if gate_passed:
                             # The DOM changed (gate iframe gone / replaced) —
@@ -719,7 +735,9 @@ class StateGraphExplorer:
                 captcha = await detect_captcha(page)
                 if captcha is not None:
                     gate_passed = await try_pass_gate(
-                        page, wait_seconds=wait_s
+                        page,
+                        wait_seconds=wait_s,
+                        settle_s=self._gate_settle_s,
                     )
                     if not gate_passed:
                         self._record_error(
