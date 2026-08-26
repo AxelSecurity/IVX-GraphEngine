@@ -33,7 +33,7 @@ def _sparse_l4_bundle(**overrides) -> dict:
             "had_unhandled_error": False,
         },
         "evidence_summary": {},
-        "leaf_states": [
+        "states": [
             {
                 "state_id": str(uuid.uuid4()),
                 "url": "https://example.com",
@@ -67,7 +67,7 @@ class TestPrefilterReturnsVerdict:
                 "had_unhandled_error": False,
             },
             "evidence_summary": {},
-            "leaf_states": [
+            "states": [
                 {
                     "state_id": str(uuid.uuid4()),
                     "url": "https://example.com",
@@ -105,7 +105,7 @@ class TestPrefilterReturnsVerdict:
                 "had_unhandled_error": True,
             },
             "evidence_summary": {"unhandled_node_error": 1},
-            "leaf_states": [
+            "states": [
                 {
                     "state_id": str(uuid.uuid4()),
                     "url": "https://example.com",
@@ -142,7 +142,7 @@ class TestPrefilterReturnsVerdict:
                 "unhandled_node_error": 1,
                 "blocked_by_gate": 1,
             },
-            "leaf_states": [],
+            "states": [],
         }
 
         verdict = prefilter(bundle)
@@ -170,7 +170,7 @@ class TestPrefilterReturnsNone:
                 "had_unhandled_error": False,
             },
             "evidence_summary": {},
-            "leaf_states": [
+            "states": [
                 {
                     "state_id": str(uuid.uuid4()),
                     "url": "https://example.com/final",
@@ -210,7 +210,7 @@ class TestPrefilterReturnsNone:
                 "had_unhandled_error": False,
             },
             "evidence_summary": {},
-            "leaf_states": [
+            "states": [
                 {
                     "state_id": str(uuid.uuid4()),
                     "url": "https://example.com",
@@ -233,7 +233,7 @@ class TestPrefilterReturnsNone:
         che rende testo via canvas/immagine) → delegare a Foundry:
         l'OCR è testo visibile a tutti gli effetti."""
         bundle = _sparse_l4_bundle(
-            leaf_states=[
+            states=[
                 {
                     "state_id": str(uuid.uuid4()),
                     "url": "https://example.com/canvas-login",
@@ -268,7 +268,7 @@ class TestPrefilterReturnsNone:
                 "had_unhandled_error": True,
             },
             "evidence_summary": {"unhandled_node_error": 1},
-            "leaf_states": [],
+            "states": [],
         }
 
         verdict = prefilter(bundle)

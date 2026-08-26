@@ -78,22 +78,22 @@ async def _run_classification(
     from graph_engine.classifier.evidence_bundle import build_evidence_bundle
     from graph_engine.classifier.prefilter import prefilter
 
-    # ---- leaf detection (state has no OUTbound transitions) -----------------
-    from_state_ids = {str(t.from_state) for t in transitions}
-    leaf_states = [s for s in states if str(s.id) not in from_state_ids]
-
-    # ---- scrape leaf pages for visible text, titles, form fields ---------
-    leaf_form_fields: dict[str, list[dict]] = {}
-    leaf_visible_text: dict[str, str] = {}
-    leaf_titles: dict[str, str] = {}
+    # ---- per-state content extraction (EVERY graph state) -----------------
+    # Non estraiamo più solo le foglie: ogni stato del grafo finisce nel
+    # bundle, altrimenti una pagina di phishing con una transizione in
+    # uscita (es. un link legittimo "Serve aiuto?") sparirebbe dal
+    # prompt del classificatore.
+    form_fields_by_state: dict[str, list[dict]] = {}
+    visible_text_by_state: dict[str, str] = {}
+    titles_by_state: dict[str, str] = {}
 
     # For the CLI we read DOM snapshots from disk when available;
     # otherwise we leave fields/text empty (still useful with URLs + titles).
-    for s in leaf_states:
+    for s in states:
         sid = str(s.id)
-        leaf_form_fields[sid] = []
-        leaf_visible_text[sid] = ""
-        leaf_titles[sid] = ""
+        form_fields_by_state[sid] = []
+        visible_text_by_state[sid] = ""
+        titles_by_state[sid] = ""
 
         # Try to read DOM snapshot from disk
         if s.har_ref:
@@ -111,8 +111,8 @@ async def _run_classification(
                     title_match = re.search(r'<title[^>]*>(.*?)</title>',
                                             html, re.DOTALL | re.IGNORECASE)
                     if title_match:
-                        leaf_titles[sid] = title_match.group(1).strip()
-                    leaf_visible_text[sid] = _extract_visible_text(html)
+                        titles_by_state[sid] = title_match.group(1).strip()
+                    visible_text_by_state[sid] = _extract_visible_text(html)
 
     # ---- bundle -----------------------------------------------------------
     bundle = await build_evidence_bundle(
@@ -121,9 +121,9 @@ async def _run_classification(
         states=states,
         transitions=transitions,
         evidence=evidence,
-        leaf_form_fields=leaf_form_fields,
-        leaf_visible_text=leaf_visible_text,
-        leaf_titles=leaf_titles,
+        form_fields_by_state=form_fields_by_state,
+        visible_text_by_state=visible_text_by_state,
+        titles_by_state=titles_by_state,
         lexical_risk_score=lexical_risk_score,
         passive_risk_score=passive_risk_score,
     )

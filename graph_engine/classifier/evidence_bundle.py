@@ -42,9 +42,9 @@ async def build_evidence_bundle(
     states: list[State],
     transitions: list[Transition],
     evidence: list[Evidence],
-    leaf_form_fields: dict[str, list[dict]],
-    leaf_visible_text: dict[str, str],
-    leaf_titles: dict[str, str],
+    form_fields_by_state: dict[str, list[dict]],
+    visible_text_by_state: dict[str, str],
+    titles_by_state: dict[str, str],
     lexical_risk_score: Optional[float] = None,
     passive_risk_score: Optional[float] = None,
     analyze_screenshots: bool = True,
@@ -53,17 +53,18 @@ async def build_evidence_bundle(
 
     Parameters
     ----------
-    leaf_form_fields:
-        Mapping ``state_id_str → scan_form_fields()`` result for leaf states.
-    leaf_visible_text:
-        Mapping ``state_id_str → visible_text`` for leaf states (already
-        stripped of script/style/markup, truncated to ~1500 chars).
-    leaf_titles:
-        Mapping ``state_id_str → document.title`` for leaf states.
+    form_fields_by_state:
+        Mapping ``state_id_str → scan_form_fields()`` result — per OGNI
+        stato del grafo (intermedio e terminale).
+    visible_text_by_state:
+        Mapping ``state_id_str → visible_text`` (already stripped of
+        script/style/markup, truncated to ~1500 chars) — per ogni stato.
+    titles_by_state:
+        Mapping ``state_id_str → document.title`` — per ogni stato.
     analyze_screenshots:
-        Se True, per ogni stato foglia con ``screenshot_ref`` viene
-        eseguito l'arricchimento Azure AI Vision (OCR + Brand Detection)
-        e il risultato finisce nei campi ``ocr_text``/``brands`` della
+        Se True, per ogni stato con ``screenshot_ref`` viene eseguito
+        l'arricchimento Azure AI Vision (OCR + Brand Detection) e il
+        risultato finisce nei campi ``ocr_text``/``brands`` della
         entry — MAI fuso con ``visible_text`` (provenienza distinta).
     """
 
@@ -112,25 +113,28 @@ async def build_evidence_bundle(
             )
     bundle["strong_evidence_details"] = strong_details
 
-    # ---- leaf states -------------------------------------------------------
-    leaves: list[dict] = []
-    # A state is a leaf when it has zero OUTbound transitions.
+    # ---- ALL graph states (intermediate + terminal) ------------------------
+    # Ogni stato del grafo finisce nel bundle, NON solo le foglie: una
+    # pagina di phishing con una transizione in uscita (es. un link
+    # legittimo "Serve aiuto?" verso il sito ufficiale) deve restare
+    # visibile al classificatore.  ``is_leaf`` descrive la topologia ma
+    # NON filtra il contenuto.
     from_state_ids = {str(t.from_state) for t in transitions}
-    # Vision (OCR + Brand) sugli screenshot dei leaf: i task partono
-    # TUTTI insieme (gather finale) invece che in sequenza — con N
-    # foglie il costo passa da N×2-4s a ~1×2-4s nel full path.
+    state_entries: list[dict] = []
+    # Vision (OCR + Brand) sugli screenshot: i task partono TUTTI
+    # insieme (gather finale) invece che in sequenza — con N stati il
+    # costo passa da N×2-4s a ~1×2-4s nel full path.
     pending: dict[int, asyncio.Task] = {}
     for s in states:
         sid = str(s.id)
-        if sid in from_state_ids:
-            continue  # has outbound transitions → not a leaf
-        leaf: dict = {
+        entry: dict = {
             "state_id": sid,
             "url": s.url,
             "depth": s.depth,
-            "title": leaf_titles.get(sid, ""),
-            "visible_text": leaf_visible_text.get(sid, ""),
-            "form_fields": leaf_form_fields.get(sid, []),
+            "is_leaf": sid not in from_state_ids,
+            "title": titles_by_state.get(sid, ""),
+            "visible_text": visible_text_by_state.get(sid, ""),
+            "form_fields": form_fields_by_state.get(sid, []),
             # Arricchimento Azure AI Vision — campi SEMPRE presenti
             # (anche vuoti) ma MAI fusi con visible_text: la provenienza
             # del testo resta distinguibile per il modello.
@@ -138,10 +142,10 @@ async def build_evidence_bundle(
             "brands": [],
         }
         if analyze_screenshots and s.screenshot_ref:
-            pending[len(leaves)] = asyncio.create_task(
+            pending[len(state_entries)] = asyncio.create_task(
                 analyze_screenshot(s.screenshot_ref)
             )
-        leaves.append(leaf)
+        state_entries.append(entry)
 
     if pending:
         results = await asyncio.gather(
@@ -149,13 +153,13 @@ async def build_evidence_bundle(
         )
         for idx, result in zip(pending.keys(), results):
             if isinstance(result, BaseException):
-                # Leaf con Vision fallita → campi vuoti (stesso
+                # Stato con Vision fallita → campi vuoti (stesso
                 # comportamento del percorso sequenziale pre-refactor).
                 continue
-            leaves[idx]["ocr_text"] = result.get("ocr_text", "") or ""
-            leaves[idx]["brands"] = result.get("brands", []) or []
+            state_entries[idx]["ocr_text"] = result.get("ocr_text", "") or ""
+            state_entries[idx]["brands"] = result.get("brands", []) or []
 
-    bundle["leaf_states"] = leaves
+    bundle["states"] = state_entries
 
     return bundle
 
@@ -197,14 +201,19 @@ def bundle_to_prompt_text(bundle: dict) -> str:
         lines.append(f"  {key}: {count}")
 
     lines.append("")
-    lines.append("=== LEAF STATE DETAILS ===")
-    for i, leaf in enumerate(bundle.get("leaf_states", []), start=1):
-        lines.append(f"--- Leaf #{i} (depth {leaf['depth']}) ---")
-        lines.append(f"  URL: {leaf['url']}")
-        title = leaf.get("title", "")
+    lines.append("=== STATE DETAILS (every explored state) ===")
+    for i, st in enumerate(bundle.get("states", []), start=1):
+        if st.get("is_leaf"):
+            terminus = "foglia — nessuna ulteriore azione"
+        else:
+            terminus = "proseguito con altre azioni"
+        lines.append(f"--- State #{i} ---")
+        lines.append(f"  Depth: {st['depth']} ({terminus})")
+        lines.append(f"  URL: {st['url']}")
+        title = st.get("title", "")
         if title:
             lines.append(f"  Title: {title}")
-        fields = leaf.get("form_fields", [])
+        fields = st.get("form_fields", [])
         if fields:
             lines.append(f"  Form fields detected ({len(fields)}):")
             for f in fields:
@@ -216,7 +225,7 @@ def bundle_to_prompt_text(bundle: dict) -> str:
                 )
         else:
             lines.append("  Form fields: none")
-        text = leaf.get("visible_text", "")
+        text = st.get("visible_text", "")
         if text:
             lines.append("  Testo visibile nel DOM (truncated):")
             # Indent the visible text for readability
@@ -224,7 +233,7 @@ def bundle_to_prompt_text(bundle: dict) -> str:
                 stripped = tline.strip()
                 if stripped:
                     lines.append(f"    {stripped[:200]}")
-        ocr_text = leaf.get("ocr_text", "")
+        ocr_text = st.get("ocr_text", "")
         if ocr_text:
             # Provenienza DIVERSA dal visible_text: OCR sullo screenshot
             # (cattura anche testo renderizzato via canvas/immagini).
@@ -233,7 +242,7 @@ def bundle_to_prompt_text(bundle: dict) -> str:
                 stripped = tline.strip()
                 if stripped:
                     lines.append(f"    {stripped[:200]}")
-        brands = leaf.get("brands", [])
+        brands = st.get("brands", [])
         if brands:
             lines.append("  Brand rilevati nello screenshot:")
             for brand in brands:

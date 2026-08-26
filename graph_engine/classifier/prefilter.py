@@ -87,24 +87,25 @@ def prefilter(bundle: dict) -> Optional[Verdict]:
         return None
 
     flags = bundle.get("flags", {})
-    leaves = bundle.get("leaf_states", [])
+    graph_states = bundle.get("states", [])
     num_states = bundle.get("num_states", 0)
     transition_kinds = bundle.get("transition_kinds_seen", {})
 
-    # Extract all visible text from leaves: DOM text AND OCR text from
-    # screenshots.  Una pagina che rende testo solo via canvas/immagini
-    # ha visible_text vuoto ma ocr_text non vuoto — NON è "nessun testo
-    # visibile" (il DOM da solo non basta più a giudicare la sparsità).
+    # Extract all visible text from every graph state: DOM text AND OCR
+    # text from screenshots.  Una pagina che rende testo solo via
+    # canvas/immagini ha visible_text vuoto ma ocr_text non vuoto — NON
+    # è "nessun testo visibile" (il DOM da solo non basta più a
+    # giudicare la sparsità).
     all_visible_text = " ".join(
-        (leaf.get("visible_text", "") or "")
+        (st.get("visible_text", "") or "")
         + " "
-        + (leaf.get("ocr_text", "") or "")
-        for leaf in leaves
+        + (st.get("ocr_text", "") or "")
+        for st in graph_states
     ).strip()
 
     # Count total form fields
     total_fields = sum(
-        len(leaf.get("form_fields", [])) for leaf in leaves
+        len(st.get("form_fields", [])) for st in graph_states
     )
 
     # ---- Case 1: single state, no visible content -----------------------

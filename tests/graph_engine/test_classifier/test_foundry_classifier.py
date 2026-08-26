@@ -52,7 +52,7 @@ def _sample_bundle() -> dict:
             "had_unhandled_error": False,
         },
         "evidence_summary": {"blocked_by_gate": 1},
-        "leaf_states": [
+        "states": [
             {
                 "state_id": str(uuid.uuid4()),
                 "url": "https://evil.example/login",
@@ -409,7 +409,7 @@ class TestHeuristicFallback:
         bundle = {
             "target_id": str(uuid.uuid4()),
             "num_states": 1,
-            "leaf_states": [{"form_fields": []}],
+            "states": [{"form_fields": []}],
         }
         verdict = _heuristic_fallback(bundle)
         assert verdict.classification == Classification.suspicious
@@ -421,7 +421,7 @@ class TestHeuristicFallback:
         bundle = {
             "target_id": str(uuid.uuid4()),
             "num_states": 3,
-            "leaf_states": [
+            "states": [
                 {"form_fields": [{"type": "email"}, {"type": "password"}]},
             ],
         }

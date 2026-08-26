@@ -294,8 +294,10 @@ def _heuristic_fallback(bundle: dict) -> Verdict:
     low confidence rather than guessing.
     """
     flags = bundle.get("flags", {})
-    leaves = bundle.get("leaf_states", [])
-    total_fields = sum(len(leaf.get("form_fields", [])) for leaf in leaves)
+    graph_states = bundle.get("states", [])
+    total_fields = sum(
+        len(st.get("form_fields", [])) for st in graph_states
+    )
 
     # If nothing was collected (1 state, no fields, no errors), data is sparse
     if bundle.get("num_states", 0) <= 1 and total_fields == 0:
