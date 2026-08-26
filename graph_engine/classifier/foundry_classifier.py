@@ -188,45 +188,44 @@ async def _call_foundry_agent(
             content=prompt,
         )
 
-        # Attach screenshots as separate messages when supported
-        #
-        # DISABLED pending the real SDK surface: the live service rejects
-        # the current attachment pattern — first "purpose contains an
-        # invalid purpose" (fixed by purpose="assistants"), then
-        # "Attachment must be added to at least one tool" (tools=[] is
-        # not accepted).  Re-enable with the correct attachment API once
-        # the real SDK surface is known.
-        # for sp in screenshot_paths:
-        #     if os.path.isfile(sp):
-        #         # Foundry SDK uses file attachments via message attachments
-        #         # or image_url content blocks.  The exact API depends on the
-        #         # SDK version; we use the file-search / code-interpreter
-        #         # attachment pattern as a reasonable default.
-        #         try:
-        #             with open(sp, "rb") as fh:
-        #                 file_ref = client.files.upload(
-        #                     file=fh,
-        #                     # NOTE: "vision" was rejected by the service on
-        #                     # the live endpoint (invalidPayload: "purpose
-        #                     # contains an invalid purpose") — use the
-        #                     # standard agent-file purpose instead.
-        #                     purpose="assistants",
-        #                 )
-        #             client.messages.create(
-        #                 thread_id=thread_id,
-        #                 role="user",
-        #                 content=(
-        #                     "Screenshot attached for visual context "
-        #                     "during classification."
-        #                 ),
-        #                 attachments=[
-        #                     {"file_id": file_ref.id, "tools": []}
-        #                 ],
-        #             )
-        #         except Exception as exc:
-        #             logger.warning(
-        #                 "Failed to attach screenshot %s: %s", sp, exc
-        #             )
+        # Attach screenshots as image_file CONTENT blocks (vision).
+        # Live-service facts (azure-ai-agents 1.1.0, learned 2026-08-26):
+        #  - upload purpose "vision" is rejected ("purpose contains an
+        #    invalid purpose"); "assistants" is accepted;
+        #  - the attachments=[{"file_id", "tools": []}] pattern is
+        #    rejected ("Attachment must be added to at least one tool");
+        #  - the SDK exposes MessageInputImageFileBlock /
+        #    MessageImageFileParam — the standard vision pattern is an
+        #    image_file content block, not a tool attachment.
+        for sp in screenshot_paths:
+            if os.path.isfile(sp):
+                try:
+                    with open(sp, "rb") as fh:
+                        file_ref = client.files.upload(
+                            file=fh,
+                            purpose="assistants",
+                        )
+                    client.messages.create(
+                        thread_id=thread_id,
+                        role="user",
+                        content=[
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Screenshot attached for visual "
+                                    "context during classification."
+                                ),
+                            },
+                            {
+                                "type": "image_file",
+                                "image_file": {"file_id": file_ref.id},
+                            },
+                        ],
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to attach screenshot %s: %s", sp, exc
+                    )
 
         # Create and wait for the run
         run = client.runs.create_and_process(
