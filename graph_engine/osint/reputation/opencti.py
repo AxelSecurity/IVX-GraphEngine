@@ -8,6 +8,8 @@ senza tentare alcuna chiamata HTTP.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import httpx
 
 from graph_engine.config import settings
@@ -29,7 +31,12 @@ class OpenCtiProvider(ReputationProvider):
         self._base_url = settings.opencti_url or ""
         self._api_key = settings.opencti_api_key or ""
 
-    async def check(self, url: str, client: httpx.AsyncClient) -> dict:
+    async def check(
+        self,
+        url: str,
+        client: httpx.AsyncClient,
+        timeout_s: Optional[float] = None,
+    ) -> dict:
         """Cerca *url* in OpenCTI. Se non configurato, restituisce skipped."""
         if not _is_configured():
             return {
@@ -38,9 +45,14 @@ class OpenCtiProvider(ReputationProvider):
                 "details": {"skipped": "not configured"},
             }
 
-        return await self._search(url, client)
+        return await self._search(url, client, timeout_s)
 
-    async def _search(self, url: str, client: httpx.AsyncClient) -> dict:
+    async def _search(
+        self,
+        url: str,
+        client: httpx.AsyncClient,
+        timeout_s: Optional[float] = None,
+    ) -> dict:
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -69,7 +81,7 @@ class OpenCtiProvider(ReputationProvider):
                     "query": query,
                     "variables": {"search": url},
                 },
-                timeout=OPENCTI_TIMEOUT,
+                timeout=timeout_s if timeout_s is not None else OPENCTI_TIMEOUT,
             )
             response.raise_for_status()
             data = response.json()

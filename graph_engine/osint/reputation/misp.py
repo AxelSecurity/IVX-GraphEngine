@@ -8,6 +8,8 @@ senza tentare alcuna chiamata HTTP.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import httpx
 
 from graph_engine.config import settings
@@ -29,7 +31,12 @@ class MispProvider(ReputationProvider):
         self._base_url = settings.misp_url or ""
         self._api_key = settings.misp_api_key or ""
 
-    async def check(self, url: str, client: httpx.AsyncClient) -> dict:
+    async def check(
+        self,
+        url: str,
+        client: httpx.AsyncClient,
+        timeout_s: Optional[float] = None,
+    ) -> dict:
         """Cerca *url* in MISP. Se non configurato, restituisce skipped."""
         if not _is_configured():
             return {
@@ -38,9 +45,14 @@ class MispProvider(ReputationProvider):
                 "details": {"skipped": "not configured"},
             }
 
-        return await self._search(url, client)
+        return await self._search(url, client, timeout_s)
 
-    async def _search(self, url: str, client: httpx.AsyncClient) -> dict:
+    async def _search(
+        self,
+        url: str,
+        client: httpx.AsyncClient,
+        timeout_s: Optional[float] = None,
+    ) -> dict:
         headers = {
             "Authorization": self._api_key,
             "Accept": "application/json",
@@ -54,7 +66,7 @@ class MispProvider(ReputationProvider):
                     "value": url,
                     "type": "url",
                 },
-                timeout=MISP_TIMEOUT,
+                timeout=timeout_s if timeout_s is not None else MISP_TIMEOUT,
             )
             response.raise_for_status()
             data = response.json()

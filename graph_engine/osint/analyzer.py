@@ -80,9 +80,10 @@ async def analyze(
 
     Args:
         canonical_url: URL normalizzato (output di L0 canonicalize).
-        timeout_s: Timeout HTTP in secondi per crt.sh, RDAP e DNS.
-                   Se ``None``, ogni provider usa il proprio default
-                   (15s, 15s, 5s rispettivamente).
+        timeout_s: Timeout HTTP in secondi per crt.sh, RDAP, DNS e i
+                   reputation provider (MISP/OpenCTI/URLhaus).  Se
+                   ``None``, ogni fonte usa il proprio default
+                   (15s, 15s, 5s, 15s, 15s, 10s rispettivamente).
 
     Returns:
         dict con chiavi:
@@ -105,7 +106,10 @@ async def analyze(
         crtsh_task = query_crtsh(hostname, client, timeout=timeout_s)
         rdap_task = query_rdap(hostname, client, timeout=timeout_s)
         dns_task = resolve_dns(hostname, timeout=timeout_s)
-        rep_tasks = [p.check(canonical_url, client) for p in providers]
+        rep_tasks = [
+            p.check(canonical_url, client, timeout_s=timeout_s)
+            for p in providers
+        ]
 
         all_tasks = [crtsh_task, rdap_task, dns_task] + rep_tasks
         results = await _gather_ignore_exceptions(*all_tasks)

@@ -159,3 +159,96 @@ class TestNetworkBlockedExplicit:
         assert result["details"]["skipped"] == "not configured"
         # Verifica ATTIVA: il client httpx non deve mai essere invocato
         mock_client.post.assert_not_called()
+
+
+class TestMispOpenCtiTimeoutPropagation:
+    """Il ``timeout_s`` dell'analisi (es. ``FAST_L2_TIMEOUT_S=5.0`` nel
+    path Trellix) DEVE raggiungere la chiamata HTTP dei provider
+    configurati: senza, il floor resterebbe ``MISP_TIMEOUT``/
+    ``OPENCTI_TIMEOUT`` = 15s e il fast profile non avrebbe effetto."""
+
+    async def test_misp_timeout_s_passed_to_http_call(self, monkeypatch):
+        from graph_engine.osint.reputation.misp import MISP_TIMEOUT, MispProvider
+
+        monkeypatch.setattr(settings, "misp_url", "https://misp.example")
+        monkeypatch.setattr(settings, "misp_api_key", "test-key")
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"response": {"Attribute": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        provider = MispProvider()
+        await provider.check(
+            "http://timeout-probe.example", mock_client, timeout_s=5.0
+        )
+
+        assert mock_client.post.call_args.kwargs["timeout"] == 5.0
+
+    async def test_misp_default_timeout_without_timeout_s(self, monkeypatch):
+        from graph_engine.osint.reputation.misp import MISP_TIMEOUT, MispProvider
+
+        monkeypatch.setattr(settings, "misp_url", "https://misp.example")
+        monkeypatch.setattr(settings, "misp_api_key", "test-key")
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"response": {"Attribute": []}}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        provider = MispProvider()
+        await provider.check("http://timeout-probe.example", mock_client)
+
+        assert mock_client.post.call_args.kwargs["timeout"] == MISP_TIMEOUT
+
+    async def test_opencti_timeout_s_passed_to_http_call(self, monkeypatch):
+        from graph_engine.osint.reputation.opencti import (
+            OPENCTI_TIMEOUT,
+            OpenCtiProvider,
+        )
+
+        monkeypatch.setattr(settings, "opencti_url", "https://opencti.example")
+        monkeypatch.setattr(settings, "opencti_api_key", "test-key")
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": {"indicators": {"edges": []}}
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        provider = OpenCtiProvider()
+        await provider.check(
+            "http://timeout-probe.example", mock_client, timeout_s=5.0
+        )
+
+        assert mock_client.post.call_args.kwargs["timeout"] == 5.0
+
+    async def test_opencti_default_timeout_without_timeout_s(self, monkeypatch):
+        from graph_engine.osint.reputation.opencti import (
+            OPENCTI_TIMEOUT,
+            OpenCtiProvider,
+        )
+
+        monkeypatch.setattr(settings, "opencti_url", "https://opencti.example")
+        monkeypatch.setattr(settings, "opencti_api_key", "test-key")
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": {"indicators": {"edges": []}}
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        provider = OpenCtiProvider()
+        await provider.check("http://timeout-probe.example", mock_client)
+
+        assert mock_client.post.call_args.kwargs["timeout"] == OPENCTI_TIMEOUT
