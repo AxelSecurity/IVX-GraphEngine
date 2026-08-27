@@ -177,6 +177,10 @@ def build_trellix_router(
         await save_target(target, [], [], [], None, db_path=db_path)
 
         # 4b. Lancia l'analisi in background
+        # Browser condiviso dal lifespan dell'app (app.state.browser_pool):
+        # nessun launch Chromium per richiesta.  Nei test con router
+        # standalone (nessun lifespan eseguito) il getattr dà None e la
+        # pipeline degrada al browser effimero — invariato.
         task = asyncio.create_task(
             run_full_analysis(
                 target_url,
@@ -191,6 +195,7 @@ def build_trellix_router(
                 settle_max_wait_s=FAST_SETTLE_MAX_WAIT_S,
                 page_timeout_ms=FAST_PAGE_TIMEOUT_MS,
                 capture_artifacts=False,
+                browser_pool=getattr(request.app.state, "browser_pool", None),
             )
         )
         task.add_done_callback(_on_task_done)

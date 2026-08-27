@@ -1,7 +1,10 @@
 """Profilo "fast" per il wrapper sincrono compatibile Trellix.
 
-Trellix attende una risposta entro ~60 secondi. Il budget qui sotto
-è dimensionato perché la pipeline L0→L5 termini entro ~45s:
+Il limite di 60s è imposto da Azure Front Door davanti a Trellix
+(policy aziendale, NON modificabile) — il wrapper attende al massimo
+TRELLIX_RESPONSE_TIMEOUT_S (56s) per lasciare margine di costruzione/
+serializzazione della risposta.  Il budget qui sotto è dimensionato
+perché la pipeline L0→L5 termini entro la finestra:
 
     L0+L1 (sync, locali)          ~1s
     L2+L3 (rete, in parallelo)    ≤ 5s  (timeout espliciti)
@@ -9,8 +12,8 @@ Trellix attende una risposta entro ~60 secondi. Il budget qui sotto
                                          ridotto e page timeout 15s)
     L5  (prefilter/fallback)      ~1s
                                 ------
-                                 ~32s < 48s (attesa del wrapper)
-                                 < 60s (deadline Trellix)
+                                 ~32s < 56s (attesa del wrapper)
+                                 < 60s (deadline Front Door)
 
 La classificazione Foundry NON rientra nella garanzia: se configurata
 può sforare la finestra → il wrapper risponde "Analysis-Incomplete"
@@ -68,5 +71,14 @@ FAST_PAGE_TIMEOUT_MS = 15000
 
 # ── Timeout attesa wrapper ────────────────────────────────────────────────
 # L'attesa massima del wrapper Trellix per il completamento del task.
-# 12s di margine sulla deadline di 60s di Trellix.
-TRELLIX_RESPONSE_TIMEOUT_S = 48
+#
+# Il limite di 60s è imposto da Azure Front Door davanti a Trellix:
+# fisso per policy aziendale, NON modificabile.  56s lascia 4s di
+# margine reale per costruzione/serializzazione della risposta e
+# variabilità di rete.
+#
+# La chiamata Foundry NON ha un tetto proprio (decisione esplicita: è
+# il cuore della classificazione, non va troncata artificialmente) —
+# la protezione resta solo quella del wrapper esterno (asyncio.wait
+# con questo timeout in routes_trellix.py), come già oggi.
+TRELLIX_RESPONSE_TIMEOUT_S = 56

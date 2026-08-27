@@ -31,6 +31,7 @@ from typing import Optional
 
 from playwright.async_api import async_playwright
 
+from graph_engine.api.browser_pool import BrowserPool
 from graph_engine.budget import Budget
 from graph_engine.models import (
     AnalysisTarget,
@@ -117,7 +118,7 @@ async def _run_classification(
                         titles_by_state[sid] = title_match.group(1).strip()
                     visible_text_by_state[sid] = _extract_visible_text(html)
 
-    # Bundle
+    # ── Bundle ──────────────────────────────────────────────────────────
     bundle = await build_evidence_bundle(
         target_url=target.input_url,
         canonical_url=target.final_url,
@@ -146,6 +147,70 @@ async def _run_classification(
 
 
 # ---------------------------------------------------------------------------
+# L4 — esecuzione con browser condiviso o effimero
+# ---------------------------------------------------------------------------
+
+
+async def _run_l4_with_browser(
+    browser,
+    *,
+    explorer_holder: list,
+    start_url: str,
+    budget_obj: Budget,
+    capture_artifacts: bool,
+    top_n_actions: int,
+    captcha_wait_s: int,
+    settle_max_wait_s: float,
+    page_timeout_ms: int,
+    profile: Optional[dict],
+    target_id,
+    cloaking_profile: Optional[dict],
+):
+    """Esegue L4 su *browser* (condiviso dal pool o effimero).
+
+    L'istanza ``StateGraphExplorer`` viene registrata in
+    ``explorer_holder`` PRIMA di ``run()``: se l'esplorazione esplode a
+    metà, il chiamante conserva il riferimento e può salvare gli stati
+    parziali (contenimento errori — vincolo del progetto).
+
+    ``StateGraphExplorer.run()`` crea e chiude un ``new_context()``
+    fresco per questa analisi: con il browser del pool, cookie e
+    storage non si mescolano mai tra richieste — solo il processo
+    Chromium sottostante è riusato.
+    """
+    from graph_engine.explorer import StateGraphExplorer
+
+    explorer = StateGraphExplorer(browser, page_timeout_ms=page_timeout_ms)
+    explorer_holder.append(explorer)
+    return await explorer.run(
+        start_url,
+        budget=budget_obj,
+        capture_artifacts=capture_artifacts,
+        top_n_actions=top_n_actions,
+        captcha_wait_s=captcha_wait_s,
+        settle_max_wait_s=settle_max_wait_s,
+        profile=profile,
+        target_id=target_id,
+        cloaking_profile=cloaking_profile,
+    )
+
+
+async def _run_l4_ephemeral(**explorer_kwargs):
+    """L4 con browser effimero: launch + close per singola analisi.
+
+    Usato quando il pool non è disponibile (chiamanti standalone, o
+    pool degradato dopo un crash non rilanciabile).  Il CLI non passa
+    di qui — mantiene il proprio browser single-shot come da sempre.
+    """
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            return await _run_l4_with_browser(browser, **explorer_kwargs)
+        finally:
+            await browser.close()
+
+
+# ---------------------------------------------------------------------------
 # Public API — il runner principale
 # ---------------------------------------------------------------------------
 
@@ -163,6 +228,7 @@ async def run_full_analysis(
     l3_timeout_s: Optional[float] = None,
     settle_max_wait_s: float = 4.0,
     page_timeout_ms: int = 30000,
+    browser_pool: Optional[BrowserPool] = None,
 ) -> str:
     """Esegue la pipeline completa L0→L5 e persiste tutto su SQLite.
 
@@ -192,6 +258,10 @@ async def run_full_analysis(
                            L4 (default: 4.0s; fast path Trellix: 3.0s).
         page_timeout_ms: Timeout di navigazione Playwright in ms
                          (default: 30000; fast path Trellix: 15000).
+        browser_pool: Pool del browser condiviso (app.state.browser_pool
+                      della route).  Se ``None``, L4 usa un browser
+                      effimero per singola analisi (comportamento
+                      storico — CLI e chiamanti standalone).
 
     Returns:
         ``str(target.id)`` — l'UUID dell'analisi persistita.
@@ -215,7 +285,10 @@ async def run_full_analysis(
     transitions: list[Transition] = []
     evidence: list[Evidence] = []
     verdict: Optional[Verdict] = None
-    explorer = None  # inizializzato prima del try per il controllo nell'except
+    # Riceve l'istanza explorer PRIMA di run() (vedi _run_l4_with_browser):
+    # resta raggiungibile nel ramo except anche se l'esplorazione esplode
+    # a metà, così gli stati parziali sopravvivono.
+    explorer_holder: list = []
 
     try:
         # ── L0 ingestion (sync, puro — refang/unwrap/canonicalize) ────────
@@ -246,28 +319,36 @@ async def run_full_analysis(
         budget_obj = budget or Budget()
 
         # ── L4 browser Playwright — SOLO qui ───────────────────────────────
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
-            try:
-                from graph_engine.explorer import StateGraphExplorer
+        # Browser CONDIVISO (pool dell'app, ~5-6s di risparmio per
+        # analisi) quando disponibile: explorer.run() crea un context
+        # fresco per questa analisi (isolamento cookie/storage) e lo
+        # chiude a fine run — il browser del pool NON viene chiuso qui.
+        # Senza pool (o con pool degradato dopo crash) → browser
+        # effimero, comportamento storico.
+        explorer_kwargs = dict(
+            explorer_holder=explorer_holder,
+            start_url=ingested["canonical_url"],
+            budget_obj=budget_obj,
+            capture_artifacts=capture_artifacts,
+            top_n_actions=top_n_actions,
+            captcha_wait_s=captcha_wait_s,
+            settle_max_wait_s=settle_max_wait_s,
+            page_timeout_ms=page_timeout_ms,
+            profile=l3_result["recommended_profile"],
+            target_id=analysis_target.id,
+            cloaking_profile=l3_result.get("cloaking_profile"),
+        )
+        shared_browser = (
+            await browser_pool.acquire() if browser_pool is not None else None
+        )
+        if shared_browser is not None:
+            explored = await _run_l4_with_browser(
+                shared_browser, **explorer_kwargs,
+            )
+        else:
+            explored = await _run_l4_ephemeral(**explorer_kwargs)
 
-                explorer = StateGraphExplorer(
-                    browser, page_timeout_ms=page_timeout_ms
-                )
-                explored = await explorer.run(
-                    ingested["canonical_url"],
-                    budget=budget_obj,
-                    capture_artifacts=capture_artifacts,
-                    top_n_actions=top_n_actions,
-                    captcha_wait_s=captcha_wait_s,
-                    settle_max_wait_s=settle_max_wait_s,
-                    profile=l3_result["recommended_profile"],
-                    target_id=analysis_target.id,
-                    cloaking_profile=l3_result.get("cloaking_profile"),
-                )
-            finally:
-                await browser.close()
-
+        explorer = explorer_holder[0] if explorer_holder else None
         states = explorer.states
         transitions = explorer.transitions
         evidence = explorer.evidence
@@ -372,10 +453,12 @@ async def run_full_analysis(
         partial_transitions: list[Transition] = []
         partial_evidence: list[Evidence] = []
 
-        # Se l'esploratore esiste (l'errore è avvenuto durante o dopo L4),
-        # salviamo tutto ciò che è riuscito a produrre.  Se l'errore è
-        # avvenuto prima (L0/L1/L2/L3), salviamo liste vuote.
-        if explorer is not None:
+        # Se l'esploratore è stato creato (l'errore è avvenuto durante o
+        # dopo L4), salviamo tutto ciò che è riuscito a produrre — anche
+        # se run() stesso è esploso: l'holder viene popolato PRIMA di
+        # run().  Se l'errore è avvenuto prima (L0/L1/L2/L3), liste vuote.
+        if explorer_holder:
+            explorer = explorer_holder[0]
             partial_states = explorer.states
             partial_transitions = explorer.transitions
             partial_evidence = list(explorer.evidence)
