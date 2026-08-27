@@ -59,6 +59,58 @@ uvicorn graph_engine.api.app:app --reload
 I dettagli di ogni livello, gli schemi dati e le decisioni tecniche sono
 documentati in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+## Con Docker (deployment single-node)
+
+Il servizio gira in un container con `docker-compose.yml` — un solo
+servizio, coerentemente con la decisione presa all'inizio del progetto
+(single-node su SQLite, non orchestrato).
+
+```bash
+# 1. Copia la configurazione accanto a docker-compose.yml
+#    (radice del progetto, NON dentro data/):
+cp .env.example .env   # poi valorizza le variabili che ti servono
+
+# 2. Build dell'immagine (installa anche chromium Playwright
+#    e le sue librerie di sistema nello stesso layer)
+docker compose build
+
+# 3. Avvio in background
+docker compose up -d
+
+# 4. Verifica che sia in salute
+curl http://localhost:8000/health
+
+# 5. Log in tempo reale
+docker compose logs -f
+
+# 6. Arresto
+docker compose down   # i dati restano nel volume ./data
+```
+
+Note operative:
+- **Porta configurabile**: `HOST_PORT=8080 docker compose up -d` (default 8000)
+- **Persistenza**: tutto ciò che è prezioso (DB SQLite `graph_engine.db`,
+  artefatti di esplorazione, cache OSINT) vive in `./data`, montato come
+  volume in `/app/data` — sopravvive a riavvii e ricreazioni del container
+- **Utente non-root**: il server non gira mai come root nel container
+- **Un solo worker uvicorn**: SQLite ha un solo scrittore; per più
+  throughput la strada è l'async dentro il singolo processo
+
+### Le due viste sullo stesso dato
+
+L'API espone due endpoint che rispondono sulla **stessa analisi** (stesso
+target, stesso grafo, stesso verdetto in SQLite) — non sono due sistemi
+separati:
+
+| Endpoint | Uso |
+|---|---|
+| `GET /trellix/analyze?url=...` | Risposta **sincrona** compatibile con Trellix IVX (verdetto `safe`/`malicious` entro ~48s; se l'analisi sfora, risponde onestamente `Analysis-Incomplete` e continua in background) |
+| `POST /analyses` + `GET /analyses/{id}` | Avvio asincrono (202 Accepted) e stato dell'analisi |
+| `GET /analyses/{id}/graph` | **Il JSON completo**: target, tutti gli stati del grafo, le transizioni, le evidenze di ogni livello e il verdetto |
+
+Il JSON mostrato dal CLI (`python -m graph_engine.cli <url>`) è lo stesso
+contenuto di `GET /analyses/{id}/graph`.
+
 ## Test
 
 ```bash
