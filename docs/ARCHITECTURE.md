@@ -169,12 +169,30 @@ Il livello L5 trasforma i dati grezzi raccolti durante l'esplorazione L4 in un
 ### Pipeline a due stadi
 
 1. **Prefiltro deterministico** (`graph_engine/classifier/prefilter.py`):
-   intercetta casi banalmente inconclusivi (1 stato senza testo visibile, errore
-   non gestito senza altri segnali) e restituisce direttamente un Verdict
-   `suspicious` a bassa confidenza, senza chiamare il modello. È
-   deliberatamente debole perché L1 (reputazione dominio, età registrazione)
-   e L2 (blacklist, certificate transparency) non esistono ancora — quando
-   saranno costruiti, questo filtro intercetterà molti più casi.
+   due famiglie di intercettazione, senza chiamare il modello.
+
+   a. **Hit MISP con `to_ids=true` → Verdict `phishing` diretto**
+      (regola prioritaria, 2026-08-27). Un valore trovato in un feed
+      MISP con `to_ids=true` è un IOC curato manualmente dagli analisti
+      e destinato agli IDS (es. feed CERT-AGID con tag
+      `campaign-type:phishing`): segnale malevolo VERIFICATO. La
+      regola scatta prima di ogni altra e non delega al modello —
+      una landing decoy o in errore non deve mai prevalere su un IOC
+      curato (caso reale 2026-08-27: `s.kemkes.go.id/ejuiaer`, short
+      link di phishing con 4 eventi MISP to_ids — Foundry lo aveva
+      classificato `benign` perché L4 vedeva solo la pagina d'errore
+      della SPA). Confidenza modulata: match su URL/hostname → 0.95;
+      match solo su dominio registrabile/IP (infrastruttura) → 0.85.
+      Il brand impersonato viene estratto dai tag `phishing-name:*`.
+
+   b. **Casi banalmente inconclusivi** (1 stato senza testo visibile,
+      errore non gestito senza altri segnali) → Verdict `suspicious` a
+      confidenza minima (0.05).
+
+   Per tutto il resto il prefilter restituisce `None`: L1/L2/L3 con
+   segnale reale non vengono MAI intercettati come "dati insufficienti"
+   (bug 2026-08: un dominio di phishing live con `passive_risk_score`
+   alto veniva short-circuited) — in quei casi decide Foundry.
 
 2. **Classificatore Foundry** (`graph_engine/classifier/foundry_classifier.py`):
    chiama un Azure AI Foundry Agent con un *evidence bundle* compatto. Il

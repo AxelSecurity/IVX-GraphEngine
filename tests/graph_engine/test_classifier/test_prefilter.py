@@ -1,4 +1,11 @@
-"""Tests for deterministic prefilter — must only intercept trivially bad cases."""
+"""Tests for deterministic prefilter.
+
+Due famiglie di intercettazioni:
+1. MISP ``reputation_hit`` con ``to_ids_match=True`` → phishing deterministico
+   (IOC curato dagli analisti: decide SENZA il modello).
+2. Casi banalmente inconclusivi (L4 sparsa e nessun segnale) → suspicious
+   a confidenza minima.
+"""
 
 from __future__ import annotations
 
@@ -357,3 +364,158 @@ class TestPrefilterStrongSignals:
         assert verdict is not None
         assert verdict.produced_by == "prefilter"
         assert verdict.classification == Classification.suspicious
+
+
+# ---------------------------------------------------------------------------
+# MISP to_ids rule — verified malicious IOC decides WITHOUT the model
+# ---------------------------------------------------------------------------
+
+# Details reali prodotti dal provider MISP (stessa forma del caso
+# s.kemkes.go.id/ejuiaer del 2026-08-27: 4 eventi CERT-AGID con match
+# su domain+url).
+_MISP_IDS_HIT = {
+    "match_count": 4,
+    "matched_types": ["domain", "url"],
+    "tags": [
+        "CERT-AGID",
+        "attack-method:linked",
+        "campaign-type:phishing",
+        "country-target:generic",
+        "country-target:italy",
+        "phishing-name:Amazon",
+        "phishing-name:Netflix",
+        "theme:Account sospeso",
+        "theme:Aggiornamenti",
+        "theme:Verifica",
+        "tlp:green",
+        "via:email",
+    ],
+    "event_count": 4,
+    "to_ids_match": True,
+    "context_only": False,
+}
+
+
+class TestMispIdsHitIntercepts:
+    """Hit MISP con to_ids=true → phishing deterministico dal prefilter."""
+
+    def test_to_ids_hit_returns_phishing_verdict(self):
+        """Match su url+domain → phishing conf 0.95, brand dai tag
+        phishing-name, rationale con i tag informativi (tlp:* escluso)."""
+        bundle = _sparse_l4_bundle(
+            canonical_url="https://s.kemkes.go.id/ejuiaer",
+            passive_risk_score=0.55,
+            evidence_summary={"reputation_hit": 1},
+            strong_evidence_details={"reputation_hit": [_MISP_IDS_HIT]},
+        )
+
+        verdict = prefilter(bundle)
+        assert verdict is not None
+        assert verdict.classification == Classification.phishing
+        assert verdict.produced_by == "prefilter"
+        assert verdict.confidence == 0.95, (
+            f"Match sull'URL completo → confidenza massima, got "
+            f"{verdict.confidence}"
+        )
+        assert verdict.brand == "Amazon, Netflix"
+        assert "to_ids=true" in verdict.rationale
+        assert "campaign-type:phishing" in verdict.rationale
+        assert "CERT-AGID" in verdict.rationale
+        assert "tlp:green" not in verdict.rationale, (
+            "I tag trasporto/amministrativi non vanno nel rationale"
+        )
+        assert verdict.final_url == "https://s.kemkes.go.id/ejuiaer"
+
+    def test_infra_only_match_lower_confidence(self):
+        """Match solo su domain/ip-dst (infrastruttura, non URL esatto)
+        → phishing comunque, ma confidenza 0.85."""
+        hit = dict(_MISP_IDS_HIT, matched_types=["domain", "ip-dst"])
+        bundle = _sparse_l4_bundle(
+            passive_risk_score=0.55,
+            strong_evidence_details={"reputation_hit": [hit]},
+        )
+
+        verdict = prefilter(bundle)
+        assert verdict is not None
+        assert verdict.classification == Classification.phishing
+        assert verdict.produced_by == "prefilter"
+        assert verdict.confidence == 0.85
+
+    def test_to_ids_hit_from_json_string_value(self):
+        """Il bundle reale coerce il valore Evidence da stringa JSON →
+        la regola deve funzionare anche con la stringa serializzata."""
+        import json
+
+        bundle = _sparse_l4_bundle(
+            strong_evidence_details={
+                "reputation_hit": [json.dumps(_MISP_IDS_HIT)],
+            },
+        )
+
+        verdict = prefilter(bundle)
+        assert verdict is not None
+        assert verdict.classification == Classification.phishing
+        assert verdict.produced_by == "prefilter"
+
+    def test_misp_rule_wins_over_strong_signal_delegation(self):
+        """Caso reale kemkes: L4 sparsa + passive alto + reputation_hit.
+        Prima della regola MISP → None (delega a Foundry, che diceva
+        benign). ORA → phishing diretto."""
+        bundle = _sparse_l4_bundle(
+            passive_risk_score=0.55,
+            evidence_summary={"reputation_hit": 1},
+            strong_evidence_details={"reputation_hit": [_MISP_IDS_HIT]},
+        )
+
+        verdict = prefilter(bundle)
+        assert verdict is not None, (
+            "La regola MISP è PRIORITARIA sulla delega per segnale forte"
+        )
+        assert verdict.classification == Classification.phishing
+        assert verdict.produced_by == "prefilter"
+
+    def test_non_misp_reputation_hit_still_delegates(self):
+        """Hit di un feed NON MISP (es. URLhaus: details senza
+        to_ids_match) → delega a Foundry come prima."""
+        bundle = _sparse_l4_bundle(
+            passive_risk_score=0.5,
+            evidence_summary={"reputation_hit": 1},
+            strong_evidence_details={
+                "reputation_hit": [
+                    {"url": "https://example.com", "threat": "malware_download"}
+                ]
+            },
+        )
+
+        assert prefilter(bundle) is None, (
+            "Senza to_ids_match il reputation_hit resta 'segnale da "
+            "aggregare': decide Foundry"
+        )
+
+    def test_context_only_match_does_not_intercept(self):
+        """Details con to_ids_match=False (solo contesto informativo)
+        → MAI un Verdict phishing dal prefilter."""
+        hit = dict(_MISP_IDS_HIT, to_ids_match=False, context_only=True)
+        bundle = _sparse_l4_bundle(
+            passive_risk_score=0.0,
+            strong_evidence_details={"reputation_hit": [hit]},
+        )
+
+        verdict = prefilter(bundle)
+        # Senza altri segnali forti e con L4 sparsa → caso inconclusivo
+        # (suspicious a bassa confidenza), NON phishing.
+        if verdict is not None:
+            assert verdict.classification == Classification.suspicious
+
+    def test_no_reputation_hit_unaffected(self):
+        """Nessun reputation_hit → il comportamento esistente resta
+        identico (nessun Verdict spurio)."""
+        bundle = _sparse_l4_bundle(
+            passive_risk_score=0.55,
+            strong_evidence_details={
+                "typosquat": [{"domain": "rnnovospid.cc", "brand": "Aruba",
+                               "distance": 1}],
+            },
+        )
+
+        assert prefilter(bundle) is None

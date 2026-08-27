@@ -62,7 +62,7 @@ Tutti modelli Pydantic v2 con `from __future__ import annotations`:
 | `classifier/__init__.py` | 1 | Marker: "L5 — Classification layer" |
 | `classifier/form_inventory.py` | 110 | `scan_form_fields(page)` — scansione passiva sola lettura via JS; enumera `{tag, type, name_or_id, nearby_label_text}` per input/select/textarea visibili; esclude hidden/submit/button/checkbox/radio/file |
 | `classifier/evidence_bundle.py` | 156 | `build_evidence_bundle(...)` — dict semplice (NON Pydantic); `bundle_to_prompt_text(bundle)` — sezioni testuali etichettate, deliberatamente non JSON |
-| `classifier/prefilter.py` | 88 | `prefilter(bundle)` → Verdict o None; intercetta solo casi banalmente inconclusivi; restituisce `suspicious` conf 0.05, `produced_by="prefilter"` |
+| `classifier/prefilter.py` | 196 | `prefilter(bundle)` → Verdict o None; hit MISP `to_ids=true` → `phishing` deterministico (conf 0.85/0.95, regola prioritaria); casi banalmente inconclusivi → `suspicious` conf 0.05; altrimenti None (delega a Foundry) |
 | `classifier/foundry_classifier.py` | 315 | `classify(bundle)` → Verdict; richiede env `AZURE_FOUNDRY_ENDPOINT` e `AZURE_FOUNDRY_AGENT_ID`; fallback `_heuristic_fallback` se non configurato. **Nessun allegato immagine**: il contenuto visivo arriva come TESTO nel bundle via Azure AI Vision (il modello gpt-5-mini non supporta immagini). Auth: `ClientSecretCredential` se service principal completo, altrimenti `DefaultAzureCredential` |
 | `classifier/system_prompt.txt` | 55 | System prompt per l'agente Foundry |
 
@@ -81,7 +81,10 @@ Tutti modelli Pydantic v2 con `from __future__ import annotations`:
 
 ### Pipeline L5 a due stadi
 
-1. **`prefilter()`** — deterministico, deliberatamente debole (L1/L2 non ancora implementati): intercetta solo "1 stato + nessun testo visibile" e "errore non gestito + nessun altro segnale"
+1. **`prefilter()`** — deterministico. Due famiglie di intercettazione:
+   - **Hit MISP con `to_ids=true` → Verdict `phishing` DIRETTO** (regola prioritaria, 2026-08-27): IOC curato manualmente dagli analisti e destinato agli IDS (es. feed CERT-AGID) = segnale malevolo verificato; decide SENZA il modello e una landing decoy/in errore non lo indebolisce. Confidenza 0.95 (match su URL/hostname) o 0.85 (solo dominio/IP); brand estratto dai tag `phishing-name:*`.
+   - **Casi banalmente inconclusivi** ("1 stato + nessun testo visibile", "errore non gestito + nessun altro segnale") → `suspicious` conf 0.05.
+   - Per il resto `None`: L1/L2/L3 con segnale reale NON vengono mai intercettati come "dati insufficienti".
 2. **`classify()`** → Foundry Agent (Azure AI Projects SDK) — solo se il prefilter restituisce None
 
 ## Vincoli NON NEGOZIABILI
@@ -144,6 +147,6 @@ Solo per `--classify`:
 - Il progetto non ha remote git configurato; branch `main`, ~22 commit
 - `data/graph_artifacts/` è gitignorato — sono artefatti di runtime locali
 - La persistenza SQLite (aiosqlite) è pianificata ma non ancora implementata
-- I layer L1 (reputazione dominio, TLD risk) e L2 (blacklist, certificate transparency) sono lavori futuri che rafforzeranno il prefilter
+- I layer L1 (reputazione dominio, TLD risk) e L2 (blacklist, certificate transparency) sono stati implementati; nuove fonti potranno aggiungere ulteriori regole al prefilter
 - Evidenze di errore prodotte dall'explorer hanno `produced_by="StateGraphExplorer"`
 - L'integrazione con IntelIVX avviene via HTTP/code, MAI tramite import diretto
