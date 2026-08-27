@@ -519,3 +519,153 @@ class TestMispIdsHitIntercepts:
         )
 
         assert prefilter(bundle) is None
+
+
+# ---------------------------------------------------------------------------
+# OpenCTI active-IOC rule — stesso trattamento deterministico del MISP
+# ---------------------------------------------------------------------------
+
+# Details reali prodotti dal provider OpenCTI (stessa forma del riepilogo
+# di ``_summarise``: osservabile con un Indicator attivo).
+_OPENCTI_ACTIVE_HIT = {
+    "match_count": 1,
+    "matched_types": ["Url"],
+    "active_indicator_count": 1,
+    "total_indicator_count": 1,
+    "labels": ["phishing"],
+    "markings": ["TLP:AMBER"],
+    "created_by": ["CERT-AGID"],
+    "score_min": 85,
+    "score_max": 85,
+    "score_avg": 85.0,
+    "active_ioc_match": True,
+    "context_only": False,
+}
+
+
+class TestOpenCtiActiveHitIntercepts:
+    """Hit OpenCTI con IOC attivo → phishing deterministico dal prefilter."""
+
+    def test_active_ioc_hit_returns_phishing_verdict(self):
+        """Match su osservabile Url → phishing conf 0.95, rationale con
+        label/marcatura/score, brand None (nessuna convenzione
+        phishing-name affidabile su OpenCTI)."""
+        bundle = _sparse_l4_bundle(
+            canonical_url="https://login.inps.gov.it/pagamento",
+            passive_risk_score=0.55,
+            evidence_summary={"reputation_hit": 1},
+            strong_evidence_details={"reputation_hit": [_OPENCTI_ACTIVE_HIT]},
+        )
+
+        verdict = prefilter(bundle)
+        assert verdict is not None
+        assert verdict.classification == Classification.phishing
+        assert verdict.produced_by == "prefilter"
+        assert verdict.confidence == 0.95, (
+            f"Match sull'osservabile Url → confidenza massima, got "
+            f"{verdict.confidence}"
+        )
+        assert verdict.brand is None
+        assert "OpenCTI" in verdict.rationale
+        assert "phishing" in verdict.rationale
+        assert "TLP:AMBER" in verdict.rationale
+        assert "Score medio: 85.0" in verdict.rationale
+        assert verdict.final_url == "https://login.inps.gov.it/pagamento"
+
+    def test_infra_only_match_lower_confidence(self):
+        """Match solo su Domain-Name/IP (infrastruttura, non URL esatto)
+        → phishing comunque, ma confidenza 0.85."""
+        hit = dict(_OPENCTI_ACTIVE_HIT, matched_types=["Domain-Name", "IPv4-Addr"])
+        bundle = _sparse_l4_bundle(
+            passive_risk_score=0.55,
+            strong_evidence_details={"reputation_hit": [hit]},
+        )
+
+        verdict = prefilter(bundle)
+        assert verdict is not None
+        assert verdict.classification == Classification.phishing
+        assert verdict.produced_by == "prefilter"
+        assert verdict.confidence == 0.85
+
+    def test_active_ioc_hit_from_json_string_value(self):
+        """Il valore serializzato come stringa JSON non deve far saltare
+        la regola di sicurezza (stessa robustezza della regola MISP)."""
+        import json
+
+        bundle = _sparse_l4_bundle(
+            strong_evidence_details={
+                "reputation_hit": [json.dumps(_OPENCTI_ACTIVE_HIT)],
+            },
+        )
+
+        verdict = prefilter(bundle)
+        assert verdict is not None
+        assert verdict.classification == Classification.phishing
+        assert verdict.produced_by == "prefilter"
+
+    def test_opencti_rule_wins_over_strong_signal_delegation(self):
+        """L4 sparsa + passive alto + hit OpenCTI attivo → phishing
+        diretto, NON delega a Foundry."""
+        bundle = _sparse_l4_bundle(
+            passive_risk_score=0.55,
+            evidence_summary={"reputation_hit": 1},
+            strong_evidence_details={"reputation_hit": [_OPENCTI_ACTIVE_HIT]},
+        )
+
+        verdict = prefilter(bundle)
+        assert verdict is not None, (
+            "La regola OpenCTI è PRIORITARIA sulla delega per segnale forte"
+        )
+        assert verdict.classification == Classification.phishing
+        assert verdict.produced_by == "prefilter"
+
+    def test_context_only_match_does_not_intercept(self):
+        """Osservabile senza IOC attivo (revoked/scaduto) → MAI un Verdict
+        phishing dal prefilter."""
+        hit = dict(_OPENCTI_ACTIVE_HIT, active_ioc_match=False, context_only=True)
+        bundle = _sparse_l4_bundle(
+            passive_risk_score=0.0,
+            strong_evidence_details={"reputation_hit": [hit]},
+        )
+
+        verdict = prefilter(bundle)
+        # Senza altri segnali forti e con L4 sparsa → caso inconclusivo
+        # (suspicious a bassa confidenza), NON phishing.
+        if verdict is not None:
+            assert verdict.classification == Classification.suspicious
+
+    def test_opencti_hit_without_active_marker_still_delegates(self):
+        """Details OpenCTI senza ``active_ioc_match`` → resta segnale da
+        aggregare: decide Foundry."""
+        bundle = _sparse_l4_bundle(
+            passive_risk_score=0.5,
+            evidence_summary={"reputation_hit": 1},
+            strong_evidence_details={
+                "reputation_hit": [
+                    {"match_count": 1, "matched_types": ["Url"]}
+                ]
+            },
+        )
+
+        assert prefilter(bundle) is None, (
+            "Senza active_ioc_match il reputation_hit resta 'segnale da "
+            "aggregare': decide Foundry"
+        )
+
+    def test_misp_rule_wins_over_opencti_when_both_hit(self):
+        """Entrambi i feed colpiscono → vince il Verdict MISP (curatela
+        IDS + estrazione brand dai tag phishing-name)."""
+        bundle = _sparse_l4_bundle(
+            passive_risk_score=0.55,
+            evidence_summary={"reputation_hit": 2},
+            strong_evidence_details={
+                "reputation_hit": [_OPENCTI_ACTIVE_HIT, _MISP_IDS_HIT],
+            },
+        )
+
+        verdict = prefilter(bundle)
+        assert verdict is not None
+        assert verdict.classification == Classification.phishing
+        assert verdict.brand == "Amazon, Netflix", (
+            "Con entrambi i feed vince il Verdict MISP (brand dai tag)"
+        )

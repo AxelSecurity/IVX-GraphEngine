@@ -171,19 +171,24 @@ Il livello L5 trasforma i dati grezzi raccolti durante l'esplorazione L4 in un
 1. **Prefiltro deterministico** (`graph_engine/classifier/prefilter.py`):
    due famiglie di intercettazione, senza chiamare il modello.
 
-   a. **Hit MISP con `to_ids=true` → Verdict `phishing` diretto**
-      (regola prioritaria, 2026-08-27). Un valore trovato in un feed
-      MISP con `to_ids=true` è un IOC curato manualmente dagli analisti
-      e destinato agli IDS (es. feed CERT-AGID con tag
-      `campaign-type:phishing`): segnale malevolo VERIFICATO. La
-      regola scatta prima di ogni altra e non delega al modello —
-      una landing decoy o in errore non deve mai prevalere su un IOC
-      curato (caso reale 2026-08-27: `s.kemkes.go.id/ejuiaer`, short
-      link di phishing con 4 eventi MISP to_ids — Foundry lo aveva
-      classificato `benign` perché L4 vedeva solo la pagina d'errore
-      della SPA). Confidenza modulata: match su URL/hostname → 0.95;
-      match solo su dominio registrabile/IP (infrastruttura) → 0.85.
-      Il brand impersonato viene estratto dai tag `phishing-name:*`.
+   a. **Hit IOC verificato (MISP `to_ids=true` o OpenCTI attivo) →
+      Verdict `phishing` diretto** (regola prioritaria, 2026-08-27).
+      Un valore trovato in un feed MISP con `to_ids=true` è un IOC
+      curato manualmente dagli analisti e destinato agli IDS (es.
+      feed CERT-AGID con tag `campaign-type:phishing`); un osservabile
+      OpenCTI con almeno un Indicator correlato ATTIVO (non revoked,
+      non scaduto) è un IOC sulla piattaforma di threat intel. In
+      entrambi i casi è segnale malevolo VERIFICATO. La regola scatta
+      prima di ogni altra e non delega al modello — una landing decoy
+      o in errore non deve mai prevalere su un IOC curato (caso reale
+      2026-08-27: `s.kemkes.go.id/ejuiaer`, short link di phishing con
+      4 eventi MISP to_ids — Foundry lo aveva classificato `benign`
+      perché L4 vedeva solo la pagina d'errore della SPA). Confidenza
+      modulata: match su URL/hostname → 0.95; match solo su dominio
+      registrabile/IP (infrastruttura) → 0.85. Il brand impersonato
+      viene estratto dai tag `phishing-name:*` (solo MISP — i label
+      OpenCTI non seguono quella convenzione, brand resta `None`).
+      Quando entrambi i feed colpiscono vince il Verdict MISP.
 
    b. **Casi banalmente inconclusivi** (1 stato senza testo visibile,
       errore non gestito senza altri segnali) → Verdict `suspicious` a
@@ -373,6 +378,35 @@ equiparato tra i due valori:
   contesto informativo, mai un hit (principio: mai penalizzare per
   segnale debole).
 
+#### OpenCTI — osservabili GraphQL e semantica IOC-attivo
+
+Il provider OpenCTI interroga `POST /graphql` (auth `Bearer <API key>`,
+come il client ufficiale `pycti`) con una **sola** query
+`stixCyberObservables` che cerca i valori candidati (stesso modulo
+condiviso `_search_values.py` usato da MISP: URL, hostname, dominio
+registrabile, IP) come **confronti esatti**: un filtro
+`{ key: ["value"], values: [x], operator: eq }` per candidato,
+combinati con `FilterGroup` `mode: or`. Forma verificata contro la
+documentazione ufficiale (docs.opencti.io) e il sorgente
+`OpenCTI-Platform/opencti`. Il search full-text `search:` è
+deliberatamente NON usato per la decisione: è una query_string Lucene
+con wildcard trailing implicita — un match per prefisso
+(`example.com` → `example.com.evil.net`) non è un IOC verificato.
+
+La risposta viene riassunta in forma compatta (mai payload grezzo):
+`match_count`, `matched_types` (entity_type STIX), conteggi indicatori,
+`labels`, `markings` (TLP), `created_by`, score min/max/medio. La
+semantica è "IOC-attivo", perché su OpenCTI qualsiasi organizzazione
+può pubblicare:
+
+- Osservabile con ≥1 Indicator correlato ATTIVO (non `revoked`, con
+  `valid_until` non superato) → `listed=True` con
+  `active_ioc_match=True`: hit reale, decide il prefilter.
+- Osservabile senza Indicator attivo (nessuno, tutti revoked o tutti
+  scaduti) → `listed=False` ma `details.context_only=True`: contesto
+  informativo, mai un hit. Un `valid_until` illeggibile rende
+  l'indicatore NON attivo (conservativo).
+
 ### Segnali estratti
 
 - **Domini fratelli di campagna** (`sibling_domains`): dalla SAN list
@@ -387,13 +421,14 @@ equiparato tra i due valori:
 
 - **Reputation hit** (`reputation_hit`): URL presente in un feed di
   minacce (es. URLhaus). Peso 0.50 — sale a **0.55** quando il match
-  è MISP con `to_ids=true` (fonte curata manualmente, leggermente più
-  affidabile di un feed automatizzato).
+  è MISP con `to_ids=true` o OpenCTI con IOC attivo (fonti con IOC
+  verificato, leggermente più affidabili di un feed automatizzato).
 
-- **MISP context match** (`misp_context_match`): match MISP con SOLO
-  `to_ids=false`. Peso 0.0 (informativa): l'IOC esiste ma non è un
-  flag per gli IDS — mai penalizzare per segnale debole. L'evidenza
-  resta comunque nel bundle per il classificatore.
+- **Context match informativo** (`<provider>_context_match`): match
+  MISP con SOLO `to_ids=false`, oppure osservabile OpenCTI senza
+  Indicator attivo. Peso 0.0 (informativa): l'IOC esiste ma non è un
+  flag attivo — mai penalizzare per segnale debole. L'evidenza resta
+  comunque nel bundle per il classificatore.
 
 - **Record A** (`dns_a_records`): indirizzi IPv4 risolti per il dominio.
   Peso 0.0 (informativo). Colma una lacuna IOC: gli IP servono ai
@@ -416,6 +451,7 @@ equiparato tra i due valori:
 | `_W_SIBLING_DOMAINS` | 0.30 | Presenza domini fratelli nella SAN list |
 | `_W_REPUTATION_HIT` | 0.50 | URL presente in feed di minacce (URLhaus, ecc.) |
 | `_W_MISP_IDS_HIT` | 0.55 | Hit MISP con `to_ids=true` — feed curato manualmente |
+| `_W_OPENCTI_ACTIVE_HIT` | 0.55 | IOC attivo su OpenCTI (non revoked, non scaduto) |
 
 Il punteggio è clampato a [0, 1]. **MAI** penalizzare per l'assenza di
 segnale — solo per la presenza.
@@ -475,7 +511,8 @@ graph_engine/osint/
         base.py          — ReputationProvider (ABC, con known_ips)
         urlhaus.py       — URLhaus (richiede Auth-Key)
         misp.py           — MISP: restSearch multi-tipo + includeContext
-        opencti.py        — OpenCTI adapter (disabilitato di default)
+        opencti.py        — OpenCTI: stixCyberObservables eq + IOC-attivo
+        _search_values.py — valori candidati condivisi (MISP/OpenCTI)
         registry.py       — get_enabled_providers()
 ```
 

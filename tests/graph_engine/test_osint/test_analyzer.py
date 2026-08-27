@@ -747,3 +747,134 @@ class TestMispWeighting:
         ]
         # Dominio vecchio → unico segnale possibile era MISP: score 0
         assert result["passive_risk_score"] == 0.0
+
+
+class TestOpenCtiWeighting:
+    """La ponderazione OpenCTI nel risk score: IOC attivo (non revoked,
+    non scaduto) pesa 0.55 come il MISP to_ids; match context-only
+    (osservabile senza Indicator attivo) pesa 0.0 ma resta visibile
+    come evidenza informativa ``opencti_context_match``.
+
+    OpenCTI è l'unico provider abilitato (MISP e URLhaus non
+    configurati) e le altre fonti sono patchate a valori neutri.
+    """
+
+    _CRTSH_CLEAN = {
+        "sibling_domains": [], "truncated": False, "total_siblings": 0,
+        "newest_cert_days": None, "oldest_cert_days": None, "total_certs": 0,
+    }
+    _RDAP_OLD = {"domain_age_days": 365, "registrar": "R", "nameservers": []}
+    _DNS_CLEAN = {"a_records": ["1.2.3.4"], "aaaa_records": [], "error": None}
+
+    @staticmethod
+    def _patch_neutral_sources():
+        """crt.sh/RDAP/DNS patchati a risultati senza segnale."""
+        return [
+            patch(
+                "graph_engine.osint.analyzer.query_crtsh",
+                new_callable=AsyncMock,
+                return_value=TestOpenCtiWeighting._CRTSH_CLEAN,
+            ),
+            patch(
+                "graph_engine.osint.analyzer.query_rdap",
+                new_callable=AsyncMock,
+                return_value=TestOpenCtiWeighting._RDAP_OLD,
+            ),
+            patch(
+                "graph_engine.osint.analyzer.resolve_dns",
+                new_callable=AsyncMock,
+                return_value=TestOpenCtiWeighting._DNS_CLEAN,
+            ),
+        ]
+
+    async def test_active_ioc_hit_weights_high(self, monkeypatch):
+        """Hit OpenCTI con IOC attivo → reputation_hit a peso 0.55
+        (come il MISP to_ids: segnale malevolo verificato)."""
+        monkeypatch.setattr(settings, "opencti_url", "https://opencti.example")
+        monkeypatch.setattr(settings, "opencti_api_key", "test-key")
+
+        opencti_hit = {
+            "provider": "opencti",
+            "listed": True,
+            "details": {
+                "match_count": 1,
+                "matched_types": ["Url"],
+                "active_indicator_count": 1,
+                "total_indicator_count": 1,
+                "labels": ["phishing"],
+                "markings": ["TLP:AMBER"],
+                "created_by": ["CERT-AGID"],
+                "score_min": 85,
+                "score_max": 85,
+                "score_avg": 85.0,
+                "active_ioc_match": True,
+                "context_only": False,
+            },
+        }
+
+        with ExitStack() as stack:
+            for pm in self._patch_neutral_sources():
+                stack.enter_context(pm)
+            stack.enter_context(patch(
+                "graph_engine.osint.reputation.opencti.OpenCtiProvider.check",
+                new_callable=AsyncMock,
+                return_value=opencti_hit,
+            ))
+            result = await analyze("https://evil.example.com/login")
+
+        hit_ev = [e for e in result["evidence"] if e["key"] == "reputation_hit"]
+        assert len(hit_ev) == 1
+        assert hit_ev[0]["weight"] == 0.55
+        assert result["passive_risk_score"] == 0.55
+
+    async def test_context_only_match_zero_weight(self, monkeypatch):
+        """Osservabile OpenCTI senza IOC attivo → evidenza
+        ``opencti_context_match`` informativa a peso 0.0: nessuna
+        penalizzazione e NESSUNA chiave misp_context_match spuria."""
+        monkeypatch.setattr(settings, "opencti_url", "https://opencti.example")
+        monkeypatch.setattr(settings, "opencti_api_key", "test-key")
+
+        opencti_context = {
+            "provider": "opencti",
+            "listed": False,
+            "details": {
+                "match_count": 1,
+                "matched_types": ["Domain-Name"],
+                "active_indicator_count": 0,
+                "total_indicator_count": 1,
+                "labels": [],
+                "markings": [],
+                "created_by": ["Sconosciuti"],
+                "score_min": None,
+                "score_max": None,
+                "score_avg": None,
+                "active_ioc_match": False,
+                "context_only": True,
+            },
+        }
+
+        with ExitStack() as stack:
+            for pm in self._patch_neutral_sources():
+                stack.enter_context(pm)
+            stack.enter_context(patch(
+                "graph_engine.osint.reputation.opencti.OpenCtiProvider.check",
+                new_callable=AsyncMock,
+                return_value=opencti_context,
+            ))
+            result = await analyze("https://evil.example.com/login")
+
+        ctx_ev = [
+            e for e in result["evidence"]
+            if e["key"] == "opencti_context_match"
+        ]
+        assert len(ctx_ev) == 1
+        assert ctx_ev[0]["weight"] == 0.0
+        # Nessuna reputation_hit: un context_only NON è un hit
+        assert not [
+            e for e in result["evidence"] if e["key"] == "reputation_hit"
+        ]
+        # La chiave MISP non deve comparire per un match OpenCTI
+        assert not [
+            e for e in result["evidence"] if e["key"] == "misp_context_match"
+        ]
+        assert result["passive_risk_score"] == 0.0

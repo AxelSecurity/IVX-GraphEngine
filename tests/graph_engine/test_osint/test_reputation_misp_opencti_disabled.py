@@ -216,7 +216,7 @@ class TestMispOpenCtiTimeoutPropagation:
 
         mock_response = MagicMock()
         mock_response.json.return_value = {
-            "data": {"indicators": {"edges": []}}
+            "data": {"stixCyberObservables": {"edges": []}}
         }
         mock_response.raise_for_status = MagicMock()
 
@@ -241,7 +241,7 @@ class TestMispOpenCtiTimeoutPropagation:
 
         mock_response = MagicMock()
         mock_response.json.return_value = {
-            "data": {"indicators": {"edges": []}}
+            "data": {"stixCyberObservables": {"edges": []}}
         }
         mock_response.raise_for_status = MagicMock()
 

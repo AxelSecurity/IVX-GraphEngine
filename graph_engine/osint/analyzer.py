@@ -38,6 +38,9 @@ _W_REPUTATION_HIT = 0.50       # URL presente in un feed di minacce (peso alto)
 _W_MISP_IDS_HIT = 0.55         # hit MISP con to_ids=true — feed curato
                                # manualmente dagli analisti, vale
                                # leggermente più di un feed automatizzato
+_W_OPENCTI_ACTIVE_HIT = 0.55   # IOC attivo su OpenCTI (non revoked, non
+                               # scaduto) — stessa decisione deterministica
+                               # del MISP to_ids: segnale malevolo verificato
 
 # Soglie età dominio
 _AGE_YOUNG_DAYS = 30     # sotto questa soglia → young (molto sospetto)
@@ -303,12 +306,16 @@ async def analyze(
                 pass
             elif rep_result.get("listed"):
                 details = rep_result["details"]
-                # Un hit MISP con to_ids=true vale leggermente più di
-                # un hit di feed automatizzato (URLhaus): le fonti MISP
-                # sono curate manualmente dagli analisti.
+                # Gli hit "verificati" valgono più di un feed
+                # automatizzato (URLhaus): MISP to_ids=true (feed curato
+                # manualmente per gli IDS) e IOC attivo su OpenCTI
+                # (non revoked, non scaduto) decidono malevolo anche
+                # nel prefilter.
                 weight = (
                     _W_MISP_IDS_HIT
                     if details.get("to_ids_match")
+                    else _W_OPENCTI_ACTIVE_HIT
+                    if details.get("active_ioc_match")
                     else _W_REPUTATION_HIT
                 )
                 evidence.append(_make_evidence(
@@ -317,12 +324,12 @@ async def analyze(
                     weight=weight,
                 ))
             elif rep_result.get("details", {}).get("context_only"):
-                # Match MISP con SOLO to_ids=false: contesto informativo
-                # (l'IOC esiste ma non è un flag per gli IDS).  Mai
+                # Match informativo: MISP con SOLO to_ids=false, oppure
+                # osservabile OpenCTI senza Indicator attivo.  Mai
                 # penalizzare per segnale debole → weight 0.0, ma
                 # l'evidenza resta visibile per il classificatore.
                 evidence.append(_make_evidence(
-                    key="misp_context_match",
+                    key=f"{provider_name}_context_match",
                     value=rep_result["details"],
                     weight=0.0,
                 ))

@@ -3,15 +3,18 @@
 This filter runs BEFORE the Foundry Agent call.  It returns a Verdict
 in exactly two situations:
 
-1. **MISP to_ids hit** — the URL (or its hostname/domain/IP) appears
-   in a MISP feed with ``to_ids=true``: an analyst-curated, IDS-grade
-   IOC (e.g. CERT-AGID feeds).  That is a verified malicious signal,
-   so the filter decides ``phishing`` at high confidence WITHOUT
-   consulting the model.  Rationale: a decoy/error landing page must
-   never outweigh a curated IOC (2026-08-27: s.kemkes.go.id/ejuiaer
-   short-link — MISP/CERT-AGID had 4 phishing events with
-   to_ids=true, but Foundry judged the broken error page "benign"
-   because L4 saw no credential fields).
+1. **Verified IOC hit (MISP to_ids / OpenCTI active)** — the URL (or
+   its hostname/domain/IP) appears in a threat-intel source with a
+   verified malicious IOC: a MISP attribute with ``to_ids=true``
+   (analyst-curated, IDS-grade — e.g. CERT-AGID feeds), or an
+   OpenCTI observable with at least one ACTIVE related Indicator
+   (not revoked, not past ``valid_until``).  That is a verified
+   malicious signal, so the filter decides ``phishing`` at high
+   confidence WITHOUT consulting the model.  Rationale: a
+   decoy/error landing page must never outweigh a curated IOC
+   (2026-08-27: s.kemkes.go.id/ejuiaer short-link — MISP/CERT-AGID
+   had 4 phishing events with to_ids=true, but Foundry judged the
+   broken error page "benign" because L4 saw no credential fields).
 2. **Trivially inconclusive L4** — the bundle is so sparse that no
    model could make a reliable judgment → ``suspicious`` at minimal
    confidence.
@@ -158,6 +161,87 @@ def _misp_verdict(bundle: dict, hit: dict) -> Verdict:
     )
 
 
+# ---------------------------------------------------------------------------
+# OpenCTI active-IOC rule (same deterministic semantics as MISP)
+# ---------------------------------------------------------------------------
+# OpenCTI is a CTI platform where any org can publish: the raw observable
+# alone is NOT a verified signal.  An IOC is "detected" only when an
+# observable matches AND it has at least one related Indicator that is
+# still ACTIVE (not revoked, not past valid_until).  Only the OpenCTI
+# provider produces ``active_ioc_match=True``, so its presence
+# identifies the feed unambiguously.
+# Per user decision (2026-08-27): an active OpenCTI IOC means the URL is
+# malicious, same as MISP to_ids.
+
+# Same confidence modulation as MISP: a match on the exact Url/Hostname
+# observable is the strongest signal; a match limited to the registrable
+# domain (Domain-Name) or an IP is slightly less precise.
+_OPENCTI_ACTIVE_URL_CONFIDENCE = 0.95
+_OPENCTI_ACTIVE_INFRA_CONFIDENCE = 0.85
+
+
+def _opencti_active_details(bundle: dict) -> Optional[dict]:
+    """Return the details of an OpenCTI ``reputation_hit`` with an
+    active IOC match.
+
+    Returns None when no such evidence exists (no OpenCTI configured,
+    only revoked/expired context matches, or a non-OpenCTI provider
+    hit).  Same serialization robustness as ``_misp_to_ids_details``:
+    a JSON-stringified value must never break the security rule.
+    """
+    from graph_engine.classifier.evidence_bundle import _coerce_evidence_value
+
+    for rep in bundle.get("strong_evidence_details", {}).get(
+        "reputation_hit", []
+    ):
+        rep = _coerce_evidence_value(rep)
+        if isinstance(rep, dict) and rep.get("active_ioc_match") is True:
+            return rep
+    return None
+
+
+def _opencti_verdict(bundle: dict, hit: dict) -> Verdict:
+    """Build the deterministic phishing Verdict from an OpenCTI
+    active-IOC hit."""
+    matched_types = {str(t).lower() for t in (hit.get("matched_types") or [])}
+    if {"url", "hostname"} & matched_types:
+        confidence = _OPENCTI_ACTIVE_URL_CONFIDENCE
+    else:
+        confidence = _OPENCTI_ACTIVE_INFRA_CONFIDENCE
+
+    # OpenCTI labels follow no phishing-name:* convention we can rely
+    # on: the brand stays None and the labels go into the rationale.
+    label_str = ", ".join(hit.get("labels") or [])
+    marking_str = ", ".join(hit.get("markings") or [])
+    types_str = ", ".join(sorted(hit.get("matched_types") or []))
+
+    match_count = hit.get("match_count", "?")
+    active_count = hit.get("active_indicator_count", "?")
+    total_count = hit.get("total_indicator_count", "?")
+    score_avg = hit.get("score_avg")
+
+    return Verdict(
+        target_id=bundle.get("target_id", ""),
+        classification=Classification.phishing,
+        confidence=confidence,
+        produced_by="prefilter",
+        brand=None,
+        kit_family=None,
+        rationale=(
+            "Hit OpenCTI: osservabile con IOC attivo (non revoked, non "
+            f"scaduto). Dettagli: {match_count} osservabili ({types_str}), "
+            f"{active_count} indicatori attivi su {total_count}."
+            + (f" Label: {label_str}." if label_str else "")
+            + (f" Marcatura: {marking_str}." if marking_str else "")
+            + (f" Score medio: {score_avg}." if score_avg is not None else "")
+            + " IOC attivo su piattaforma di threat intel → classificato "
+            "malevolo senza consultare il classificatore AI."
+        ),
+        final_url=bundle.get("canonical_url") or bundle.get("input_url"),
+        exfil_endpoint=None,
+    )
+
+
 def _has_strong_signal(bundle: dict) -> bool:
     """True when L1/L2/L3 evidence alone already carries enough signal.
 
@@ -190,9 +274,10 @@ def prefilter(bundle: dict) -> Optional[Verdict]:
 
     Cases intercepted (return non-None):
 
-    0. MISP ``reputation_hit`` with ``to_ids_match=True`` — verified
-       analyst-curated IOC → ``phishing`` at high confidence.  This
-       rule runs FIRST and overrides everything else, including the
+    0. MISP ``reputation_hit`` with ``to_ids_match=True``, or OpenCTI
+       ``reputation_hit`` with ``active_ioc_match=True`` — verified
+       threat-intel IOC → ``phishing`` at high confidence.  These
+       rules run FIRST and override everything else, including the
        strong-signal delegation below: a decoy landing page must not
        outvote a curated IDS feed (2026-08-27 kemkes case).
 
@@ -211,13 +296,20 @@ def prefilter(bundle: dict) -> Optional[Verdict]:
     - anything with real L4 content.
     """
 
-    # ── Rule 0: MISP to_ids hit → verified malicious, decide now ────────
+    # ── Rule 0: verified IOC hit → malicious, decide now ────────────────
     # Priority over the strong-signal delegation: a decoy/error landing
     # page must never outweigh a curated IDS-grade IOC (see module
     # docstring for the 2026-08-27 false-negative case).
     misp_hit = _misp_to_ids_details(bundle)
     if misp_hit is not None:
         return _misp_verdict(bundle, misp_hit)
+
+    # OpenCTI active IOC: same deterministic semantics as MISP.  Checked
+    # AFTER MISP — when both feeds hit, the MISP verdict wins (IDS-grade
+    # curation and brand extraction).
+    opencti_hit = _opencti_active_details(bundle)
+    if opencti_hit is not None:
+        return _opencti_verdict(bundle, opencti_hit)
 
     # L1/L2/L3 signal takes precedence over L4 sparsity: when other
     # layers already produced real signal, do NOT intercept — the model

@@ -17,6 +17,9 @@ e sorgente 2.4 ``Attribute.php``/``Event.php``/``AppModel.php``):
   l'oggetto ``Event`` completo (``info``, ``threat_level_id``,
   ``Tag``, ``Orgc``) — necessario per estrarre tag e metadati
   dell'evento, non solo l'attributo nudo.
+- I valori candidati della query vengono da
+  ``_search_values.build_search_values`` (modulo condiviso con gli
+  altri provider: URL, hostname, dominio registrabile, IP noti).
 
 Semantica del risultato (to_ids-aware):
 
@@ -33,11 +36,11 @@ Semantica del risultato (to_ids-aware):
 from __future__ import annotations
 
 from typing import Optional
-from urllib.parse import urlparse
 
 import httpx
 
 from graph_engine.config import settings
+from graph_engine.osint.reputation._search_values import build_search_values
 from graph_engine.osint.reputation.base import ReputationProvider
 
 MISP_TIMEOUT = 15.0
@@ -55,44 +58,6 @@ def _is_configured() -> bool:
 def _is_to_ids(value) -> bool:
     """Normalizza il flag ``to_ids`` MISP (bool JSON o int 0/1)."""
     return value in (True, 1, "1")
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    """Rimuove duplicati e valori vuoti preservando l'ordine."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for v in values:
-        v = v.strip()
-        if v and v not in seen:
-            seen.add(v)
-            out.append(v)
-    return out
-
-
-def _build_search_values(
-    url: str,
-    known_ips: Optional[list[str]],
-) -> list[str]:
-    """Costruisce la lista di valori candidati per la query restSearch.
-
-    Candidati: URL completo, hostname, dominio registrabile e, se
-    presenti, gli IP noti risolti da L2.  Il dominio registrabile
-    riusa ``_registrable_domain`` di L1 (lexical/typosquat) — stessa
-    funzione già corretta con tldextract, nessuna terza
-    reimplementazione dell'estrazione eTLD+1.
-    """
-    from graph_engine.lexical.typosquat import _registrable_domain
-
-    candidates = [url]
-    hostname = (urlparse(url).hostname or "").lower()
-    if hostname:
-        candidates.append(hostname)
-        reg_domain = _registrable_domain(hostname)
-        if reg_domain and reg_domain != hostname:
-            candidates.append(reg_domain)
-    if known_ips:
-        candidates.extend(ip for ip in known_ips if isinstance(ip, str))
-    return _dedupe(candidates)
 
 
 class MispProvider(ReputationProvider):
@@ -137,7 +102,7 @@ class MispProvider(ReputationProvider):
             "Accept": "application/json",
         }
 
-        values = _build_search_values(url, known_ips)
+        values = build_search_values(url, known_ips)
 
         try:
             response = await client.post(
