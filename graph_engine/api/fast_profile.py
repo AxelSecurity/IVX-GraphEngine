@@ -45,7 +45,7 @@ FAST_TOP_N_ACTIONS = 1
 FAST_CAPTCHA_WAIT_S = 4
 
 # ── Timeout di rete L2/L3 ─────────────────────────────────────────────────
-# Default: CRTSH=15s, RDAP=15s, DNS=5s, JARM=10s.
+# Default: CTLOGS=15s, RDAP=15s, DNS=5s, JARM=10s.
 # Nel fast path li dimezziamo: se un provider non risponde in 5-8s,
 # probabilmente è inaccessibile o il target è già sospetto.
 # timeout_s fa anche da ceiling al client HTTP condiviso di L2 e L3

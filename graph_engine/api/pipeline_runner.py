@@ -183,7 +183,7 @@ async def run_full_analysis(
         captcha_wait_s: Secondi di attesa per auto-risoluzione CAPTCHA
                         (default: 8s; fast path Trellix: 4s).
         l2_timeout_s: Timeout in secondi per le query OSINT L2
-                      (crt.sh, RDAP, DNS e reputation provider).  Se
+                      (ctlogs.dev, RDAP, DNS e reputation provider).  Se
                       ``None``, ogni provider usa il proprio default.
         l3_timeout_s: Timeout in secondi per JARM (L3).  Se ``None``,
                       usa il default (10s).  Le altre sonde L3

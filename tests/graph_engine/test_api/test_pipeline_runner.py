@@ -248,16 +248,16 @@ class TestPipelineRunner:
     async def test_dict_evidence_value_serialized_before_persist(
         self, fake_pipeline, tmp_path, monkeypatch
     ):
-        """L2 che restituisce un value dict (caso reale: crt.sh HTTP 404 su
-        rinnovospid.cc/pay) → nessun ValidationError e il value salvato su
+        """L2 che restituisce un value dict (caso reale: provider CT in
+        errore HTTP 404) → nessun ValidationError e il value salvato su
         SQLite è una stringa JSON che round-trip sul dict originale."""
         import json
 
         from graph_engine.api.pipeline_runner import run_full_analysis
 
-        crtsh_error = {
-            "provider": "crtsh",
-            "reason": "crt.sh HTTP error: 404 Not Found",
+        ctlogs_error = {
+            "provider": "ctlogs.dev",
+            "reason": "ctlogs.dev HTTP error: 404",
         }
 
         async def _fake_l2_with_dict(url, timeout_s=None):
@@ -266,7 +266,7 @@ class TestPipelineRunner:
                     {
                         "layer": "L2",
                         "key": "provider_unavailable",
-                        "value": crtsh_error,
+                        "value": ctlogs_error,
                         "weight": 0.0,
                         "produced_by": "osint",
                     }
@@ -299,7 +299,7 @@ class TestPipelineRunner:
             f"Evidence.value su SQLite deve essere str, "
             f"trovato {type(stored).__name__}"
         )
-        assert json.loads(stored) == crtsh_error
+        assert json.loads(stored) == ctlogs_error
 
     async def test_l2_and_l3_run_in_parallel(
         self, fake_pipeline, tmp_path, monkeypatch

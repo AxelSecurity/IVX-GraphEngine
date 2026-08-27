@@ -1,8 +1,8 @@
 """Orchestratore L2 — analisi passiva / OSINT.
 
 Sequenza: DNS PRIMA (gli IP risolti alimentano i reputation
-provider, es. MISP cerca anche per ``ip-dst``), poi crt.sh, RDAP
-e tutti i provider di reputazione abilitati IN PARALLELO.  Un
+provider, es. MISP cerca anche per ``ip-dst``), poi ctlogs.dev,
+RDAP e tutti i provider di reputazione abilitati IN PARALLELO.  Un
 fallimento su una fonte non blocca mai le altre (``asyncio.gather``
 con ``return_exceptions=True``).
 """
@@ -15,10 +15,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from graph_engine.osint.certificate_transparency import (
-    query_crtsh,
-    query_ctlogs,
-)
+from graph_engine.osint.certificate_transparency import query_ctlogs
 from graph_engine.osint.dns_resolve import resolve_dns
 from graph_engine.osint.rdap import query_rdap
 from graph_engine.osint.reputation.registry import get_enabled_providers
@@ -89,7 +86,7 @@ async def analyze(
 ) -> dict:
     """Esegue tutte le query OSINT L2 su *canonical_url*.
 
-    La risoluzione DNS avviene PRIMA; crt.sh, RDAP e i reputation
+    La risoluzione DNS avviene PRIMA; ctlogs.dev, RDAP e i reputation
     provider partono POI in parallelo.  La sequenza non è più
     interamente parallela perché gli IP risolti alimentano i provider
     (MISP cerca anche per ``ip-dst``): senza di essi una query MISP
@@ -100,8 +97,8 @@ async def analyze(
 
     Args:
         canonical_url: URL normalizzato (output di L0 canonicalize).
-        timeout_s: Timeout HTTP in secondi per crt.sh, RDAP, DNS e i
-                   reputation provider (MISP/OpenCTI/URLhaus).  Se
+        timeout_s: Timeout HTTP in secondi per ctlogs.dev, RDAP, DNS e
+                   i reputation provider (MISP/OpenCTI/URLhaus).  Se
                    ``None``, ogni fonte usa il proprio default
                    (15s, 15s, 5s, 15s, 15s, 10s rispettivamente).
 
@@ -151,8 +148,8 @@ async def analyze(
                 if isinstance(ip, str) and ip.strip()
             ]
 
-        # ── crt.sh + RDAP + reputation provider IN PARALLELO ────────────
-        crtsh_task = query_crtsh(hostname, client, timeout=timeout_s)
+        # ── ctlogs.dev + RDAP + reputation provider IN PARALLELO ────────
+        ctlogs_task = query_ctlogs(hostname, client, timeout=timeout_s)
         rdap_task = query_rdap(hostname, client, timeout=timeout_s)
         rep_tasks = [
             p.check(
@@ -165,80 +162,60 @@ async def analyze(
         ]
 
         results = await _gather_ignore_exceptions(
-            crtsh_task, rdap_task, *rep_tasks
+            ctlogs_task, rdap_task, *rep_tasks
         )
 
-        crtsh_result = results[0]
+        ctlogs_result = results[0]
         rdap_result = results[1]
         rep_results = results[2:]
 
-        # ── crt.sh: domini fratelli (fallback ctlogs.dev) ──────────────
-        if not isinstance(crtsh_result, dict) or "error" in crtsh_result:
-            # crt.sh fallito (dict con error, o eccezione catturata dal
-            # gather) → evidenza informativa, poi fallback ctlogs.dev.
+        # ── ctlogs.dev: domini fratelli / cronologia certificati ───────
+        if not isinstance(ctlogs_result, dict) or "error" in ctlogs_result:
+            # Eccezione catturata dal gather o error del provider →
+            # evidenza informativa, l'analisi continua.
             reason = (
-                crtsh_result["error"]
-                if isinstance(crtsh_result, dict)
-                else str(crtsh_result)
+                ctlogs_result["error"]
+                if isinstance(ctlogs_result, dict)
+                else str(ctlogs_result)
             )
             evidence.append(_make_evidence(
                 key="provider_unavailable",
-                value={"provider": "crtsh", "reason": reason},
+                value={"provider": "ctlogs.dev", "reason": reason},
                 weight=0.0,
             ))
-            # Fallback ctlogs.dev, SEMPRE (API con chiave, anonimo
-            # senza): il segnale non deve andare perso per un 502 di
-            # crt.sh.  Stesso contratto di ritorno, con source diverso.
-            # Contenimento errori: un'eccezione del fallback degrada a
-            # provider_unavailable, mai un crash dell'analisi.
-            try:
-                crtsh_result = await query_ctlogs(
-                    hostname, client, timeout=timeout_s
-                )
-            except Exception as exc:  # noqa: BLE001 — contenimento errori
-                crtsh_result = {"error": str(exc)}
-            if isinstance(crtsh_result, dict) and "error" in crtsh_result:
-                evidence.append(_make_evidence(
-                    key="provider_unavailable",
-                    value={
-                        "provider": "ctlogs.dev",
-                        "reason": crtsh_result["error"],
-                    },
-                    weight=0.0,
-                ))
-        if isinstance(crtsh_result, dict) and "error" not in crtsh_result:
-            siblings = crtsh_result.get("sibling_domains", [])
+        else:
+            siblings = ctlogs_result.get("sibling_domains", [])
             if siblings:
                 evidence.append(_make_evidence(
                     key="sibling_domains",
                     value={
                         "domains": siblings,
-                        "truncated": crtsh_result.get("truncated", False),
-                        "total_siblings": crtsh_result.get("total_siblings", len(siblings)),
-                        "newest_cert_days": crtsh_result.get("newest_cert_days"),
-                        "oldest_cert_days": crtsh_result.get("oldest_cert_days"),
-                        "total_certs": crtsh_result.get("total_certs"),
-                        "source": crtsh_result.get("source", "crt.sh"),
+                        "truncated": ctlogs_result.get("truncated", False),
+                        "total_siblings": ctlogs_result.get("total_siblings", len(siblings)),
+                        "newest_cert_days": ctlogs_result.get("newest_cert_days"),
+                        "oldest_cert_days": ctlogs_result.get("oldest_cert_days"),
+                        "total_certs": ctlogs_result.get("total_certs"),
+                        "source": ctlogs_result.get("source", "ctlogs.dev"),
                     },
                     weight=_W_SIBLING_DOMAINS,
                 ))
-            elif crtsh_result.get("source") == "ctlogs.dev":
-                # Fallback senza sibling (modalità anonima, o dominio
-                # senza SAN condivisi): resta la cronologia certificati.
-                # Un cert emesso da < 30 giorni è un indizio debole di
+            else:
+                # Niente sibling (modalità anonima, o dominio senza SAN
+                # condivisi): resta la cronologia certificati.  Un cert
+                # emesso da < 30 giorni è un indizio debole di
                 # infrastruttura appena messa in piedi; altrimenti solo
                 # informativa (mai penalizzare per assenza di segnale).
-                newest = crtsh_result.get("newest_cert_days")
+                newest = ctlogs_result.get("newest_cert_days")
                 if newest is not None:
                     weight = _W_FRESH_CERT if newest <= 30 else 0.0
                     evidence.append(_make_evidence(
                         key="certificate_history",
                         value={
                             "newest_cert_days": newest,
-                            "oldest_cert_days": crtsh_result.get("oldest_cert_days"),
-                            "total_certs": crtsh_result.get("total_certs"),
+                            "oldest_cert_days": ctlogs_result.get("oldest_cert_days"),
+                            "total_certs": ctlogs_result.get("total_certs"),
                             "source": "ctlogs.dev",
-                            "mode": crtsh_result.get("mode"),
+                            "mode": ctlogs_result.get("mode"),
                         },
                         weight=weight,
                     ))

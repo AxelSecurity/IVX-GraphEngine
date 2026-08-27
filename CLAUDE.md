@@ -142,7 +142,7 @@ Solo per `--classify`:
 
 Provider L2 (opzionali, si attivano solo con chiave presente):
 - `MISP_URL` / `MISP_API_KEY`, `OPENCTI_URL` / `OPENCTI_API_KEY`, `URLHAUS_API_KEY` — reputation provider; vedi `.env.example`
-- `CTLOGS_API_KEY` — fallback certificate transparency (ctlogs.dev REST API) quando crt.sh non risponde; chiave rilasciata su richiesta da api.ctlogs.dev. SENZA chiave il fallback funziona comunque in modalità anonima sull'endpoint pubblico (nessuna SAN list → evidenza `certificate_history` invece di `sibling_domains`)
+- `CTLOGS_API_KEY` — certificate transparency (ctlogs.dev REST API, UNICO provider CT da 2026-08-27, quando crt.sh è stato rimosso); chiave rilasciata su richiesta da api.ctlogs.dev. SENZA chiave il provider funziona comunque in modalità anonima sull'endpoint pubblico (nessuna SAN list → evidenza `certificate_history` invece di `sibling_domains`)
 
 `.env` è in `.gitignore`. Nessuna credenziale viene mai hardcodata o committata.
 

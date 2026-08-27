@@ -87,11 +87,12 @@ class Settings(BaseSettings):
     # ── URLhaus (provider reputazione L2, abuse.ch) ──────────────────
     urlhaus_api_key: Optional[str] = None
 
-    # ── ctlogs.dev (fallback certificate transparency L2) ────────────
+    # ── ctlogs.dev (certificate transparency L2) ──────────────────────
     # Chiave della REST API di ctlogs.dev (https://api.ctlogs.dev),
-    # rilasciata su richiesta.  Usata SOLO come fallback quando
-    # crt.sh non risponde: /v1/domain/{host} + /v1/cert/{id} per la
-    # lista SAN (san_dns) dei certificati più recenti.
+    # rilasciata su richiesta.  Con chiave: /v1/domain/{host} +
+    # /v1/cert/{id} per la lista SAN (san_dns) dei certificati più
+    # recenti.  Senza chiave: endpoint pubblico anonimo, solo
+    # cronologia certificati (crt.sh rimosso, 2026-08-27).
     ctlogs_api_key: Optional[str] = None
 
     # ── Endpoint Trellix (/trellix/analyze) ─────────────────────────

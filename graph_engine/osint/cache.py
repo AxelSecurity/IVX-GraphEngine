@@ -19,7 +19,7 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 TTL_RDAP = 86_400       # 24 ore — i dati WHOIS cambiano molto raramente
-TTL_CRTSH = 21_600      # 6 ore — nuovi certificati possono comparire
+TTL_CTLOGS = 21_600     # 6 ore — nuovi certificati possono comparire
 TTL_URLHAUS = 3_600     # 1 ora — feed di minacce, più dinamico
 TTL_DNS = 3_600         # 1 ora — i record DNS possono cambiare, ma non frequentemente
 TTL_IANA_BOOTSTRAP = 2_592_000  # 30 giorni — la mappatura TLD→server RDAP è stabile
@@ -45,7 +45,7 @@ def cache_get(provider: str, key: str, ttl_seconds: int) -> Optional[dict]:
     """Recupera un valore dalla cache se presente e non scaduto.
 
     Args:
-        provider: Nome del provider (es. ``"rdap"``, ``"crtsh"``).
+        provider: Nome del provider (es. ``"rdap"``, ``"ctlogs"``).
         key: Chiave di query (es. dominio).
         ttl_seconds: TTL in secondi.
 

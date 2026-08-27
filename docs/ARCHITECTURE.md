@@ -322,7 +322,7 @@ impone tre vincoli non negoziabili:
 Il livello L2 raccoglie informazioni da fonti esterne senza interagire con
 il target. La sequenza NON è interamente parallela: la risoluzione **DNS
 avviene prima** (round-trip sul cammino critico, mitigato dalla cache 1h),
-poi crt.sh, RDAP e i reputation provider partono **in parallelo**
+poi ctlogs.dev, RDAP e i reputation provider partono **in parallelo**
 (`asyncio.gather` con `return_exceptions=True`). La sequenzialità è
 voluta: gli IP risolti alimentano la query dei reputation provider
 (MISP cerca anche per `ip-dst`), quindi una query MISP senza IP
@@ -334,15 +334,13 @@ le altre.
 
 | Fonte | Tipo | Endpoint | Cache TTL |
 |---|---|---|---|
-| **crt.sh** | Certificate Transparency | `https://crt.sh/?q=<domain>&output=json` | 6 ore |
-| **ctlogs.dev** (fallback crt.sh) | Certificate Transparency | API: `https://api.ctlogs.dev/v1/domain/{host}` + `/v1/cert/{id}`; anonimo: `https://ctlogs.dev/search?q=<domain>&output=json` | 6 ore (cache separata per modalità) |
+| **ctlogs.dev** | Certificate Transparency | API: `https://api.ctlogs.dev/v1/domain/{host}` + `/v1/cert/{id}`; anonimo: `https://ctlogs.dev/search?q=<domain>&output=json` | 6 ore (cache separata per modalità) |
 | **RDAP** | WHOIS moderno (via bootstrap IANA) | `https://data.iana.org/rdap/dns.json` → server TLD-specifico | 24 ore |
 | **DNS** | Risoluzione A/AAAA | `loop.getaddrinfo` (asyncio nativo, nessuna dipendenza esterna) | 1 ora |
 
-**Fallback ctlogs.dev** (2026-08-27): crt.sh è notoriamente instabile
-(502 frequenti — il caso reale `s.kemkes.go.id` del collaudo live).
-Quando `query_crtsh` fallisce, l'analyzer interroga SEMPRE ctlogs.dev
-in una di due modalità:
+**ctlogs.dev è l'unico provider CT** (crt.sh rimosso il 2026-08-27:
+502 sistematici nel collaudo live — 3 richieste su 3). L'analyzer
+interroga SEMPRE ctlogs.dev in una di due modalità:
 
 - **API con chiave** (`CTLOGS_API_KEY`): `/v1/domain/{host}` (righe
   SENZA SAN list, ordinate per `not_before` discendente, paginate) e
@@ -363,8 +361,7 @@ numero inventato — un oldest falsato produrrebbe un falso "dominio
 appena creato"); `newest_cert_days` è sempre affidabile (prima riga).
 Un dettaglio non recuperabile è best-effort (si ignora quel
 certificato). Chiave rilasciata su richiesta via email da
-api.ctlogs.dev; ogni richiesta costa 1 unit della quota mensile
-(il risultato è cachato con lo stesso TTL di crt.sh). La cache è
+api.ctlogs.dev; ogni richiesta costa 1 unit della quota mensile. La cache è
 separata per modalità: quando la chiave arriva, un risultato anonimo
 (senza sibling) non viene riusato dall'API.
 
@@ -443,15 +440,15 @@ può pubblicare:
 ### Segnali estratti
 
 - **Domini fratelli di campagna** (`sibling_domains`): dalla SAN list
-  aggregata di crt.sh (fallback ctlogs.dev, vedi sopra), deduplicata,
-  con il dominio interrogato escluso.  Il valore dell'evidenza porta
-  `source` (`crt.sh` o `ctlogs.dev`).  Limite 50 domini; se il numero
+  aggregata di ctlogs.dev (vedi sopra), deduplicata, con il dominio
+  interrogato escluso.  Il valore dell'evidenza porta `source`
+  (`ctlogs.dev`).  Limite 50 domini; se il numero
   reale è superiore, viene impostato `truncated: true` con il conteggio
   reale in `total_siblings`.
   Questo è il pivot a più alto valore secondo l'architettura originale.
 
-- **Cronologia certificati** (`certificate_history`): dal fallback
-  ctlogs.dev quando non ci sono sibling (modalità anonima, o dominio
+- **Cronologia certificati** (`certificate_history`): da ctlogs.dev
+  quando non ci sono sibling (modalità anonima, o dominio
   senza SAN condivisi).  Un cert emesso da < 30 giorni pesa 0.15
   (infrastruttura appena messa in piedi); oltre è informativa
   (weight 0.0).  Il valore porta `source`, `mode` (`api`/`anonymous`),
@@ -525,7 +522,7 @@ Cache filesystem sotto `data/osint_cache/<provider>/<hash>.json`.
 TTL differenziati per tipo di dato:
 
 - RDAP: 24 ore (i dati WHOIS cambiano molto raramente)
-- crt.sh: 6 ore (nuovi certificati possono comparire)
+- ctlogs.dev: 6 ore (nuovi certificati possono comparire)
 - URLhaus: 1 ora (feed di minacce, più dinamico)
 - IANA bootstrap: 30 giorni (la mappatura TLD→server RDAP è stabile)
 
@@ -546,7 +543,7 @@ graph_engine/osint/
     __init__.py
     analyzer.py          — orchestratore: DNS prima, poi resto in parallelo
     cache.py             — cache filesystem con TTL
-    certificate_transparency.py — crt.sh + fallback ctlogs.dev
+    certificate_transparency.py — ctlogs.dev (provider CT unico)
     dns_resolve.py       — risoluzione DNS A/AAAA (asyncio nativo)
     rdap.py              — RDAP con bootstrap IANA
     reputation/
@@ -923,7 +920,7 @@ Altri parametri del profilo:
 - `FAST_TOP_N_ACTIONS = 1` — un solo candidato click per stato (default: 3)
 - `FAST_CAPTCHA_WAIT_S = 4` — metà dell'attesa standard (default: 8)
 - `FAST_L2_TIMEOUT_S = 5.0`, `FAST_L3_TIMEOUT_S = 5.0` — timeout di rete
-  dimezzati (default: crt.sh/RDAP 15s, DNS 5s, JARM 10s)
+  dimezzati (default: ctlogs.dev/RDAP 15s, DNS 5s, JARM 10s)
 - `TRELLIX_RESPONSE_TIMEOUT_S = 48` — attesa massima del wrapper (12s di
   margine sulla deadline di 60s)
 
@@ -934,7 +931,7 @@ configurata può sforare la finestra → il wrapper risponde onestamente
 Per supportare il profilo fast, le funzioni L2/L3 accettano un parametro
 `timeout`/`timeout_s` opzionale (backward-compatible, default invariati):
 
-- `osint/certificate_transparency.py`: `query_crtsh(..., timeout=CRTSH_TIMEOUT)` e `query_ctlogs(..., timeout=CRTSH_TIMEOUT)` (fallback)
+- `osint/certificate_transparency.py`: `query_ctlogs(..., timeout=CTLOGS_TIMEOUT)`
 - `osint/rdap.py`: `query_rdap(..., timeout=RDAP_TIMEOUT)`
 - `osint/dns_resolve.py`: `resolve_dns(..., timeout=_DNS_TIMEOUT)`
 - `osint/analyzer.py`: `analyze(..., timeout_s=None)`

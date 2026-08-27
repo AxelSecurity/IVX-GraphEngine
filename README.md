@@ -20,7 +20,7 @@ che si accumulano fino al verdetto finale:
 |---|---|
 | **L0 — Ingestion** | Pulisce l'URL in ingresso: rimuove wrapper di sicurezza (es. link riscritti da gateway email), decodifica, normalizza |
 | **L1 — Lessicale** | Analizza l'URL come testo: somiglianza con domini noti (typosquatting), entropia sospetta, pattern di infrastruttura tipici del phishing |
-| **L2 — OSINT passivo** | Interroga fonti esterne senza toccare il sito: certificati SSL (crt.sh), whois (RDAP), DNS, feed di minacce note (URLhaus, opzionali MISP/OpenCTI). Trova anche "domini fratelli" della stessa campagna |
+| **L2 — OSINT passivo** | Interroga fonti esterne senza toccare il sito: certificati SSL (ctlogs.dev), whois (RDAP), DNS, feed di minacce note (URLhaus, opzionali MISP/OpenCTI). Trova anche "domini fratelli" della stessa campagna |
 | **L3 — Attivo a bassa intensità** | Richieste HTTP mirate (catena di redirect, favicon, impronta TLS "JARM", confronto risposte con User-Agent diversi per scoprire cloaking) — mai esecuzione di JavaScript |
 | **L4 — Esplorazione del grafo** | Apre un vero browser (Playwright) e naviga il sito seguendo redirect e cliccando sugli elementi più plausibili (bottoni "continua", gate CAPTCHA), costruendo il grafo di stati fino al payload finale |
 | **L5 — Classificazione** | Un filtro deterministico intercetta i casi banali; per il resto un modello AI (Azure Foundry) valuta tutte le evidenze raccolte e produce il verdetto finale con motivazione |
