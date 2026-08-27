@@ -1,10 +1,17 @@
 """Certificate Transparency — domini fratelli di campagna.
 
 Provider primario: crt.sh (API pubblica, una sola richiesta con tutta
-la SAN list).  Fallback: ctlogs.dev REST API (``https://api.ctlogs.dev``,
-chiave su richiesta) quando crt.sh non risponde — il JSON della ricerca
-non include la SAN list, quindi i SAN vengono aggregati interrogando
-``/v1/cert/{id}`` per i certificati più recenti.
+la SAN list).  Fallback: ctlogs.dev quando crt.sh non risponde, in due
+modalità:
+
+- **API con chiave** (``https://api.ctlogs.dev``, chiave su richiesta):
+  il JSON della ricerca non include la SAN list, quindi i SAN vengono
+  aggregati interrogando ``/v1/cert/{id}`` per i certificati più
+  recenti.
+- **Anonima** (senza chiave): endpoint pubblico
+  ``https://ctlogs.dev/search?output=json`` — nessuna SAN list
+  disponibile, quindi niente sibling; restano disponibili date e
+  conteggi della cronologia certificati.
 
 Il segnale a più alto valore è la **SAN list deduplicata**: i domini
 che condividono un certificato con il dominio target sono potenziali
@@ -223,29 +230,41 @@ async def query_ctlogs(
 ) -> dict:
     """Fallback a ctlogs.dev quando crt.sh non risponde.
 
-    Stesso contratto di ``query_crtsh`` (stesse chiavi, più ``source``):
+    Due modalità:
+
+    - **API con chiave** (``settings.ctlogs_configured``):
+      ``/v1/domain/{host}`` + dettagli ``/v1/cert/{id}`` → SAN completi
+      (``san_dns``) → ``sibling_domains`` come crt.sh.
+    - **Anonima** (senza chiave): endpoint pubblico
+      ``https://ctlogs.dev/search?q=<domain>&output=json`` — nessuna
+      SAN list disponibile, quindi ``sibling_domains`` resta vuoto;
+      date e conteggi sono comunque disponibili.
+
+    Contratto di ritorno (stesso di ``query_crtsh``, più ``source`` e
+    ``mode``):
 
     - ``sibling_domains``: SAN aggregati dei ``CTLOGS_MAX_CERT_DETAILS``
-      certificati più recenti (la ricerca è ordinata per ``not_before``
-      discendente)
+      certificati più recenti (solo modalità API; la ricerca è ordinata
+      per ``not_before`` discendente)
     - ``newest_cert_days``: sempre noto (prima riga = più recente)
     - ``oldest_cert_days``/``total_certs``: ``None`` quando la risposta
       è paginata (``has_next``) — l'età vera del dominio non è nota
       senza scaricare tutte le pagine; mai inventare un valore
+    - ``mode``: ``"api"`` o ``"anonymous"``
     - ``error``: presente solo in caso di errore
 
-    Richiede ``CTLOGS_API_KEY`` (``settings.ctlogs_configured``): senza
-    chiave ritorna subito un errore, senza alcuna richiesta HTTP.
+    La cache è separata per modalità: quando la chiave arriva, un
+    risultato anonimo (senza sibling) non viene riusato dall'API.
     """
-    if not settings.ctlogs_configured:
-        return {"error": "ctlogs.dev not configured (CTLOGS_API_KEY missing)"}
+    api_mode = settings.ctlogs_configured
+    cache_provider = "ctlogs" if api_mode else "ctlogs_anon"
 
-    cached = cache_get("ctlogs", domain, TTL_CRTSH)
+    cached = cache_get(cache_provider, domain, TTL_CRTSH)
     if cached is not None:
         return cached
 
     result = await _fetch_and_parse_ctlogs(domain, client, timeout=timeout)
-    cache_set("ctlogs", domain, result)
+    cache_set(cache_provider, domain, result)
     return result
 
 
@@ -254,18 +273,28 @@ async def _fetch_and_parse_ctlogs(
     client: httpx.AsyncClient,
     timeout: float | None = None,
 ) -> dict:
-    """Ricerca su ``/v1/domain/{host}`` + dettagli ``/v1/cert/{id}``.
+    """Ricerca certificati + (solo API) dettagli ``/v1/cert/{id}``.
 
     La ricerca restituisce righe ``{id, match, not_before, not_after,
-    serial_hex, issuer, key_algo, san_count}`` SENZA la SAN list; i SAN
-    completi stanno nel dettaglio (``san_dns``), recuperato in
-    parallelo per i primi ``CTLOGS_MAX_CERT_DETAILS`` id.
+    serial_hex, issuer, key_algo, san_count}`` SENZA la SAN list (forma
+    identica tra endpoint pubblico e ``/v1/domain/{host}``, verificata
+    live su entrambi); i SAN completi stanno nel dettaglio (``san_dns``),
+    recuperato in parallelo per i primi ``CTLOGS_MAX_CERT_DETAILS`` id
+    SOLO in modalità API.
     """
     effective_timeout = timeout if timeout is not None else CRTSH_TIMEOUT
-    headers = {"Authorization": f"Bearer {settings.ctlogs_api_key}"}
+    api_mode = settings.ctlogs_configured
+    headers = (
+        {"Authorization": f"Bearer {settings.ctlogs_api_key}"}
+        if api_mode
+        else None
+    )
 
     # ── 1. Ricerca ─────────────────────────────────────────────────────
-    url = f"{CTLOGS_API_URL}/v1/domain/{domain}"
+    if api_mode:
+        url = f"{CTLOGS_API_URL}/v1/domain/{domain}"
+    else:
+        url = f"https://ctlogs.dev/search?q={domain}&output=json"
     try:
         response = await client.get(
             url, timeout=effective_timeout, headers=headers
@@ -275,7 +304,7 @@ async def _fetch_and_parse_ctlogs(
         return {"error": f"ctlogs.dev timeout after {effective_timeout}s"}
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
-        if status == 401:
+        if status == 401 and api_mode:
             return {"error": "ctlogs.dev auth error: API key invalid/revoked"}
         if status == 429:
             return {"error": "ctlogs.dev rate limit or quota exhausted (429)"}
@@ -304,6 +333,7 @@ async def _fetch_and_parse_ctlogs(
             "oldest_cert_days": None,
             "total_certs": 0,
             "source": "ctlogs.dev",
+            "mode": "api" if api_mode else "anonymous",
         }
 
     has_next = bool(data.get("has_next"))
@@ -327,26 +357,28 @@ async def _fetch_and_parse_ctlogs(
         if not has_next:
             oldest_days = (now - min(timestamps)).days
 
-    # ── 3. SAN list dai dettagli, in parallelo ─────────────────────────
-    ids = [
-        str(row["id"])
-        for row in rows[:CTLOGS_MAX_CERT_DETAILS]
-        if isinstance(row, dict) and row.get("id")
-    ]
-    detail_results = await asyncio.gather(
-        *(_fetch_ctlogs_cert_sans(cid, client, effective_timeout, headers)
-          for cid in ids),
-        return_exceptions=True,
-    )
-
+    # ── 3. SAN list dai dettagli, in parallelo (SOLO modalità API) ────
+    # L'endpoint pubblico non espone la SAN list in JSON: senza chiave
+    # niente sibling (la cronologia certificati resta comunque nota).
     domain_lower = domain.lower().strip(".")
     all_sans: set[str] = set()
-    for result in detail_results:
-        if isinstance(result, list):
-            for name in result:
-                name = str(name).strip().lower().strip(".")
-                if name and name != domain_lower:
-                    all_sans.add(name)
+    if api_mode:
+        ids = [
+            str(row["id"])
+            for row in rows[:CTLOGS_MAX_CERT_DETAILS]
+            if isinstance(row, dict) and row.get("id")
+        ]
+        detail_results = await asyncio.gather(
+            *(_fetch_ctlogs_cert_sans(cid, client, effective_timeout, headers)
+              for cid in ids),
+            return_exceptions=True,
+        )
+        for result in detail_results:
+            if isinstance(result, list):
+                for name in result:
+                    name = str(name).strip().lower().strip(".")
+                    if name and name != domain_lower:
+                        all_sans.add(name)
 
     # Dedup: escludi il dominio interrogato
     all_sans.discard(domain_lower)
@@ -365,6 +397,7 @@ async def _fetch_and_parse_ctlogs(
         # None (mai un numero inventato).
         "total_certs": None if has_next else len(rows),
         "source": "ctlogs.dev",
+        "mode": "api" if api_mode else "anonymous",
     }
 
 

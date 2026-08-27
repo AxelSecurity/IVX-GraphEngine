@@ -3,7 +3,9 @@
 Formato delle risposte conforme al contratto documentato su
 https://api.ctlogs.dev: la ricerca ``/v1/domain/{host}`` restituisce
 righe SENZA SAN list (solo ``san_count``), il dettaglio ``/v1/cert/{id}``
-restituisce ``san_dns`` (array completo dei dNSName).
+restituisce ``san_dns`` (array completo dei dNSName).  Senza chiave il
+fallback usa l'endpoint pubblico ``https://ctlogs.dev/search`` (stessa
+forma ``rows``/``has_next``/``next_cursor``, senza dettagli SAN).
 
 Nessuna rete reale: client httpx mockato.  La chiave si forza sul
 singleton ``graph_engine.config.settings`` (come per MISP/OpenCTI).
@@ -129,17 +131,74 @@ class TestQueryCtlogsMocked:
         assert result["newest_cert_days"] is not None
         assert result["oldest_cert_days"] is not None
         assert result["source"] == "ctlogs.dev"
+        assert result["mode"] == "api"
 
-    async def test_not_configured_no_http(self, monkeypatch):
-        """Senza CTLOGS_API_KEY → error immediato, nessuna chiamata."""
+    async def test_anonymous_mode_uses_public_endpoint(self, monkeypatch):
+        """Senza CTLOGS_API_KEY → endpoint pubblico /search?output=json:
+        date note dalla ricerca, sibling vuoti (nessuna SAN list),
+        nessun header Bearer, nessuna richiesta ai dettagli."""
         monkeypatch.setattr(settings, "ctlogs_api_key", None)
         client = _make_mock_client()
+        with patch(
+            "graph_engine.osint.certificate_transparency.cache_get",
+            return_value=None,
+        ):
+            result = await query_ctlogs("evil.example.com", client)
 
-        result = await query_ctlogs("evil.example.com", client)
+        assert "error" not in result
+        assert result["mode"] == "anonymous"
+        assert result["sibling_domains"] == []
+        assert result["total_siblings"] == 0
+        assert result["newest_cert_days"] is not None
+        assert result["oldest_cert_days"] is not None
+        assert result["total_certs"] == 2
+        assert result["source"] == "ctlogs.dev"
 
-        assert "error" in result
-        assert "not configured" in result["error"]
-        client.get.assert_not_called()
+        # Una sola richiesta: la ricerca pubblica, senza header Bearer
+        assert len(client.get.call_args_list) == 1
+        called = client.get.call_args_list[0]
+        assert called.args[0] == (
+            "https://ctlogs.dev/search?q=evil.example.com&output=json"
+        )
+        assert called.kwargs["headers"] is None
+
+    async def test_anonymous_paginated_marks_oldest_and_total_unknown(
+        self, monkeypatch
+    ):
+        """Anche l'endpoint pubblico pagina (has_next): oldest e total
+        None, mai inventati; newest resta noto (prima riga)."""
+        monkeypatch.setattr(settings, "ctlogs_api_key", None)
+        with patch(
+            "graph_engine.osint.certificate_transparency.cache_get",
+            return_value=None,
+        ):
+            result = await query_ctlogs(
+                "evil.example.com", _make_mock_client(has_next=True)
+            )
+
+        assert "error" not in result
+        assert result["mode"] == "anonymous"
+        assert result["newest_cert_days"] is not None
+        assert result["oldest_cert_days"] is None
+        assert result["total_certs"] is None
+
+    async def test_anonymous_empty_rows(self, monkeypatch):
+        """Nessun certificato sull'endpoint pubblico → risultato vuoto
+        strutturato, mai error (verificato live sul formato)."""
+        monkeypatch.setattr(settings, "ctlogs_api_key", None)
+        with patch(
+            "graph_engine.osint.certificate_transparency.cache_get",
+            return_value=None,
+        ):
+            result = await query_ctlogs(
+                "empty.example.com", _make_mock_client(rows=[])
+            )
+
+        assert "error" not in result
+        assert result["mode"] == "anonymous"
+        assert result["sibling_domains"] == []
+        assert result["total_certs"] == 0
+        assert result["source"] == "ctlogs.dev"
 
     async def test_auth_header_sent(self, monkeypatch):
         """L'API key viaggia nell'header Authorization: Bearer."""
@@ -295,6 +354,37 @@ class TestQueryCtlogsMocked:
 
         assert result1 == result2
         client.get.assert_not_called()
+
+    async def test_cache_separated_by_mode(self, monkeypatch):
+        """La cache anonima non viene riusata dalla modalità API: quando
+        la chiave arriva il fallback rifà le richieste e vede i sibling
+        che la modalità anonima non può vedere."""
+        client = _make_mock_client()
+
+        # Modalità anonima: prima chiamata forza HTTP (cache bypassata),
+        # la seconda conferma la cache anonima reale.
+        monkeypatch.setattr(settings, "ctlogs_api_key", None)
+        with patch(
+            "graph_engine.osint.certificate_transparency.cache_get",
+            return_value=None,
+        ):
+            anon = await query_ctlogs("evil.example.com", client)
+        client.get.reset_mock()
+        anon_cached = await query_ctlogs("evil.example.com", client)
+        assert anon_cached == anon
+        client.get.assert_not_called()
+
+        # Arriva la chiave: cache API separata → HTTP di nuovo, sibling visti.
+        _enable_ctlogs(monkeypatch)
+        with patch(
+            "graph_engine.osint.certificate_transparency.cache_get",
+            return_value=None,
+        ):
+            api = await query_ctlogs("evil.example.com", client)
+
+        assert api["mode"] == "api"
+        assert "sibling1.example.com" in api["sibling_domains"]
+        assert api != anon
 
 
 # ---------------------------------------------------------------------------

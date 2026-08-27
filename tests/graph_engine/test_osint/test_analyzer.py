@@ -89,6 +89,12 @@ class TestAnalyzerIntegration:
             "graph_engine.osint.analyzer.query_crtsh",
             new_callable=AsyncMock,
         ) as mock_crtsh, patch(
+            # Il fallback ctlogs scatta SEMPRE quando crt.sh fallisce:
+            # mockato per non fare rete reale.
+            "graph_engine.osint.analyzer.query_ctlogs",
+            new_callable=AsyncMock,
+            return_value={"error": "ctlogs.dev (mocked)"},
+        ), patch(
             "graph_engine.osint.analyzer.query_rdap",
             new_callable=AsyncMock,
         ) as mock_rdap, patch(
@@ -883,9 +889,10 @@ class TestOpenCtiWeighting:
 class TestCtlogsFallback:
     """Fallback ctlogs.dev quando crt.sh fallisce.
 
-    Il segnale sibling_domains non deve andare perso per un 502 di
-    crt.sh: con CTLOGS_API_KEY configurata il fallback produce la
-    stessa evidenza con ``source: ctlogs.dev``.
+    Il segnale non deve andare perso per un 502 di crt.sh: con
+    CTLOGS_API_KEY il fallback produce la stessa evidenza sibling
+    (``source: ctlogs.dev``, ``mode: api``); senza chiave produce
+    ``certificate_history`` (cronologia certificati, senza sibling).
     """
 
     def _patch_l2_sources(self, crtsh_side_effect=None):
@@ -967,8 +974,10 @@ class TestCtlogsFallback:
         assert "crtsh" in providers
         assert "ctlogs.dev" not in providers
 
-    async def test_no_ctlogs_key_no_fallback_call(self, monkeypatch):
-        """Senza CTLOGS_API_KEY il fallback non viene mai invocato."""
+    async def test_anonymous_fallback_without_key(self, monkeypatch):
+        """Senza CTLOGS_API_KEY il fallback scatta comunque (la modalità
+        anonima è decisa nel provider): risultato senza sibling ma con
+        cronologia → evidenza certificate_history, cert fresco pesato."""
         monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         monkeypatch.setattr(settings, "ctlogs_api_key", None)
         (
@@ -977,17 +986,103 @@ class TestCtlogsFallback:
         ) = self._patch_l2_sources(
             crtsh_side_effect=[{"error": "crt.sh HTTP error: 502"}]
         )
+        mock_ctlogs.return_value = {
+            "sibling_domains": [],
+            "truncated": False,
+            "total_siblings": 0,
+            "newest_cert_days": 5,
+            "oldest_cert_days": 90,
+            "total_certs": 2,
+            "source": "ctlogs.dev",
+            "mode": "anonymous",
+        }
 
         with p_crtsh, p_ctlogs, p_rdap, p_dns, p_urlhaus:
             result = await analyze("https://evil.example.com/login")
 
-        mock_ctlogs.assert_not_called()
+        mock_ctlogs.assert_called_once()
+        hist = [
+            e for e in result["evidence"] if e["key"] == "certificate_history"
+        ]
+        assert len(hist) == 1
+        assert hist[0]["value"]["source"] == "ctlogs.dev"
+        assert hist[0]["value"]["mode"] == "anonymous"
+        assert hist[0]["value"]["newest_cert_days"] == 5
+        assert hist[0]["weight"] == 0.15  # cert di 5 giorni → fresh
+        assert result["passive_risk_score"] == 0.15
+
         unavail = [
             e for e in result["evidence"]
             if e["key"] == "provider_unavailable"
         ]
         assert len(unavail) == 1
         assert unavail[0]["value"]["provider"] == "crtsh"
+
+    async def test_fallback_old_cert_history_informative(self, monkeypatch):
+        """Cronologia con cert vecchio → certificate_history weight 0.0
+        (informativa — mai penalizzare per assenza di segnale)."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        monkeypatch.setattr(settings, "ctlogs_api_key", None)
+        (
+            p_crtsh, p_ctlogs, p_rdap, p_dns, p_urlhaus,
+            mock_crtsh, mock_ctlogs,
+        ) = self._patch_l2_sources(
+            crtsh_side_effect=[{"error": "crt.sh HTTP error: 502"}]
+        )
+        mock_ctlogs.return_value = {
+            "sibling_domains": [],
+            "truncated": False,
+            "total_siblings": 0,
+            "newest_cert_days": 400,
+            "oldest_cert_days": 500,
+            "total_certs": 3,
+            "source": "ctlogs.dev",
+            "mode": "anonymous",
+        }
+
+        with p_crtsh, p_ctlogs, p_rdap, p_dns, p_urlhaus:
+            result = await analyze("https://evil.example.com/login")
+
+        hist = [
+            e for e in result["evidence"] if e["key"] == "certificate_history"
+        ]
+        assert len(hist) == 1
+        assert hist[0]["weight"] == 0.0
+        assert result["passive_risk_score"] == 0.0
+
+    async def test_crtsh_success_empty_siblings_no_certificate_history(
+        self, monkeypatch
+    ):
+        """crt.sh funzionante senza sibling → nessuna certificate_history
+        (la cronologia da crt.sh non è un segnale nuovo) e nessun
+        fallback invocato."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        monkeypatch.setattr(settings, "ctlogs_api_key", None)
+        (
+            p_crtsh, p_ctlogs, p_rdap, p_dns, p_urlhaus,
+            mock_crtsh, mock_ctlogs,
+        ) = self._patch_l2_sources(
+            crtsh_side_effect=[{
+                "sibling_domains": [],
+                "truncated": False,
+                "total_siblings": 0,
+                "newest_cert_days": 10,
+                "oldest_cert_days": 300,
+                "total_certs": 3,
+            }]
+        )
+
+        with p_crtsh, p_ctlogs, p_rdap, p_dns, p_urlhaus:
+            result = await analyze("https://evil.example.com/login")
+
+        mock_ctlogs.assert_not_called()
+        assert not [
+            e for e in result["evidence"]
+            if e["key"] == "certificate_history"
+        ]
+        assert not [
+            e for e in result["evidence"] if e["key"] == "sibling_domains"
+        ]
 
     async def test_ctlogs_fallback_failure_adds_unavailable(
         self, monkeypatch

@@ -335,26 +335,38 @@ le altre.
 | Fonte | Tipo | Endpoint | Cache TTL |
 |---|---|---|---|
 | **crt.sh** | Certificate Transparency | `https://crt.sh/?q=<domain>&output=json` | 6 ore |
-| **ctlogs.dev** (fallback crt.sh) | Certificate Transparency | `https://api.ctlogs.dev/v1/domain/{host}` + `/v1/cert/{id}` | 6 ore |
+| **ctlogs.dev** (fallback crt.sh) | Certificate Transparency | API: `https://api.ctlogs.dev/v1/domain/{host}` + `/v1/cert/{id}`; anonimo: `https://ctlogs.dev/search?q=<domain>&output=json` | 6 ore (cache separata per modalità) |
 | **RDAP** | WHOIS moderno (via bootstrap IANA) | `https://data.iana.org/rdap/dns.json` → server TLD-specifico | 24 ore |
 | **DNS** | Risoluzione A/AAAA | `loop.getaddrinfo` (asyncio nativo, nessuna dipendenza esterna) | 1 ora |
 
 **Fallback ctlogs.dev** (2026-08-27): crt.sh è notoriamente instabile
 (502 frequenti — il caso reale `s.kemkes.go.id` del collaudo live).
-Quando `query_crtsh` fallisce, con `CTLOGS_API_KEY` configurata
-l'analyzer interroga la REST API di ctlogs.dev: `/v1/domain/{host}`
-(righe SENZA SAN list, ordinate per `not_before` discendente, paginate)
-e poi `/v1/cert/{id}` in parallelo per i primi 25 certificati più
-recenti, che restituisce `san_dns` — l'array completo dei dNSName.
-L'evidenza prodotta è la stessa `sibling_domains` con `source:
-"ctlogs.dev"`.  Onestà sui dati parziali: con risposta paginata
+Quando `query_crtsh` fallisce, l'analyzer interroga SEMPRE ctlogs.dev
+in una di due modalità:
+
+- **API con chiave** (`CTLOGS_API_KEY`): `/v1/domain/{host}` (righe
+  SENZA SAN list, ordinate per `not_before` discendente, paginate) e
+  poi `/v1/cert/{id}` in parallelo per i primi 25 certificati più
+  recenti, che restituisce `san_dns` — l'array completo dei dNSName.
+  L'evidenza prodotta è la stessa `sibling_domains` con `source:
+  "ctlogs.dev"`.
+- **Anonima** (senza chiave): endpoint pubblico
+  `https://ctlogs.dev/search?q=<domain>&output=json` (stessa forma
+  `rows`/`has_next`/`next_cursor`, verificata live). Nessuna SAN list
+  → niente sibling; l'evidenza prodotta è `certificate_history`:
+  un cert emesso da < 30 giorni pesa 0.15 (infrastruttura appena
+  messa in piedi), altrimenti è informativa (weight 0.0).
+
+Onestà sui dati parziali (entrambe le modalità): con risposta paginata
 (`has_next`) `oldest_cert_days` e `total_certs` sono `None` (mai un
 numero inventato — un oldest falsato produrrebbe un falso "dominio
 appena creato"); `newest_cert_days` è sempre affidabile (prima riga).
 Un dettaglio non recuperabile è best-effort (si ignora quel
 certificato). Chiave rilasciata su richiesta via email da
 api.ctlogs.dev; ogni richiesta costa 1 unit della quota mensile
-(il risultato è cachato con lo stesso TTL di crt.sh).
+(il risultato è cachato con lo stesso TTL di crt.sh). La cache è
+separata per modalità: quando la chiave arriva, un risultato anonimo
+(senza sibling) non viene riusato dall'API.
 
 ### Adapter predisposti (disabilitati di default)
 
@@ -437,6 +449,14 @@ può pubblicare:
   reale è superiore, viene impostato `truncated: true` con il conteggio
   reale in `total_siblings`.
   Questo è il pivot a più alto valore secondo l'architettura originale.
+
+- **Cronologia certificati** (`certificate_history`): dal fallback
+  ctlogs.dev quando non ci sono sibling (modalità anonima, o dominio
+  senza SAN condivisi).  Un cert emesso da < 30 giorni pesa 0.15
+  (infrastruttura appena messa in piedi); oltre è informativa
+  (weight 0.0).  Il valore porta `source`, `mode` (`api`/`anonymous`),
+  `newest_cert_days` e — quando noti — `oldest_cert_days`/`total_certs`
+  (`None` con risposta paginata: mai inventati).
 
 - **Età del dominio** (`domain_age_days`): dal record RDAP. Soglie:
   < 30 giorni → peso 0.35 (sospetto), 30-90 giorni → peso 0.15 (moderato),

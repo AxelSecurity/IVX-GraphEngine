@@ -15,7 +15,6 @@ from urllib.parse import urlparse
 
 import httpx
 
-from graph_engine.config import settings
 from graph_engine.osint.certificate_transparency import (
     query_crtsh,
     query_ctlogs,
@@ -38,6 +37,9 @@ from graph_engine.osint.reputation.registry import get_enabled_providers
 _W_DOMAIN_AGE_YOUNG = 0.35     # dominio registrato da < 30 giorni
 _W_DOMAIN_AGE_MODERATE = 0.15  # dominio registrato da 30-90 giorni
 _W_SIBLING_DOMAINS = 0.30      # presenza di domini fratelli (stessa campagna)
+_W_FRESH_CERT = 0.15           # cert più recente emesso da < 30 giorni nel
+                               # fallback ctlogs senza SAN (infrastruttura
+                               # appena messa in piedi — indizio debole)
 _W_REPUTATION_HIT = 0.50       # URL presente in un feed di minacce (peso alto)
 _W_MISP_IDS_HIT = 0.55         # hit MISP con to_ids=true — feed curato
                                # manualmente dagli analisti, vale
@@ -184,27 +186,26 @@ async def analyze(
                 value={"provider": "crtsh", "reason": reason},
                 weight=0.0,
             ))
-            # Fallback ctlogs.dev (solo con chiave configurata): il
-            # segnale sibling_domains non deve andare perso per un 502
-            # di crt.sh.  Stesso contratto di ritorno, con source
-            # diverso.  Contenimento errori: un'eccezione del fallback
-            # degrada a provider_unavailable, mai un crash dell'analisi.
-            if settings.ctlogs_configured:
-                try:
-                    crtsh_result = await query_ctlogs(
-                        hostname, client, timeout=timeout_s
-                    )
-                except Exception as exc:  # noqa: BLE001 — contenimento errori
-                    crtsh_result = {"error": str(exc)}
-                if isinstance(crtsh_result, dict) and "error" in crtsh_result:
-                    evidence.append(_make_evidence(
-                        key="provider_unavailable",
-                        value={
-                            "provider": "ctlogs.dev",
-                            "reason": crtsh_result["error"],
-                        },
-                        weight=0.0,
-                    ))
+            # Fallback ctlogs.dev, SEMPRE (API con chiave, anonimo
+            # senza): il segnale non deve andare perso per un 502 di
+            # crt.sh.  Stesso contratto di ritorno, con source diverso.
+            # Contenimento errori: un'eccezione del fallback degrada a
+            # provider_unavailable, mai un crash dell'analisi.
+            try:
+                crtsh_result = await query_ctlogs(
+                    hostname, client, timeout=timeout_s
+                )
+            except Exception as exc:  # noqa: BLE001 — contenimento errori
+                crtsh_result = {"error": str(exc)}
+            if isinstance(crtsh_result, dict) and "error" in crtsh_result:
+                evidence.append(_make_evidence(
+                    key="provider_unavailable",
+                    value={
+                        "provider": "ctlogs.dev",
+                        "reason": crtsh_result["error"],
+                    },
+                    weight=0.0,
+                ))
         if isinstance(crtsh_result, dict) and "error" not in crtsh_result:
             siblings = crtsh_result.get("sibling_domains", [])
             if siblings:
@@ -221,6 +222,26 @@ async def analyze(
                     },
                     weight=_W_SIBLING_DOMAINS,
                 ))
+            elif crtsh_result.get("source") == "ctlogs.dev":
+                # Fallback senza sibling (modalità anonima, o dominio
+                # senza SAN condivisi): resta la cronologia certificati.
+                # Un cert emesso da < 30 giorni è un indizio debole di
+                # infrastruttura appena messa in piedi; altrimenti solo
+                # informativa (mai penalizzare per assenza di segnale).
+                newest = crtsh_result.get("newest_cert_days")
+                if newest is not None:
+                    weight = _W_FRESH_CERT if newest <= 30 else 0.0
+                    evidence.append(_make_evidence(
+                        key="certificate_history",
+                        value={
+                            "newest_cert_days": newest,
+                            "oldest_cert_days": crtsh_result.get("oldest_cert_days"),
+                            "total_certs": crtsh_result.get("total_certs"),
+                            "source": "ctlogs.dev",
+                            "mode": crtsh_result.get("mode"),
+                        },
+                        weight=weight,
+                    ))
 
         # ── RDAP: età dominio, registrar, nameserver ──────────────────
         if isinstance(rdap_result, dict):
