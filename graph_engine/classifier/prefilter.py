@@ -112,8 +112,16 @@ def _misp_to_ids_details(bundle: dict) -> Optional[dict]:
     return None
 
 
-def _misp_verdict(bundle: dict, hit: dict) -> Verdict:
-    """Build the deterministic phishing Verdict from a MISP to_ids hit."""
+def _misp_verdict(
+    bundle: dict, hit: dict, opencti_hit: Optional[dict] = None
+) -> Verdict:
+    """Build the deterministic phishing Verdict from a MISP to_ids hit.
+
+    ``opencti_hit`` (optional) carries the details of a concurrent
+    OpenCTI active-IOC hit: the verdict stays MISP (confidence, brand),
+    but the rationale cites OpenCTI as corroboration so the analyst
+    sees both feeds confirmed the URL.
+    """
     matched_types = set(hit.get("matched_types") or [])
     if {"url", "hostname"} & matched_types:
         confidence = _MISP_IDS_URL_CONFIDENCE
@@ -140,6 +148,35 @@ def _misp_verdict(bundle: dict, hit: dict) -> Verdict:
     event_count = hit.get("event_count", "?")
     types_str = ", ".join(sorted(matched_types))
 
+    # Corroborazione OpenCTI: stessi dettagli chiave del rationale
+    # OpenCTI standalone (osservabili, indicatori attivi, marcatura,
+    # score), in forma compatta.
+    opencti_str = ""
+    if opencti_hit is not None:
+        octi_types = ", ".join(
+            sorted(str(t) for t in (opencti_hit.get("matched_types") or []))
+        )
+        octi_match = opencti_hit.get("match_count", "?")
+        octi_active = opencti_hit.get("active_indicator_count", "?")
+        octi_total = opencti_hit.get("total_indicator_count", "?")
+        octi_markings = ", ".join(opencti_hit.get("markings") or [])
+        octi_score = opencti_hit.get("score_avg")
+        obs_word = "osservabile" if octi_match == 1 else "osservabili"
+        ind_word = (
+            "indicatore attivo" if octi_active == 1 else "indicatori attivi"
+        )
+        opencti_str = (
+            f" Confermato anche da OpenCTI: {octi_match} {obs_word} "
+            f"({octi_types}), {octi_active} {ind_word} su "
+            f"{octi_total}."
+            + (f" Marcatura: {octi_markings}." if octi_markings else "")
+            + (f" Score medio: {octi_score}." if octi_score is not None else "")
+        )
+
+    feed_closing = (
+        "Feed verificati" if opencti_hit is not None else "Feed verificato"
+    )
+
     return Verdict(
         target_id=bundle.get("target_id", ""),
         classification=Classification.phishing,
@@ -153,7 +190,8 @@ def _misp_verdict(bundle: dict, hit: dict) -> Verdict:
             f"analisti (IOC per IDS). Dettagli: {match_count} attributi "
             f"({types_str}) in {event_count} eventi."
             + (f" Tag: {tag_str}." if tag_str else "")
-            + " Feed verificato → classificato malevolo senza consultare "
+            + opencti_str
+            + f" {feed_closing} → classificato malevolo senza consultare "
             "il classificatore AI."
         ),
         final_url=bundle.get("canonical_url") or bundle.get("input_url"),
@@ -301,13 +339,15 @@ def prefilter(bundle: dict) -> Optional[Verdict]:
     # page must never outweigh a curated IDS-grade IOC (see module
     # docstring for the 2026-08-27 false-negative case).
     misp_hit = _misp_to_ids_details(bundle)
-    if misp_hit is not None:
-        return _misp_verdict(bundle, misp_hit)
-
-    # OpenCTI active IOC: same deterministic semantics as MISP.  Checked
-    # AFTER MISP — when both feeds hit, the MISP verdict wins (IDS-grade
-    # curation and brand extraction).
     opencti_hit = _opencti_active_details(bundle)
+    if misp_hit is not None:
+        # Con entrambi i feed il Verdict MISP guida (curatela IDS,
+        # brand dai tag phishing-name), ma il rationale cita OpenCTI
+        # come corroborazione — l'analista deve vedere che entrambe le
+        # piattaforme hanno confermato l'URL.
+        return _misp_verdict(bundle, misp_hit, opencti_hit=opencti_hit)
+
+    # OpenCTI active IOC: same deterministic semantics as MISP.
     if opencti_hit is not None:
         return _opencti_verdict(bundle, opencti_hit)
 

@@ -82,7 +82,7 @@ Tutti modelli Pydantic v2 con `from __future__ import annotations`:
 ### Pipeline L5 a due stadi
 
 1. **`prefilter()`** — deterministico. Due famiglie di intercettazione:
-   - **Hit IOC verificato → Verdict `phishing` DIRETTO** (regola prioritaria, 2026-08-27): MISP con `to_ids=true` (IOC curato manualmente dagli analisti e destinato agli IDS, es. feed CERT-AGID) O OpenCTI con `active_ioc_match=true` (osservabile con ≥1 Indicator correlato attivo: non revoked, non scaduto). In entrambi i casi segnale malevolo verificato: decide SENZA il modello e una landing decoy/in errore non lo indebolisce. Confidenza 0.95 (match su URL/hostname) o 0.85 (solo dominio/IP); brand estratto dai tag `phishing-name:*` (solo MISP; con entrambi i feed vince il Verdict MISP).
+   - **Hit IOC verificato → Verdict `phishing` DIRETTO** (regola prioritaria, 2026-08-27): MISP con `to_ids=true` (IOC curato manualmente dagli analisti e destinato agli IDS, es. feed CERT-AGID) O OpenCTI con `active_ioc_match=true` (osservabile con ≥1 Indicator correlato attivo: non revoked, non scaduto). In entrambi i casi segnale malevolo verificato: decide SENZA il modello e una landing decoy/in errore non lo indebolisce. Confidenza 0.95 (match su URL/hostname) o 0.85 (solo dominio/IP); brand estratto dai tag `phishing-name:*` (solo MISP; con entrambi i feed vince il Verdict MISP ma il rationale cita OpenCTI come corroborazione).
    - **Casi banalmente inconclusivi** ("1 stato + nessun testo visibile", "errore non gestito + nessun altro segnale") → `suspicious` conf 0.05.
    - Per il resto `None`: L1/L2/L3 con segnale reale NON vengono mai intercettati come "dati insufficienti".
 2. **`classify()`** → Foundry Agent (Azure AI Projects SDK) — solo se il prefilter restituisce None

@@ -654,7 +654,8 @@ class TestOpenCtiActiveHitIntercepts:
 
     def test_misp_rule_wins_over_opencti_when_both_hit(self):
         """Entrambi i feed colpiscono → vince il Verdict MISP (curatela
-        IDS + estrazione brand dai tag phishing-name)."""
+        IDS + estrazione brand dai tag phishing-name) e il rationale cita
+        OpenCTI come corroborazione."""
         bundle = _sparse_l4_bundle(
             passive_risk_score=0.55,
             evidence_summary={"reputation_hit": 2},
@@ -668,4 +669,14 @@ class TestOpenCtiActiveHitIntercepts:
         assert verdict.classification == Classification.phishing
         assert verdict.brand == "Amazon, Netflix", (
             "Con entrambi i feed vince il Verdict MISP (brand dai tag)"
+        )
+        assert "Confermato anche da OpenCTI" in verdict.rationale, (
+            "Con un hit OpenCTI concorrente il rationale deve citarlo "
+            "come corroborazione"
+        )
+        assert "1 osservabile (Url), 1 indicatore attivo su 1" in (
+            verdict.rationale
+        ), "I dettagli OpenCTI (osservabili e indicatori) vanno nel rationale"
+        assert "Feed verificati" in verdict.rationale, (
+            "Con due feed confermati la chiusura del rationale è al plurale"
         )

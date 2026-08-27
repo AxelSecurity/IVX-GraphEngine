@@ -188,7 +188,10 @@ Il livello L5 trasforma i dati grezzi raccolti durante l'esplorazione L4 in un
       registrabile/IP (infrastruttura) → 0.85. Il brand impersonato
       viene estratto dai tag `phishing-name:*` (solo MISP — i label
       OpenCTI non seguono quella convenzione, brand resta `None`).
-      Quando entrambi i feed colpiscono vince il Verdict MISP.
+      Quando entrambi i feed colpiscono vince il Verdict MISP
+      (confidenza e brand), ma il rationale cita anche OpenCTI come
+      corroborazione ("Confermato anche da OpenCTI: …") — l'analista
+      deve vedere che entrambe le piattaforme hanno confermato l'URL.
 
    b. **Casi banalmente inconclusivi** (1 stato senza testo visibile,
       errore non gestito senza altri segnali) → Verdict `suspicious` a
