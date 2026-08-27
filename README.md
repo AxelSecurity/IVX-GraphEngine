@@ -111,6 +111,47 @@ separati:
 Il JSON mostrato dal CLI (`python -m graph_engine.cli <url>`) è lo stesso
 contenuto di `GET /analyses/{id}/graph`.
 
+#### Contratto di `GET /trellix/analyze`
+
+Trellix chiama il modulo **passando l'URL in query string** e **attendendo
+che la risposta contenga il JSON** del verdetto — non c'è un secondo passo
+asincrono:
+
+```bash
+curl -G http://localhost:8000/trellix/analyze \
+     --data-urlencode "url=https://example.org/"
+```
+
+Risposta (200, `Content-Type: application/json`) — verdetto binario:
+
+```json
+{
+  "verdict": "safe",
+  "confidence": 0.95,
+  "signature": "No Threats Detected",
+  "recommended_action": "allow",
+  "reason": "Analisi completata — nessun indicatore di phishing rilevato."
+}
+```
+
+Campi:
+
+| Campo | Valori | Significato |
+|---|---|---|
+| `verdict` | `safe` \| `malicious` | Il verdetto binario atteso da Trellix |
+| `confidence` | 0.0–1.0 | Fiducia del verdetto (safe: ≥0.9 se completo, 0.1 se incompleto; malicious: ≥0.8) |
+| `signature` | testo breve | Firma leggibile; su `safe` è sempre benigna (`No Threats Detected` o simile), mai "Phishing: …" |
+| `recommended_action` | `allow` \| `block` | Azione raccomandata a Trellix |
+| `reason` | testo | Motivazione leggibile (il `rationale` del classificatore, se presente) |
+
+Il chiamante resta in attesa fino a ~48s (deadline 60s di Frontdoor). Se
+l'analisi non è terminata entro la finestra, la risposta arriva comunque ma
+lo dichiara onestamente — `"verdict": "safe"`, `"confidence": 0.1`,
+`"signature": "Analysis-Incomplete — Benign By Default"` — e l'analisi
+continua in background: il risultato completo resta disponibile su
+`GET /analyses/{id}` (l'`id` è la stessa risorsa usata dal flusso
+asincrono POST).
+
 ## Test
 
 ```bash

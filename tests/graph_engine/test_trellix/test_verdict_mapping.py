@@ -40,7 +40,16 @@ class TestVerdictMapping:
 
 
 class TestBuildSignature:
-    """Test di build_signature con vari input."""
+    """Test di build_signature con vari input.
+
+    Le firme specifiche (brand impersonation, gate bypass, credential
+    harvesting) descrivono un ATTACCO: vengono cercate SOLO con
+    ``mapped="malicious"``.  Regressione del collaudo Docker (2026-08-27):
+    example.org classificato benign con ``verdict.brand="IANA"``
+    valorizzato da Foundry produceva una firma "Phishing: IANA
+    Impersonation" su un verdetto ``safe``, contraddittoria per il
+    consumatore.
+    """
 
     def test_signature_with_typosquat_evidence(self):
         """Evidence typosquat con brand → 'Phishing: X Impersonation'."""
@@ -48,14 +57,14 @@ class TestBuildSignature:
         evidence = [
             {"key": "typosquat", "value": '{"brand": "Poste Italiane", "matched_domain": "poste-it.com", "distance": 1}'},
         ]
-        sig = build_signature(verdict, evidence)
+        sig = build_signature(verdict, evidence, mapped="malicious")
         assert "Poste Italiane" in sig
         assert "Impersonation" in sig
 
     def test_signature_with_verdict_brand(self):
         """Verdict.brand valorizzato → brand impersonation."""
         verdict = _verdict(brand="PayPal")
-        sig = build_signature(verdict, [])
+        sig = build_signature(verdict, [], mapped="malicious")
         assert "PayPal" in sig
         assert "Impersonation" in sig
 
@@ -63,7 +72,7 @@ class TestBuildSignature:
         """Evidence con gate_solved → 'Suspicious Gate Bypass'."""
         verdict = _verdict()
         evidence = [{"key": "gate_solved", "value": "cloudflare_turnstile"}]
-        sig = build_signature(verdict, evidence)
+        sig = build_signature(verdict, evidence, mapped="malicious")
         assert "Gate Bypass" in sig
 
     def test_signature_credential_harvesting(self):
@@ -72,13 +81,40 @@ class TestBuildSignature:
         evidence = [
             {"key": "aitm_email_payload", "value": "user@example.com"},
         ]
-        sig = build_signature(verdict, evidence)
+        sig = build_signature(verdict, evidence, mapped="malicious")
         assert "Credential Harvesting" in sig
+
+    def test_brand_not_used_when_safe(self):
+        """Regressione: benign con brand valorizzato → firma generica,
+        MAI 'Phishing: X Impersonation' su un verdetto safe."""
+        verdict = _verdict(
+            classification=Classification.benign,
+            confidence=0.95,
+            brand="IANA",
+        )
+        sig = build_signature(verdict, [], mapped="safe")
+        assert sig == "No Threats Detected"
+        assert "Phishing" not in sig
+
+    def test_attack_signatures_not_used_when_safe(self):
+        """Regressione: gate/credential su verdetto safe → firma generica."""
+        verdict = _verdict(
+            classification=Classification.benign,
+            confidence=0.95,
+        )
+        evidence = [
+            {"key": "gate_solved", "value": "cloudflare_turnstile"},
+            {"key": "aitm_email_payload", "value": "user@example.com"},
+        ]
+        sig = build_signature(verdict, evidence, mapped="safe")
+        assert sig == "No Threats Detected"
+        assert "Gate" not in sig
+        assert "Credential" not in sig
 
     def test_signature_generic_phishing(self):
         """Nessun segnale specifico → 'Phishing Page Detected'."""
         verdict = _verdict(confidence=0.88)
-        sig = build_signature(verdict, [])
+        sig = build_signature(verdict, [], mapped="malicious")
         assert "Phishing" in sig
 
     def test_signature_generic_benign(self):
@@ -144,6 +180,45 @@ class TestBuildTrellixResponse:
         )
         assert resp["verdict"] == "safe"
         assert "classificazione assente" in resp["reason"].lower()
+
+    def test_benign_with_brand_has_coherent_signature(self):
+        """Regressione end-to-end del caso reale (example.org/IANA):
+        benign + brand valorizzato → verdict safe, firma benigna."""
+        from graph_engine.models import AnalysisTarget, TargetStatus
+
+        target = AnalysisTarget(
+            input_url="https://example.org/",
+            status=TargetStatus.done,
+        )
+        verdict = _verdict(
+            classification=Classification.benign,
+            confidence=0.95,
+            brand="IANA",
+        )
+        resp = build_trellix_response(
+            {"target": target, "verdict": verdict, "evidence": []},
+        )
+        assert resp["verdict"] == "safe"
+        assert resp["confidence"] == 0.95
+        assert resp["signature"] == "No Threats Detected"
+        assert "Phishing" not in resp["signature"]
+        assert resp["recommended_action"] == "allow"
+
+    def test_phishing_with_brand_keeps_impersonation_signature(self):
+        """Invariante: phishing + brand → malicious + firma impersonation."""
+        from graph_engine.models import AnalysisTarget, TargetStatus
+
+        target = AnalysisTarget(
+            input_url="https://phish.example/",
+            status=TargetStatus.done,
+        )
+        verdict = _verdict(brand="Netflix")
+        resp = build_trellix_response(
+            {"target": target, "verdict": verdict, "evidence": []},
+        )
+        assert resp["verdict"] == "malicious"
+        assert resp["signature"] == "Phishing: Netflix Impersonation"
+        assert resp["recommended_action"] == "block"
 
 
 class TestEntryResponse:
