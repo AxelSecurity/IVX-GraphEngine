@@ -36,8 +36,15 @@ class OpenCtiProvider(ReputationProvider):
         url: str,
         client: httpx.AsyncClient,
         timeout_s: Optional[float] = None,
+        known_ips: Optional[list[str]] = None,
     ) -> dict:
-        """Cerca *url* in OpenCTI. Se non configurato, restituisce skipped."""
+        """Cerca *url* in OpenCTI. Se non configurato, restituisce skipped.
+
+        ``known_ips`` è accettato per uniformità col contratto di
+        ``ReputationProvider`` ma IGNORATO: la query GraphQL attuale
+        cerca solo per stringa (URL/dominio).
+        """
+        del known_ips  # accettato per contratto, non usato
         if not _is_configured():
             return {
                 "provider": self._provider,

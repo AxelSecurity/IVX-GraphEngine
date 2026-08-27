@@ -1,8 +1,10 @@
 """Orchestratore L2 — analisi passiva / OSINT.
 
-Coordina crt.sh, RDAP, e tutti i provider di reputazione abilitati
-IN PARALLELO. Un fallimento su una fonte non blocca mai le altre
-(``asyncio.gather`` con ``return_exceptions=True``).
+Sequenza: DNS PRIMA (gli IP risolti alimentano i reputation
+provider, es. MISP cerca anche per ``ip-dst``), poi crt.sh, RDAP
+e tutti i provider di reputazione abilitati IN PARALLELO.  Un
+fallimento su una fonte non blocca mai le altre (``asyncio.gather``
+con ``return_exceptions=True``).
 """
 
 from __future__ import annotations
@@ -33,6 +35,9 @@ _W_DOMAIN_AGE_YOUNG = 0.35     # dominio registrato da < 30 giorni
 _W_DOMAIN_AGE_MODERATE = 0.15  # dominio registrato da 30-90 giorni
 _W_SIBLING_DOMAINS = 0.30      # presenza di domini fratelli (stessa campagna)
 _W_REPUTATION_HIT = 0.50       # URL presente in un feed di minacce (peso alto)
+_W_MISP_IDS_HIT = 0.55         # hit MISP con to_ids=true — feed curato
+                               # manualmente dagli analisti, vale
+                               # leggermente più di un feed automatizzato
 
 # Soglie età dominio
 _AGE_YOUNG_DAYS = 30     # sotto questa soglia → young (molto sospetto)
@@ -75,7 +80,13 @@ async def analyze(
 ) -> dict:
     """Esegue tutte le query OSINT L2 su *canonical_url*.
 
-    Le fonti vengono interrogate IN PARALLELO. Se una fallisce, le altre
+    La risoluzione DNS avviene PRIMA; crt.sh, RDAP e i reputation
+    provider partono POI in parallelo.  La sequenza non è più
+    interamente parallela perché gli IP risolti alimentano i provider
+    (MISP cerca anche per ``ip-dst``): senza di essi una query MISP
+    coprirebbe solo URL/dominio e perderebbe i match per IP.  Il costo
+    è un round-trip DNS sul cammino critico; il guadagno è il valore
+    informativo della query MISP.  Se una fonte fallisce, le altre
     continuano — ``return_exceptions=True`` su ``asyncio.gather``.
 
     Args:
@@ -105,24 +116,52 @@ async def analyze(
     async with httpx.AsyncClient(
         timeout=timeout_s if timeout_s is not None else _HTTPX_TIMEOUT
     ) as client:
-        # ── Lancio parallelo di TUTTE le fonti ──────────────────────────
         providers = get_enabled_providers()
 
+        # ── DNS PRIMA — poi il resto in parallelo ────────────────────────
+        # Questa parte NON è più interamente parallela, per scelta:
+        # gli IP risolti devono raggiungere i reputation provider
+        # (MISP include gli ``ip-dst`` nella query restSearch).  Una
+        # query MISP senza IP coprirebbe solo URL/hostname/dominio e
+        # perderebbe i match su infrastruttura condivisa.  Il costo è
+        # un round-trip DNS sul cammino critico (cache 1h mitiga).
+        # resolve_dns non rilancia MAI: gli errori diventano ``error``
+        # popolato (vedi dns_resolve.py).
+        dns_result = await resolve_dns(hostname, timeout=timeout_s)
+
+        known_ips: list[str] = []
+        if isinstance(dns_result, dict) and not dns_result.get("error"):
+            raw_ips = (
+                dns_result.get("a_records", [])
+                + dns_result.get("aaaa_records", [])
+            )
+            # Solo gli indirizzi validi: stringhe non vuote (i resolver
+            # possono sporcare le liste con None o stringhe bianche).
+            known_ips = [
+                ip for ip in raw_ips
+                if isinstance(ip, str) and ip.strip()
+            ]
+
+        # ── crt.sh + RDAP + reputation provider IN PARALLELO ────────────
         crtsh_task = query_crtsh(hostname, client, timeout=timeout_s)
         rdap_task = query_rdap(hostname, client, timeout=timeout_s)
-        dns_task = resolve_dns(hostname, timeout=timeout_s)
         rep_tasks = [
-            p.check(canonical_url, client, timeout_s=timeout_s)
+            p.check(
+                canonical_url,
+                client,
+                timeout_s=timeout_s,
+                known_ips=known_ips,
+            )
             for p in providers
         ]
 
-        all_tasks = [crtsh_task, rdap_task, dns_task] + rep_tasks
-        results = await _gather_ignore_exceptions(*all_tasks)
+        results = await _gather_ignore_exceptions(
+            crtsh_task, rdap_task, *rep_tasks
+        )
 
         crtsh_result = results[0]
         rdap_result = results[1]
-        dns_result = results[2]
-        rep_results = results[3:]
+        rep_results = results[2:]
 
         # ── crt.sh: domini fratelli ────────────────────────────────────
         if isinstance(crtsh_result, dict):
@@ -263,10 +302,29 @@ async def analyze(
                 # Provider disabilitato — nessuna evidenza, è volontario
                 pass
             elif rep_result.get("listed"):
+                details = rep_result["details"]
+                # Un hit MISP con to_ids=true vale leggermente più di
+                # un hit di feed automatizzato (URLhaus): le fonti MISP
+                # sono curate manualmente dagli analisti.
+                weight = (
+                    _W_MISP_IDS_HIT
+                    if details.get("to_ids_match")
+                    else _W_REPUTATION_HIT
+                )
                 evidence.append(_make_evidence(
                     key="reputation_hit",
+                    value=details,
+                    weight=weight,
+                ))
+            elif rep_result.get("details", {}).get("context_only"):
+                # Match MISP con SOLO to_ids=false: contesto informativo
+                # (l'IOC esiste ma non è un flag per gli IDS).  Mai
+                # penalizzare per segnale debole → weight 0.0, ma
+                # l'evidenza resta visibile per il classificatore.
+                evidence.append(_make_evidence(
+                    key="misp_context_match",
                     value=rep_result["details"],
-                    weight=_W_REPUTATION_HIT,
+                    weight=0.0,
                 ))
             # else: listed=False, nessun segnale → no evidence (principio:
             # l'assenza di segnale non è un segnale)

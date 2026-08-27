@@ -39,8 +39,15 @@ class UrlhausProvider(ReputationProvider):
         url: str,
         client: httpx.AsyncClient,
         timeout_s: Optional[float] = None,
+        known_ips: Optional[list[str]] = None,
     ) -> dict:
-        """Interroga URLhaus per *url*. Se non configurato, skipped."""
+        """Interroga URLhaus per *url*. Se non configurato, skipped.
+
+        ``known_ips`` è accettato per uniformità col contratto di
+        ``ReputationProvider`` ma IGNORATO: l'API di URLhaus cerca
+        solo per URL.
+        """
+        del known_ips  # accettato per contratto, non usato
         if not _is_configured():
             return {
                 "provider": self._provider,

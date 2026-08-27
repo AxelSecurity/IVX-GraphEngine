@@ -294,8 +294,15 @@ impone tre vincoli non negoziabili:
 ## L2 — Passivo / OSINT
 
 Il livello L2 raccoglie informazioni da fonti esterne senza interagire con
-il target. Tutte le query sono in **parallelo** (`asyncio.gather` con
-`return_exceptions=True`): un fallimento su una fonte non blocca mai le altre.
+il target. La sequenza NON è interamente parallela: la risoluzione **DNS
+avviene prima** (round-trip sul cammino critico, mitigato dalla cache 1h),
+poi crt.sh, RDAP e i reputation provider partono **in parallelo**
+(`asyncio.gather` con `return_exceptions=True`). La sequenzialità è
+voluta: gli IP risolti alimentano la query dei reputation provider
+(MISP cerca anche per `ip-dst`), quindi una query MISP senza IP
+coprirebbe solo URL/hostname/dominio e perderebbe i match su
+infrastruttura condivisa. Un fallimento su una fonte non blocca mai
+le altre.
 
 ### Fonti attive
 
@@ -325,6 +332,29 @@ Per attivare URLhaus, MISP o OpenCTI, basta impostare le variabili
 d'ambiente corrispondenti. Nessuna modifica al codice necessaria: il
 `registry.py` rileva le variabili a runtime e istanzia i provider.
 
+#### MISP — restSearch multi-tipo e semantica to_ids
+
+Il provider MISP invia **una sola** chiamata a `/attributes/restSearch`
+con una lista di valori candidati — URL completo, hostname, dominio
+registrabile (riusando `_registrable_domain` di L1, stessa funzione
+tldextract) e gli IP risolti (`known_ips`) — e una lista di tipi
+(`domain`, `hostname`, `url`, `ip-dst`). Forma verificata contro la
+documentazione ufficiale (OpenAPI `restSearchAttributes` e sorgente
+MISP 2.4): `value` e `type` accettano liste nel body JSON e
+`includeContext: 1` annida l'oggetto `Event` completo (`info`,
+`threat_level_id`, `Tag`) in ogni attributo della risposta.
+
+La risposta viene riassunta in forma compatta (mai payload grezzo):
+`match_count`, `matched_types`, `tags` deduplicati (dall'Attributo E
+dall'Evento), `event_count`, `to_ids_match`. Il flag `to_ids` NON è
+equiparato tra i due valori:
+
+- `to_ids=true` (almeno un match) → `listed=True`, hit reale: l'IOC è
+  destinato agli IDS ed è curato manualmente dagli analisti.
+- SOLO `to_ids=false` → `listed=False` ma `details.context_only=True`:
+  contesto informativo, mai un hit (principio: mai penalizzare per
+  segnale debole).
+
 ### Segnali estratti
 
 - **Domini fratelli di campagna** (`sibling_domains`): dalla SAN list
@@ -338,7 +368,14 @@ d'ambiente corrispondenti. Nessuna modifica al codice necessaria: il
   > 90 giorni → nessuna penalizzazione (dominio stagionato).
 
 - **Reputation hit** (`reputation_hit`): URL presente in un feed di
-  minacce (es. URLhaus). Peso 0.50 (il più alto).
+  minacce (es. URLhaus). Peso 0.50 — sale a **0.55** quando il match
+  è MISP con `to_ids=true` (fonte curata manualmente, leggermente più
+  affidabile di un feed automatizzato).
+
+- **MISP context match** (`misp_context_match`): match MISP con SOLO
+  `to_ids=false`. Peso 0.0 (informativa): l'IOC esiste ma non è un
+  flag per gli IDS — mai penalizzare per segnale debole. L'evidenza
+  resta comunque nel bundle per il classificatore.
 
 - **Record A** (`dns_a_records`): indirizzi IPv4 risolti per il dominio.
   Peso 0.0 (informativo). Colma una lacuna IOC: gli IP servono ai
@@ -359,7 +396,8 @@ d'ambiente corrispondenti. Nessuna modifica al codice necessaria: il
 | `_W_DOMAIN_AGE_YOUNG` | 0.35 | Dominio < 30 giorni |
 | `_W_DOMAIN_AGE_MODERATE` | 0.15 | Dominio 30-90 giorni |
 | `_W_SIBLING_DOMAINS` | 0.30 | Presenza domini fratelli nella SAN list |
-| `_W_REPUTATION_HIT` | 0.50 | URL presente in feed di minacce |
+| `_W_REPUTATION_HIT` | 0.50 | URL presente in feed di minacce (URLhaus, ecc.) |
+| `_W_MISP_IDS_HIT` | 0.55 | Hit MISP con `to_ids=true` — feed curato manualmente |
 
 Il punteggio è clampato a [0, 1]. **MAI** penalizzare per l'assenza di
 segnale — solo per la presenza.
@@ -409,16 +447,16 @@ per i TLD a due componenti.
 ```
 graph_engine/osint/
     __init__.py
-    analyzer.py          — orchestratore parallelo
+    analyzer.py          — orchestratore: DNS prima, poi resto in parallelo
     cache.py             — cache filesystem con TTL
     certificate_transparency.py — crt.sh
     dns_resolve.py       — risoluzione DNS A/AAAA (asyncio nativo)
     rdap.py              — RDAP con bootstrap IANA
     reputation/
         __init__.py
-        base.py          — ReputationProvider (ABC)
+        base.py          — ReputationProvider (ABC, con known_ips)
         urlhaus.py       — URLhaus (richiede Auth-Key)
-        misp.py           — MISP adapter (disabilitato di default)
+        misp.py           — MISP: restSearch multi-tipo + includeContext
         opencti.py        — OpenCTI adapter (disabilitato di default)
         registry.py       — get_enabled_providers()
 ```

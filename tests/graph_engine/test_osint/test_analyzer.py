@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from graph_engine.config import settings
@@ -503,3 +505,245 @@ class TestRiskScoreDerivedFromWeights:
         self._assert_score_equals_weight_sum(result)
         # Solo young (0.35): provider_unavailable e dns_a_records sono 0.0
         assert result["passive_risk_score"] == 0.35
+
+
+class TestDnsFirstSequencing:
+    """La nuova orchestrazione L2: DNS PRIMA, poi crt.sh/RDAP/
+    reputation in parallelo — con gli IP risolti passati ai provider.
+
+    La sequenzialità è voluta (gli IP alimentano la query MISP per
+    ``ip-dst``) e va verificata con un handshake deterministico:
+    le fonti successive devono partire SOLO a DNS completato.
+    """
+
+    _CRTSH_CLEAN = {
+        "sibling_domains": [], "truncated": False, "total_siblings": 0,
+        "newest_cert_days": None, "oldest_cert_days": None, "total_certs": 0,
+    }
+    _RDAP_OLD = {"domain_age_days": 365, "registrar": "R", "nameservers": []}
+    _URLHAUS_CLEAN = {
+        "provider": "urlhaus", "listed": False,
+        "details": {"query_status": "no_results"},
+    }
+
+    async def test_dns_resolved_before_other_sources_start(self, monkeypatch):
+        """crtsh/RDAP/reputation devono partire SOLO dopo che il DNS è
+        completato (handshake con asyncio.Event: deterministico, non
+        basato sul caso)."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        dns_done = asyncio.Event()
+
+        async def dns_then_set(*args, **kwargs):
+            try:
+                return {
+                    "a_records": ["1.2.3.4"], "aaaa_records": [],
+                    "error": None,
+                }
+            finally:
+                dns_done.set()
+
+        async def assert_dns_done(*args, **kwargs):
+            assert dns_done.is_set(), (
+                "fonte partita PRIMA che la risoluzione DNS finisse — "
+                "la sequenza DNS-prima-poi-resto è rotta"
+            )
+            return {"sibling_domains": [], "truncated": False,
+                    "total_siblings": 0, "newest_cert_days": None,
+                    "oldest_cert_days": None, "total_certs": 0}
+
+        with patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            side_effect=dns_then_set,
+        ), patch(
+            "graph_engine.osint.analyzer.query_crtsh",
+            new_callable=AsyncMock,
+            side_effect=assert_dns_done,
+        ), patch(
+            "graph_engine.osint.analyzer.query_rdap",
+            new_callable=AsyncMock,
+            side_effect=assert_dns_done,
+        ), patch(
+            "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
+            new_callable=AsyncMock,
+            side_effect=assert_dns_done,
+        ):
+            result = await analyze("https://evil.example.com/login")
+
+        assert "evidence" in result
+
+    async def test_known_ips_forwarded_to_reputation_providers(self, monkeypatch):
+        """Gli IP risolti (A + AAAA, filtrati dai valori sporchi)
+        devono arrivare come ``known_ips`` al check dei provider."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        with patch(
+            "graph_engine.osint.analyzer.query_crtsh",
+            new_callable=AsyncMock,
+            return_value=self._CRTSH_CLEAN,
+        ), patch(
+            "graph_engine.osint.analyzer.query_rdap",
+            new_callable=AsyncMock,
+            return_value=self._RDAP_OLD,
+        ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value={
+                # None e stringa vuota: sporcizia da filtrare
+                "a_records": ["93.184.216.34", "", None],
+                "aaaa_records": ["2606:2800:220:1:248:1893:25c8:1946"],
+                "error": None,
+            },
+        ), patch(
+            "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
+            new_callable=AsyncMock,
+            return_value=self._URLHAUS_CLEAN,
+        ) as mock_urlhaus:
+            await analyze("https://evil.example.com/login")
+
+        mock_urlhaus.assert_called_once()
+        assert mock_urlhaus.call_args.kwargs["known_ips"] == [
+            "93.184.216.34",
+            "2606:2800:220:1:248:1893:25c8:1946",
+        ]
+
+    async def test_dns_failure_gives_empty_known_ips(self, monkeypatch):
+        """DNS in errore → known_ips lista vuota (mai None): i provider
+        ricevono comunque il parametro."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        with patch(
+            "graph_engine.osint.analyzer.query_crtsh",
+            new_callable=AsyncMock,
+            return_value=self._CRTSH_CLEAN,
+        ), patch(
+            "graph_engine.osint.analyzer.query_rdap",
+            new_callable=AsyncMock,
+            return_value=self._RDAP_OLD,
+        ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value={
+                "a_records": [], "aaaa_records": [],
+                "error": "No DNS records found for evil.example.com",
+            },
+        ), patch(
+            "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
+            new_callable=AsyncMock,
+            return_value=self._URLHAUS_CLEAN,
+        ) as mock_urlhaus:
+            await analyze("https://evil.example.com/login")
+
+        assert mock_urlhaus.call_args.kwargs["known_ips"] == []
+
+
+class TestMispWeighting:
+    """La ponderazione MISP nel risk score: hit reale (to_ids=true)
+    pesa 0.55; match context-only (solo to_ids=false) pesa 0.0 ma
+    resta visibile come evidenza informativa.
+
+    MISP è l'unico provider abilitato (nessuna Auth-Key URLhaus) e
+    le altre fonti sono patchate a valori neutri.
+    """
+
+    _CRTSH_CLEAN = {
+        "sibling_domains": [], "truncated": False, "total_siblings": 0,
+        "newest_cert_days": None, "oldest_cert_days": None, "total_certs": 0,
+    }
+    _RDAP_OLD = {"domain_age_days": 365, "registrar": "R", "nameservers": []}
+    _DNS_CLEAN = {"a_records": ["1.2.3.4"], "aaaa_records": [], "error": None}
+
+    @staticmethod
+    def _patch_neutral_sources():
+        """crt.sh/RDAP/DNS patchati a risultati senza segnale."""
+        return [
+            patch(
+                "graph_engine.osint.analyzer.query_crtsh",
+                new_callable=AsyncMock,
+                return_value=TestMispWeighting._CRTSH_CLEAN,
+            ),
+            patch(
+                "graph_engine.osint.analyzer.query_rdap",
+                new_callable=AsyncMock,
+                return_value=TestMispWeighting._RDAP_OLD,
+            ),
+            patch(
+                "graph_engine.osint.analyzer.resolve_dns",
+                new_callable=AsyncMock,
+                return_value=TestMispWeighting._DNS_CLEAN,
+            ),
+        ]
+
+    async def test_to_ids_hit_weights_high(self, monkeypatch):
+        """Hit MISP con to_ids_match → reputation_hit a peso 0.55
+        (leggermente sopra il 0.50 dei feed automatizzati)."""
+        monkeypatch.setattr(settings, "misp_url", "https://misp.example")
+        monkeypatch.setattr(settings, "misp_api_key", "test-key")
+
+        misp_hit = {
+            "provider": "misp",
+            "listed": True,
+            "details": {
+                "match_count": 2,
+                "matched_types": ["domain", "ip-dst"],
+                "tags": ["phishing"],
+                "event_count": 2,
+                "to_ids_match": True,
+                "context_only": False,
+            },
+        }
+
+        with ExitStack() as stack:
+            for pm in self._patch_neutral_sources():
+                stack.enter_context(pm)
+            stack.enter_context(patch(
+                "graph_engine.osint.reputation.misp.MispProvider.check",
+                new_callable=AsyncMock,
+                return_value=misp_hit,
+            ))
+            result = await analyze("https://evil.example.com/login")
+
+        hit_ev = [e for e in result["evidence"] if e["key"] == "reputation_hit"]
+        assert len(hit_ev) == 1
+        assert hit_ev[0]["weight"] == 0.55
+        assert result["passive_risk_score"] == 0.55
+
+    async def test_context_only_match_zero_weight(self, monkeypatch):
+        """Match MISP solo to_ids=false → evidenza ``misp_context_match``
+        informativa a peso 0.0: nessuna penalizzazione."""
+        monkeypatch.setattr(settings, "misp_url", "https://misp.example")
+        monkeypatch.setattr(settings, "misp_api_key", "test-key")
+
+        misp_context = {
+            "provider": "misp",
+            "listed": False,
+            "details": {
+                "match_count": 3,
+                "matched_types": ["domain"],
+                "tags": ["tlp:white"],
+                "event_count": 1,
+                "to_ids_match": False,
+                "context_only": True,
+            },
+        }
+
+        with ExitStack() as stack:
+            for pm in self._patch_neutral_sources():
+                stack.enter_context(pm)
+            stack.enter_context(patch(
+                "graph_engine.osint.reputation.misp.MispProvider.check",
+                new_callable=AsyncMock,
+                return_value=misp_context,
+            ))
+            result = await analyze("https://evil.example.com/login")
+
+        ctx_ev = [
+            e for e in result["evidence"]
+            if e["key"] == "misp_context_match"
+        ]
+        assert len(ctx_ev) == 1
+        assert ctx_ev[0]["weight"] == 0.0
+        # Nessuna reputation_hit: un context_only NON è un hit
+        assert not [
+            e for e in result["evidence"] if e["key"] == "reputation_hit"
+        ]
+        # Dominio vecchio → unico segnale possibile era MISP: score 0
+        assert result["passive_risk_score"] == 0.0

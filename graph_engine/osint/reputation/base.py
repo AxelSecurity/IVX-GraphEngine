@@ -24,6 +24,7 @@ class ReputationProvider(ABC):
         url: str,
         client: httpx.AsyncClient,
         timeout_s: Optional[float] = None,
+        known_ips: Optional[list[str]] = None,
     ) -> dict:
         """Verifica la reputazione di *url* presso il provider.
 
@@ -33,6 +34,11 @@ class ReputationProvider(ABC):
             timeout_s: Timeout HTTP in secondi per la chiamata del
                        provider.  Se ``None``, il provider usa il proprio
                        default (es. ``URLHAUS_TIMEOUT``).
+            known_ips: Indirizzi IP noti del dominio (record A/AAAA
+                       già risolti).  Opzionale — i provider che li
+                       sfruttano (MISP cerca anche per ``ip-dst``)
+                       li includono nella query; gli altri li ignorano.
+                       ``None`` non cambia nulla per URLhaus/OpenCTI.
 
         Returns:
             Un dizionario con almeno:
