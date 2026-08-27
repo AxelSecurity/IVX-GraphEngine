@@ -301,3 +301,73 @@ class TestRoutesTrellix:
         assert received_url == "https://example.com/login", (
             f"Expected 'https://example.com/login', got '{received_url}'"
         )
+
+    # ------------------------------------------------------------------
+    # URL in chiaro nella query string (il formato reale di Trellix)
+    # ------------------------------------------------------------------
+
+    async def test_plain_url_passed_unchanged(self, app, client, tmp_path, monkeypatch):
+        """URL in chiaro senza caratteri speciali → arriva identico alla
+        pipeline (formato Trellix: ?url=http://example.org)."""
+        db = str(tmp_path / "test.db")
+
+        received_url = None
+
+        async def _fake_pipeline(raw_url, **kwargs):
+            nonlocal received_url
+            received_url = raw_url
+            t = kwargs.get("target")
+            if t:
+                t.status = TargetStatus.done
+                await save_target(t, [], [], [], None, db_path=db)
+            return str(t.id) if t else "done"
+
+        monkeypatch.setattr(
+            "graph_engine.api.routes_trellix.run_full_analysis",
+            _fake_pipeline,
+        )
+
+        res = await client.get("/trellix/analyze?url=http://example.org")
+        assert res.status_code == 200
+        assert received_url == "http://example.org", (
+            f"Expected 'http://example.org', got '{received_url}'"
+        )
+
+    async def test_plain_url_with_embedded_query_not_truncated(
+        self, app, client, tmp_path, monkeypatch,
+    ):
+        """Regressione: URL in chiaro con & e = propri (es. link di
+        sicurezza email) NON deve essere troncato al primo &.  Il parsing
+        standard di FastAPI lo troncherebbe — la route usa la query
+        string grezza."""
+        db = str(tmp_path / "test.db")
+
+        received_url = None
+
+        async def _fake_pipeline(raw_url, **kwargs):
+            nonlocal received_url
+            received_url = raw_url
+            t = kwargs.get("target")
+            if t:
+                t.status = TargetStatus.done
+                await save_target(t, [], [], [], None, db_path=db)
+            return str(t.id) if t else "done"
+
+        monkeypatch.setattr(
+            "graph_engine.api.routes_trellix.run_full_analysis",
+            _fake_pipeline,
+        )
+
+        target = "https://evil.example/redirect?a=1&b=2"
+        res = await client.get(
+            "/trellix/analyze?url=" + target,
+        )
+        assert res.status_code == 200
+        assert received_url == target, (
+            f"URL troncato: expected '{target}', got '{received_url}'"
+        )
+
+    async def test_missing_url_param_returns_422(self, app, client):
+        """GET senza il parametro url → 422."""
+        res = await client.get("/trellix/analyze")
+        assert res.status_code == 422

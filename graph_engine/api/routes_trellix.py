@@ -11,7 +11,8 @@ per la prossima richiesta (cache 24h).
 Flow della route:
 
     1. Auth Bearer opzionale (``TRELLIX_API_TOKEN``)
-    2. URL decoding (Trellix invia URL doppio-encodati)
+    2. Estrazione dell'URL dalla query string GREZZA (tutto ciò che
+       segue ``url=``) + decodifica percent-encoding iterativa
     3. Allowlist/blacklist check → risposta immediata
     4. Cache 24h (``get_latest_for_url_hash``) → risposta immediata
     5. Fire-and-continue con ``asyncio.wait([task], timeout=48)``
@@ -25,9 +26,9 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 
 from graph_engine.api.allowlist import check_domain
 from graph_engine.api.fast_profile import (
@@ -43,6 +44,7 @@ from graph_engine.api.fast_profile import (
 from graph_engine.api.pipeline_runner import run_full_analysis
 from graph_engine.api.trellix_verdict import build_trellix_response, entry_response
 from graph_engine.config import settings
+from graph_engine.ingestion.canonicalize import _decode_percent_iterative
 from graph_engine.models import AnalysisTarget
 from graph_engine.storage.repository import get_latest_for_url_hash, save_target
 from graph_engine.storage.schema import DEFAULT_DB_PATH
@@ -89,15 +91,21 @@ def build_trellix_router(
     # ──────────────────────────────────────────────────────────────────────
 
     @router.get("/trellix/analyze")
-    async def trellix_analyze(
-        request: Request,
-        url: str = Query(..., min_length=1, max_length=2048),
-    ):
+    async def trellix_analyze(request: Request):
         """Endpoint sincrono compatibile Trellix.
 
-        Args:
-            url: URL da analizzare. Trellix lo invia doppio-encodato;
-                 applichiamo ``unquote()`` una volta aggiuntiva.
+        Trellix passa l'URL in query string, in chiaro:
+        ``GET /trellix/analyze?url=http://example.org``.
+
+        Il parametro NON viene letto col parsing standard di FastAPI:
+        un URL reale può contenere ``&``, ``?`` e ``=`` propri (es. i
+        link di sicurezza email con query string lunghe) e il parsing
+        standard li tratterebbe come parametri separati, TRONCANDO
+        l'URL da analizzare.  Prendiamo quindi TUTTO ciò che segue
+        ``url=`` dalla query string grezza, poi decodifichiamo il
+        percent-encoding iterativamente: un URL in chiaro resta
+        invariato, uno encodato (anche più volte) converge alla forma
+        leggibile.
         """
         # ── 0. Auth ────────────────────────────────────────────────────
         token = settings.trellix_api_token
@@ -106,12 +114,21 @@ def build_trellix_router(
             if not _check_token(auth_header, token):
                 raise HTTPException(status_code=401, detail="Unauthorized")
 
-        # ── 1. URL decoding ────────────────────────────────────────────
-        # Starlette decodifica già il query param una volta.
-        # Trellix invia URL doppio-encodati → un unquote aggiuntivo.
-        target_url = unquote(url.strip())
+        # ── 1. Estrazione URL dalla query string grezza ────────────────
+        raw_query = request.url.query or ""
+        if "url=" not in raw_query:
+            raise HTTPException(
+                status_code=422, detail="Parametro 'url' mancante nella query string",
+            )
+        target_url_raw = raw_query.split("url=", 1)[1]
+
+        # Decodifica iterativa (stessa logica della canonicalizzazione
+        # L0): un URL in chiaro non contiene % → resta identico.
+        target_url = _decode_percent_iterative(target_url_raw.strip())
         if not target_url:
             raise HTTPException(status_code=422, detail="URL vuoto dopo decoding")
+        if len(target_url) > 2048:
+            raise HTTPException(status_code=422, detail="URL troppo lungo (max 2048)")
 
         # ── 2. Allowlist check ─────────────────────────────────────────
         hostname = urlparse(target_url).hostname
