@@ -878,3 +878,170 @@ class TestOpenCtiWeighting:
             e for e in result["evidence"] if e["key"] == "misp_context_match"
         ]
         assert result["passive_risk_score"] == 0.0
+
+
+class TestCtlogsFallback:
+    """Fallback ctlogs.dev quando crt.sh fallisce.
+
+    Il segnale sibling_domains non deve andare perso per un 502 di
+    crt.sh: con CTLOGS_API_KEY configurata il fallback produce la
+    stessa evidenza con ``source: ctlogs.dev``.
+    """
+
+    def _patch_l2_sources(self, crtsh_side_effect=None):
+        """Patch di crt.sh + RDAP + DNS + URLhaus, restituisce i mock."""
+        from graph_engine.osint.analyzer import (
+            query_crtsh,
+            query_ctlogs,
+            query_rdap,
+            resolve_dns,
+        )
+        from graph_engine.osint.reputation.urlhaus import UrlhausProvider
+
+        mock_crtsh = AsyncMock(side_effect=crtsh_side_effect)
+        mock_ctlogs = AsyncMock()
+        mock_rdap = AsyncMock(return_value={
+            "domain_age_days": 200,
+            "registrar": "TestReg",
+            "nameservers": [],
+        })
+        mock_dns = AsyncMock(return_value={
+            "a_records": ["1.2.3.4"],
+            "aaaa_records": [],
+            "error": None,
+        })
+        mock_urlhaus = AsyncMock(return_value={
+            "provider": "urlhaus",
+            "listed": False,
+            "details": {"query_status": "no_results"},
+        })
+
+        return (
+            patch("graph_engine.osint.analyzer.query_crtsh", mock_crtsh),
+            patch("graph_engine.osint.analyzer.query_ctlogs", mock_ctlogs),
+            patch("graph_engine.osint.analyzer.query_rdap", mock_rdap),
+            patch("graph_engine.osint.analyzer.resolve_dns", mock_dns),
+            patch.object(UrlhausProvider, "check", mock_urlhaus),
+            mock_crtsh,
+            mock_ctlogs,
+        )
+
+    async def test_ctlogs_fallback_produces_sibling_evidence(
+        self, monkeypatch
+    ):
+        """crt.sh errore + ctlogs OK → sibling_domains con source ctlogs.dev
+        e provider_unavailable per crt.sh (informativo)."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        monkeypatch.setattr(settings, "ctlogs_api_key", "test-key")
+        (
+            p_crtsh, p_ctlogs, p_rdap, p_dns, p_urlhaus,
+            mock_crtsh, mock_ctlogs,
+        ) = self._patch_l2_sources(
+            crtsh_side_effect=[{"error": "crt.sh HTTP error: 502"}]
+        )
+        mock_ctlogs.return_value = {
+            "sibling_domains": ["sib.example.com"],
+            "truncated": False,
+            "total_siblings": 1,
+            "newest_cert_days": 2,
+            "oldest_cert_days": None,
+            "total_certs": None,
+            "source": "ctlogs.dev",
+        }
+
+        with p_crtsh, p_ctlogs, p_rdap, p_dns, p_urlhaus:
+            result = await analyze("https://evil.example.com/login")
+
+        siblings = [
+            e for e in result["evidence"] if e["key"] == "sibling_domains"
+        ]
+        assert len(siblings) == 1
+        assert siblings[0]["value"]["domains"] == ["sib.example.com"]
+        assert siblings[0]["value"]["source"] == "ctlogs.dev"
+
+        unavail = [
+            e for e in result["evidence"]
+            if e["key"] == "provider_unavailable"
+        ]
+        providers = {u["value"]["provider"] for u in unavail}
+        assert "crtsh" in providers
+        assert "ctlogs.dev" not in providers
+
+    async def test_no_ctlogs_key_no_fallback_call(self, monkeypatch):
+        """Senza CTLOGS_API_KEY il fallback non viene mai invocato."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        monkeypatch.setattr(settings, "ctlogs_api_key", None)
+        (
+            p_crtsh, p_ctlogs, p_rdap, p_dns, p_urlhaus,
+            mock_crtsh, mock_ctlogs,
+        ) = self._patch_l2_sources(
+            crtsh_side_effect=[{"error": "crt.sh HTTP error: 502"}]
+        )
+
+        with p_crtsh, p_ctlogs, p_rdap, p_dns, p_urlhaus:
+            result = await analyze("https://evil.example.com/login")
+
+        mock_ctlogs.assert_not_called()
+        unavail = [
+            e for e in result["evidence"]
+            if e["key"] == "provider_unavailable"
+        ]
+        assert len(unavail) == 1
+        assert unavail[0]["value"]["provider"] == "crtsh"
+
+    async def test_ctlogs_fallback_failure_adds_unavailable(
+        self, monkeypatch
+    ):
+        """crt.sh e ctlogs falliscono entrambi → due provider_unavailable,
+        nessuna evidenza sibling."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        monkeypatch.setattr(settings, "ctlogs_api_key", "test-key")
+        (
+            p_crtsh, p_ctlogs, p_rdap, p_dns, p_urlhaus,
+            mock_crtsh, mock_ctlogs,
+        ) = self._patch_l2_sources(
+            crtsh_side_effect=[{"error": "crt.sh timeout after 15s"}]
+        )
+        mock_ctlogs.return_value = {"error": "ctlogs.dev rate limit (429)"}
+
+        with p_crtsh, p_ctlogs, p_rdap, p_dns, p_urlhaus:
+            result = await analyze("https://evil.example.com/login")
+
+        unavail = [
+            e for e in result["evidence"]
+            if e["key"] == "provider_unavailable"
+        ]
+        providers = {u["value"]["provider"] for u in unavail}
+        assert providers == {"crtsh", "ctlogs.dev"}
+        assert not [
+            e for e in result["evidence"] if e["key"] == "sibling_domains"
+        ]
+
+    async def test_fallback_also_on_crtsh_exception(self, monkeypatch):
+        """Anche se crt.sh LANCIA (eccezione dal gather) il fallback scatta."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        monkeypatch.setattr(settings, "ctlogs_api_key", "test-key")
+        (
+            p_crtsh, p_ctlogs, p_rdap, p_dns, p_urlhaus,
+            mock_crtsh, mock_ctlogs,
+        ) = self._patch_l2_sources(
+            crtsh_side_effect=RuntimeError("crash!")
+        )
+        mock_ctlogs.return_value = {
+            "sibling_domains": ["sib.example.com"],
+            "truncated": False,
+            "total_siblings": 1,
+            "newest_cert_days": 1,
+            "oldest_cert_days": None,
+            "total_certs": None,
+            "source": "ctlogs.dev",
+        }
+
+        with p_crtsh, p_ctlogs, p_rdap, p_dns, p_urlhaus:
+            result = await analyze("https://evil.example.com/login")
+
+        siblings = [
+            e for e in result["evidence"] if e["key"] == "sibling_domains"
+        ]
+        assert len(siblings) == 1
+        assert siblings[0]["value"]["source"] == "ctlogs.dev"

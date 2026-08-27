@@ -37,6 +37,7 @@ _CONFIG_FIELDS = (
     "misp_api_key",
     "opencti_url",
     "opencti_api_key",
+    "ctlogs_api_key",
     "urlhaus_api_key",
     "trellix_api_token",
 )
@@ -86,6 +87,13 @@ class Settings(BaseSettings):
     # ── URLhaus (provider reputazione L2, abuse.ch) ──────────────────
     urlhaus_api_key: Optional[str] = None
 
+    # ── ctlogs.dev (fallback certificate transparency L2) ────────────
+    # Chiave della REST API di ctlogs.dev (https://api.ctlogs.dev),
+    # rilasciata su richiesta.  Usata SOLO come fallback quando
+    # crt.sh non risponde: /v1/domain/{host} + /v1/cert/{id} per la
+    # lista SAN (san_dns) dei certificati più recenti.
+    ctlogs_api_key: Optional[str] = None
+
     # ── Endpoint Trellix (/trellix/analyze) ─────────────────────────
     trellix_api_token: Optional[str] = None
 
@@ -130,6 +138,11 @@ class Settings(BaseSettings):
     def opencti_configured(self) -> bool:
         """True se URL e API key OpenCTI sono entrambi presenti."""
         return bool(self.opencti_url and self.opencti_api_key)
+
+    @property
+    def ctlogs_configured(self) -> bool:
+        """True se la API key ctlogs.dev è presente (endpoint fisso)."""
+        return bool(self.ctlogs_api_key)
 
     @property
     def urlhaus_configured(self) -> bool:

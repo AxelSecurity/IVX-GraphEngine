@@ -335,8 +335,26 @@ le altre.
 | Fonte | Tipo | Endpoint | Cache TTL |
 |---|---|---|---|
 | **crt.sh** | Certificate Transparency | `https://crt.sh/?q=<domain>&output=json` | 6 ore |
+| **ctlogs.dev** (fallback crt.sh) | Certificate Transparency | `https://api.ctlogs.dev/v1/domain/{host}` + `/v1/cert/{id}` | 6 ore |
 | **RDAP** | WHOIS moderno (via bootstrap IANA) | `https://data.iana.org/rdap/dns.json` → server TLD-specifico | 24 ore |
 | **DNS** | Risoluzione A/AAAA | `loop.getaddrinfo` (asyncio nativo, nessuna dipendenza esterna) | 1 ora |
+
+**Fallback ctlogs.dev** (2026-08-27): crt.sh è notoriamente instabile
+(502 frequenti — il caso reale `s.kemkes.go.id` del collaudo live).
+Quando `query_crtsh` fallisce, con `CTLOGS_API_KEY` configurata
+l'analyzer interroga la REST API di ctlogs.dev: `/v1/domain/{host}`
+(righe SENZA SAN list, ordinate per `not_before` discendente, paginate)
+e poi `/v1/cert/{id}` in parallelo per i primi 25 certificati più
+recenti, che restituisce `san_dns` — l'array completo dei dNSName.
+L'evidenza prodotta è la stessa `sibling_domains` con `source:
+"ctlogs.dev"`.  Onestà sui dati parziali: con risposta paginata
+(`has_next`) `oldest_cert_days` e `total_certs` sono `None` (mai un
+numero inventato — un oldest falsato produrrebbe un falso "dominio
+appena creato"); `newest_cert_days` è sempre affidabile (prima riga).
+Un dettaglio non recuperabile è best-effort (si ignora quel
+certificato). Chiave rilasciata su richiesta via email da
+api.ctlogs.dev; ogni richiesta costa 1 unit della quota mensile
+(il risultato è cachato con lo stesso TTL di crt.sh).
 
 ### Adapter predisposti (disabilitati di default)
 
@@ -413,9 +431,11 @@ può pubblicare:
 ### Segnali estratti
 
 - **Domini fratelli di campagna** (`sibling_domains`): dalla SAN list
-  aggregata di crt.sh, deduplicata, con il dominio interrogato escluso.
-  Limite 50 domini; se il numero reale è superiore, viene impostato
-  `truncated: true` con il conteggio reale in `total_siblings`.
+  aggregata di crt.sh (fallback ctlogs.dev, vedi sopra), deduplicata,
+  con il dominio interrogato escluso.  Il valore dell'evidenza porta
+  `source` (`crt.sh` o `ctlogs.dev`).  Limite 50 domini; se il numero
+  reale è superiore, viene impostato `truncated: true` con il conteggio
+  reale in `total_siblings`.
   Questo è il pivot a più alto valore secondo l'architettura originale.
 
 - **Età del dominio** (`domain_age_days`): dal record RDAP. Soglie:
@@ -506,7 +526,7 @@ graph_engine/osint/
     __init__.py
     analyzer.py          — orchestratore: DNS prima, poi resto in parallelo
     cache.py             — cache filesystem con TTL
-    certificate_transparency.py — crt.sh
+    certificate_transparency.py — crt.sh + fallback ctlogs.dev
     dns_resolve.py       — risoluzione DNS A/AAAA (asyncio nativo)
     rdap.py              — RDAP con bootstrap IANA
     reputation/
@@ -894,7 +914,7 @@ configurata può sforare la finestra → il wrapper risponde onestamente
 Per supportare il profilo fast, le funzioni L2/L3 accettano un parametro
 `timeout`/`timeout_s` opzionale (backward-compatible, default invariati):
 
-- `osint/certificate_transparency.py`: `query_crtsh(..., timeout=CRTSH_TIMEOUT)`
+- `osint/certificate_transparency.py`: `query_crtsh(..., timeout=CRTSH_TIMEOUT)` e `query_ctlogs(..., timeout=CRTSH_TIMEOUT)` (fallback)
 - `osint/rdap.py`: `query_rdap(..., timeout=RDAP_TIMEOUT)`
 - `osint/dns_resolve.py`: `resolve_dns(..., timeout=_DNS_TIMEOUT)`
 - `osint/analyzer.py`: `analyze(..., timeout_s=None)`

@@ -15,7 +15,11 @@ from urllib.parse import urlparse
 
 import httpx
 
-from graph_engine.osint.certificate_transparency import query_crtsh
+from graph_engine.config import settings
+from graph_engine.osint.certificate_transparency import (
+    query_crtsh,
+    query_ctlogs,
+)
 from graph_engine.osint.dns_resolve import resolve_dns
 from graph_engine.osint.rdap import query_rdap
 from graph_engine.osint.reputation.registry import get_enabled_providers
@@ -166,36 +170,57 @@ async def analyze(
         rdap_result = results[1]
         rep_results = results[2:]
 
-        # ── crt.sh: domini fratelli ────────────────────────────────────
-        if isinstance(crtsh_result, dict):
-            if "error" in crtsh_result:
-                evidence.append(_make_evidence(
-                    key="provider_unavailable",
-                    value={"provider": "crtsh", "reason": crtsh_result["error"]},
-                    weight=0.0,
-                ))
-            else:
-                siblings = crtsh_result.get("sibling_domains", [])
-                if siblings:
-                    evidence.append(_make_evidence(
-                        key="sibling_domains",
-                        value={
-                            "domains": siblings,
-                            "truncated": crtsh_result.get("truncated", False),
-                            "total_siblings": crtsh_result.get("total_siblings", len(siblings)),
-                            "newest_cert_days": crtsh_result.get("newest_cert_days"),
-                            "oldest_cert_days": crtsh_result.get("oldest_cert_days"),
-                            "total_certs": crtsh_result.get("total_certs"),
-                        },
-                        weight=_W_SIBLING_DOMAINS,
-                    ))
-        else:
-            # Eccezione catturata da asyncio.gather
+        # ── crt.sh: domini fratelli (fallback ctlogs.dev) ──────────────
+        if not isinstance(crtsh_result, dict) or "error" in crtsh_result:
+            # crt.sh fallito (dict con error, o eccezione catturata dal
+            # gather) → evidenza informativa, poi fallback ctlogs.dev.
+            reason = (
+                crtsh_result["error"]
+                if isinstance(crtsh_result, dict)
+                else str(crtsh_result)
+            )
             evidence.append(_make_evidence(
                 key="provider_unavailable",
-                value={"provider": "crtsh", "reason": str(crtsh_result)},
+                value={"provider": "crtsh", "reason": reason},
                 weight=0.0,
             ))
+            # Fallback ctlogs.dev (solo con chiave configurata): il
+            # segnale sibling_domains non deve andare perso per un 502
+            # di crt.sh.  Stesso contratto di ritorno, con source
+            # diverso.  Contenimento errori: un'eccezione del fallback
+            # degrada a provider_unavailable, mai un crash dell'analisi.
+            if settings.ctlogs_configured:
+                try:
+                    crtsh_result = await query_ctlogs(
+                        hostname, client, timeout=timeout_s
+                    )
+                except Exception as exc:  # noqa: BLE001 — contenimento errori
+                    crtsh_result = {"error": str(exc)}
+                if isinstance(crtsh_result, dict) and "error" in crtsh_result:
+                    evidence.append(_make_evidence(
+                        key="provider_unavailable",
+                        value={
+                            "provider": "ctlogs.dev",
+                            "reason": crtsh_result["error"],
+                        },
+                        weight=0.0,
+                    ))
+        if isinstance(crtsh_result, dict) and "error" not in crtsh_result:
+            siblings = crtsh_result.get("sibling_domains", [])
+            if siblings:
+                evidence.append(_make_evidence(
+                    key="sibling_domains",
+                    value={
+                        "domains": siblings,
+                        "truncated": crtsh_result.get("truncated", False),
+                        "total_siblings": crtsh_result.get("total_siblings", len(siblings)),
+                        "newest_cert_days": crtsh_result.get("newest_cert_days"),
+                        "oldest_cert_days": crtsh_result.get("oldest_cert_days"),
+                        "total_certs": crtsh_result.get("total_certs"),
+                        "source": crtsh_result.get("source", "crt.sh"),
+                    },
+                    weight=_W_SIBLING_DOMAINS,
+                ))
 
         # ── RDAP: età dominio, registrar, nameserver ──────────────────
         if isinstance(rdap_result, dict):

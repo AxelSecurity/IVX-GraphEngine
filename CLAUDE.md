@@ -140,6 +140,10 @@ Solo per `--classify`:
 - `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` — service principal AAD; se TUTTE e tre presenti il classificatore usa `ClientSecretCredential` (autenticazione stabile via `.env`, senza `az login`), altrimenti `DefaultAzureCredential`. NOTA: pydantic-settings non esporta i valori del `.env` in `os.environ` — è `foundry_classifier.py` a passarli esplicitamente a `ClientSecretCredential`
 - `AZURE_VISION_ENDPOINT` / `AZURE_VISION_KEY` — arricchimento Vision (OCR + Brand Detection) sugli screenshot; vedi `.env.example`
 
+Provider L2 (opzionali, si attivano solo con chiave presente):
+- `MISP_URL` / `MISP_API_KEY`, `OPENCTI_URL` / `OPENCTI_API_KEY`, `URLHAUS_API_KEY` — reputation provider; vedi `.env.example`
+- `CTLOGS_API_KEY` — fallback certificate transparency (ctlogs.dev REST API) quando crt.sh non risponde; chiave rilasciata su richiesta da api.ctlogs.dev
+
 `.env` è in `.gitignore`. Nessuna credenziale viene mai hardcodata o committata.
 
 ## Note aggiuntive
