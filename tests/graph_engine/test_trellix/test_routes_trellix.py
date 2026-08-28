@@ -371,3 +371,46 @@ class TestRoutesTrellix:
         """GET senza il parametro url → 422."""
         res = await client.get("/trellix/analyze")
         assert res.status_code == 422
+
+    async def test_task_launched_with_capture_artifacts(
+        self, app, client, tmp_path, monkeypatch,
+    ):
+        """La pipeline Trellix DEVE gira con ``capture_artifacts=True``:
+        Vision (OCR + Brand Detection) e il contenuto del bundle (testo
+        visibile, titoli, form fields da dom.html) dipendono da
+        screenshot_ref/har_ref — senza artefatti il modello Foundry
+        decide alla cieca rispetto alla pagina."""
+        db = str(tmp_path / "test.db")
+
+        captured = {}
+
+        async def _fake_pipeline(*args, **kwargs):
+            captured.update(kwargs)
+            t = kwargs.get("target")
+            if t:
+                t.status = TargetStatus.done
+                await save_target(
+                    t, [], [], [],
+                    Verdict(
+                        target_id=t.id,
+                        classification=Classification.suspicious,
+                        confidence=0.4,
+                        produced_by="foundry",
+                    ),
+                    db_path=db,
+                )
+            return str(t.id) if t else "done"
+
+        monkeypatch.setattr(
+            "graph_engine.api.routes_trellix.run_full_analysis",
+            _fake_pipeline,
+        )
+
+        res = await client.get(
+            "/trellix/analyze?url=https://vision.example.com/login"
+        )
+        assert res.status_code == 200
+        assert captured.get("capture_artifacts") is True, (
+            "Il fast path Trellix deve catturare gli artefatti: "
+            "Vision e bundle dipendono da screenshot/har_ref"
+        )

@@ -181,6 +181,14 @@ def build_trellix_router(
         # nessun launch Chromium per richiesta.  Nei test con router
         # standalone (nessun lifespan eseguito) il getattr dà None e la
         # pipeline degrada al browser effimero — invariato.
+        #
+        # Artefatti ATTIVI anche nel fast path: il modello Foundry non
+        # supporta immagini, quindi Vision (OCR + Brand Detection) e il
+        # contenuto del bundle (testo visibile, titoli, form fields da
+        # dom.html) dipendono da screenshot_ref/har_ref — senza
+        # artefatti l'analisi gira cieca rispetto alla pagina.
+        # Costo misurato: screenshot full_page per stato + Vision in
+        # parallelo sui leaf, dentro la finestra dei 56s.
         task = asyncio.create_task(
             run_full_analysis(
                 target_url,
@@ -194,7 +202,7 @@ def build_trellix_router(
                 l3_timeout_s=FAST_L3_TIMEOUT_S,
                 settle_max_wait_s=FAST_SETTLE_MAX_WAIT_S,
                 page_timeout_ms=FAST_PAGE_TIMEOUT_MS,
-                capture_artifacts=False,
+                capture_artifacts=True,
                 browser_pool=getattr(request.app.state, "browser_pool", None),
             )
         )

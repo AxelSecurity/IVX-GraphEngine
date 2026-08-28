@@ -9,10 +9,16 @@ perché la pipeline L0→L5 termini entro la finestra:
     L0+L1 (sync, locali)          ~1s
     L2+L3 (rete, in parallelo)    ≤ 5s  (timeout espliciti)
     L4  (BFS Playwright)          ≤ 25s (FAST_BUDGET.timeout_s, settle
-                                         ridotto e page timeout 15s)
+                                         ridotto e page timeout 15s;
+                                         screenshot full_page per stato
+                                         incluso — gli artefatti sono
+                                         attivi: senza di essi il
+                                         modello non "vede" la pagina)
+    L5  (bundle + Vision sui
+         leaf, in parallelo)      ~3-5s (OCR + Brand Detection)
     L5  (prefilter/fallback)      ~1s
                                 ------
-                                 ~32s < 56s (attesa del wrapper)
+                                 ~36-42s < 56s (attesa del wrapper)
                                  < 60s (deadline Front Door)
 
 La classificazione Foundry NON rientra nella garanzia: se configurata
