@@ -159,10 +159,17 @@ class StateGraphExplorer:
         browser: Browser,
         profile: Optional[dict] = None,
         page_timeout_ms: int = 30000,
+        ignore_https_errors: bool = True,
     ) -> None:
         self._browser = browser
         self._profile: dict = profile or {}
         self._page_timeout_ms = page_timeout_ms
+        # True di default: il modulo deve VEDERE cosa c'è dietro un
+        # errore di certificato (pattern classico del phishing: www su
+        # sottodomini blogspot senza cert valido).  L'errore TLS non va
+        # perso: la sonda L3 (redirect_chain) lo registra comunque come
+        # evidenza, e il prefilter lo valuta deterministicamente.
+        self._ignore_https_errors = ignore_https_errors
 
         self._artifact_base: Path = Path("data") / "graph_artifacts"
 
@@ -284,6 +291,7 @@ class StateGraphExplorer:
             locale=self._profile.get("locale", "en-US"),
             timezone_id=self._profile.get("timezone", "America/New_York"),
             extra_http_headers=extra_headers if extra_headers else None,
+            ignore_https_errors=self._ignore_https_errors,
         )
         try:
             page = await context.new_page()
@@ -540,6 +548,7 @@ class StateGraphExplorer:
             locale="en-US",
             timezone_id="America/New_York",
             extra_http_headers=cloaking_profile.get("headers") or None,
+            ignore_https_errors=self._ignore_https_errors,
         )
         try:
             page2 = await context2.new_page()

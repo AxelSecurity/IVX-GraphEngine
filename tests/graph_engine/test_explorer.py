@@ -529,6 +529,49 @@ class TestSettlePolling:
 
 
 # ---------------------------------------------------------------------------
+# TLS error handling — ignore_https_errors
+# ---------------------------------------------------------------------------
+
+
+class TestIgnoreHttpsErrors:
+    """Il modulo deve visitare comunque le pagine dietro un errore di
+    certificato (pattern classico del phishing: ``www`` su sottodomini
+    blogspot senza cert valido).  Regressione 2026-08-28:
+    facebook-login-redirect.blogspot.com non veniva mai navigato."""
+
+    async def test_context_created_with_ignore_by_default(self):
+        """Default: il context viene creato con ignore_https_errors=True
+        per ENTRAMBI i context (primario e ramo cloaking)."""
+        page = _mock_page()
+        browser, _ = _mock_browser(page)
+        explorer = StateGraphExplorer(browser)
+
+        budget = Budget(max_depth=1, max_nodes=2, timeout_s=30)
+        await explorer.run("https://example.com", budget=budget)
+
+        for call in browser.new_context.call_args_list:
+            kwargs = call.kwargs
+            assert kwargs.get("ignore_https_errors") is True, (
+                "Ogni context dell'esplorazione deve ignorare gli errori "
+                "TLS: il segnale resta nell'evidenza L3 e la pagina viene "
+                "comunque visitata"
+            )
+
+    async def test_explicit_false_disables_ignore(self):
+        """Con ignore_https_errors=False il context resta fedele al
+        comportamento storico del browser (goto fallisce)."""
+        page = _mock_page()
+        browser, _ = _mock_browser(page)
+        explorer = StateGraphExplorer(browser, ignore_https_errors=False)
+
+        budget = Budget(max_depth=1, max_nodes=2, timeout_s=30)
+        await explorer.run("https://example.com", budget=budget)
+
+        for call in browser.new_context.call_args_list:
+            assert call.kwargs.get("ignore_https_errors") is False
+
+
+# ---------------------------------------------------------------------------
 # Integration (skipped by default — run with  pytest -m integration)
 # ---------------------------------------------------------------------------
 

@@ -36,6 +36,23 @@ def _coerce_evidence_value(value):
     return value
 
 
+# Marker degli errori TLS (certificato non valido per l'hostname) nei
+# valori delle evidenze.  Compare sia nel ``navigation_error`` dell'explorer
+# (net::ERR_CERT_* di Chromium) sia nelle ``active_probe_error`` L3
+# (CERTIFICATE_VERIFY_FAILED della sonda redirect_chain, con "Hostname
+# mismatch" di urllib3/ssl).  Confronto case-insensitive sul valore
+# uppercasato.
+_TLS_ERROR_MARKERS = ("ERR_CERT", "CERTIFICATE_VERIFY_FAILED", "HOSTNAME MISMATCH")
+
+
+def _has_tls_marker(value) -> bool:
+    """True se il valore di un'evidenza contiene un errore TLS."""
+    if isinstance(value, str):
+        upper = value.upper()
+        return any(marker in upper for marker in _TLS_ERROR_MARKERS)
+    return False
+
+
 async def build_evidence_bundle(
     target_url: str,
     canonical_url: Optional[str],
@@ -96,6 +113,15 @@ async def build_evidence_bundle(
         "had_navigation_error": "navigation_error" in evidence_keys,
         "had_replay_fallback": "replay_fallback_used" in evidence_keys,
         "had_unhandled_error": "unhandled_node_error" in evidence_keys,
+        # Errore TLS (certificato non valido per l'hostname): segnale
+        # deterministico per il prefilter, anche quando l'esplorazione
+        # procede comunque (ignore_https_errors) e il navigation_error
+        # non viene prodotto.
+        "had_tls_error": any(
+            _has_tls_marker(getattr(e, "value", "") or "")
+            for e in evidence
+            if e.key in ("navigation_error", "active_probe_error")
+        ),
     }
 
     # ---- evidence summary (key → count, for debugging) ---------------------

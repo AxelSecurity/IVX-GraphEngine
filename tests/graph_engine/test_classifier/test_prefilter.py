@@ -38,6 +38,7 @@ def _sparse_l4_bundle(**overrides) -> dict:
             "had_navigation_error": False,
             "had_replay_fallback": False,
             "had_unhandled_error": False,
+            "had_tls_error": False,
         },
         "evidence_summary": {},
         "states": [
@@ -679,4 +680,71 @@ class TestOpenCtiActiveHitIntercepts:
         ), "I dettagli OpenCTI (osservabili e indicatori) vanno nel rationale"
         assert "Feed verificati" in verdict.rationale, (
             "Con due feed confermati la chiusura del rationale è al plurale"
+        )
+
+
+class TestTlsFailureRule:
+    """Regola deterministica TLS (regressione 2026-08-28:
+    www.facebook-login-redirect.blogspot.com rispondeva safe/0.05
+    "dati insufficienti" nonostante il CERTIFICATE_VERIFY_FAILED)."""
+
+    def test_tls_failure_on_sparse_l4_upgrades_confidence(self):
+        """TLS failure + L4 sparsa → suspicious 0.6 con rationale TLS,
+        non più 'dati insufficienti' a 0.05."""
+        bundle = _sparse_l4_bundle(
+            flags={
+                "had_gate": False,
+                "had_navigation_error": True,
+                "had_replay_fallback": False,
+                "had_unhandled_error": False,
+                "had_tls_error": True,
+            },
+        )
+
+        verdict = prefilter(bundle)
+        assert verdict is not None
+        assert verdict.classification == Classification.suspicious
+        assert verdict.produced_by == "prefilter"
+        assert verdict.confidence == 0.6, (
+            f"TLS failure deve alzare la confidenza a 0.6, got "
+            f"{verdict.confidence}"
+        )
+        assert "TLS" in verdict.rationale
+
+    def test_tls_failure_on_unhandled_error_case(self):
+        """Case 2 (errore non gestito, nessun altro segnale) + TLS
+        failure → 0.6 con rationale TLS (la sonda L3 fallisce ma
+        l'explorer, con ignore_https_errors, non produce navigation
+        error)."""
+        bundle = _sparse_l4_bundle(
+            flags={
+                "had_gate": False,
+                "had_navigation_error": False,
+                "had_replay_fallback": False,
+                "had_unhandled_error": True,
+                "had_tls_error": True,
+            },
+        )
+
+        verdict = prefilter(bundle)
+        assert verdict is not None
+        assert verdict.confidence == 0.6
+        assert "TLS" in verdict.rationale
+
+    def test_no_tls_keeps_low_confidence(self):
+        """Senza TLS failure il comportamento storico resta: 0.05."""
+        verdict = prefilter(_sparse_l4_bundle())
+        assert verdict is not None
+        assert verdict.confidence <= 0.1
+
+    def test_tls_failure_with_rich_content_delegates(self):
+        """TLS failure MA con contenuto reale → None: Foundry giudica il
+        caso completo (evidenze TLS incluse) e può emettere phishing."""
+        bundle = _sparse_l4_bundle()
+        bundle["states"][0]["visible_text"] = "Facebook login — accedi"
+        bundle["flags"]["had_tls_error"] = True
+
+        assert prefilter(bundle) is None, (
+            "Con contenuto reale la regola TLS non deve intercettare: "
+            "delega a Foundry"
         )

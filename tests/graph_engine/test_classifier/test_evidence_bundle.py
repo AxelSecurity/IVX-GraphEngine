@@ -254,6 +254,52 @@ class TestBuildEvidenceBundle:
         assert flags["had_replay_fallback"] is True
         assert flags["had_unhandled_error"] is False
 
+    async def test_tls_error_flag(self):
+        """had_tls_error: True con marker TLS in navigation_error o
+        active_probe_error, False altrimenti (regressione 2026-08-28:
+        il prefilter deve distinguere un cert error dai casi neutri)."""
+        s0 = _state("aaa", 0)
+
+        async def _flags_for(evidence):
+            bundle = await build_evidence_bundle(
+                target_url="https://example.com",
+                canonical_url=None,
+                states=[s0],
+                transitions=[],
+                evidence=evidence,
+                form_fields_by_state={},
+                visible_text_by_state={},
+                titles_by_state={},
+            )
+            return bundle["flags"]
+
+        # navigation_error con ERR_CERT di Chromium
+        flags = await _flags_for(
+            [_evidence("navigation_error", "Page.goto: net::ERR_CERT_COMMON_NAME_INVALID at https://x")]
+        )
+        assert flags["had_tls_error"] is True
+
+        # active_probe_error L3 con CERTIFICATE_VERIFY_FAILED (JSON)
+        flags = await _flags_for(
+            [_evidence(
+                "active_probe_error",
+                '{"probe": "redirect_chain", "error": "[SSL: '
+                'CERTIFICATE_VERIFY_FAILED] certificate verify failed: '
+                'Hostname mismatch"}',
+            )]
+        )
+        assert flags["had_tls_error"] is True
+
+        # navigation_error NON-TLS (timeout) → False
+        flags = await _flags_for(
+            [_evidence("navigation_error", "Page.goto: net::ERR_TIMED_OUT")]
+        )
+        assert flags["had_tls_error"] is False
+
+        # Nessuna evidenza → False
+        flags = await _flags_for([])
+        assert flags["had_tls_error"] is False
+
 
 class TestBundleToPromptText:
     """bundle_to_prompt_text must produce readable structured text."""
