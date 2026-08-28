@@ -187,46 +187,22 @@ async function render() {
 
 // ------------------------------------------------------------- list view
 
-function listSkeleton() {
-  return `
+function listSkeletonRows() {
+  return Array.from({ length: 5 }).map(() => `<div class="skeleton"></div>`).join("");
+}
+
+async function renderList() {
+  // Un solo passaggio: page-head + toolbar + UNICO container #sub-list
+  // (con righe skeleton finché i dati non arrivano) + pager. Evita di
+  // lasciare nel DOM un container skeleton "orfano" separato da quello
+  // reale.
+  root.innerHTML = `
     <div class="page-head">
       <div>
         <div class="page-title">Sottomissioni</div>
         <div class="page-hint">Tutte le analisi eseguite dal motore multilayer L0→L5</div>
       </div>
     </div>
-    <div class="sub-list">
-      ${Array.from({ length: 5 }).map(() => `<div class="skeleton"></div>`).join("")}
-    </div>`;
-}
-
-async function renderList() {
-  root.innerHTML = listSkeleton();
-  attachToolbarPlaceholder();
-
-  try {
-    await loadAndRenderListBody();
-  } catch (e) {
-    root.querySelector(".sub-list")?.remove();
-    root.insertAdjacentHTML(
-      "beforeend",
-      `<div class="error-state">Impossibile caricare le sottomissioni: ${escapeHtml(e.message)}</div>`
-    );
-    return;
-  }
-
-  // Auto-refresh leggero: solo se non si sta digitando nella ricerca
-  listPollTimer = setInterval(() => {
-    const searchFocused = document.activeElement?.id === "search-input";
-    if (!searchFocused) loadAndRenderListBody().catch(() => {});
-  }, 15000);
-}
-
-function attachToolbarPlaceholder() {
-  const head = root.querySelector(".page-head");
-  head.insertAdjacentHTML(
-    "afterend",
-    `
     <div class="toolbar">
       <div class="search-box">
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
@@ -248,10 +224,9 @@ function attachToolbarPlaceholder() {
         <option value="phishing">Phishing</option>
       </select>
     </div>
-    <div class="sub-list" id="sub-list"></div>
+    <div class="sub-list" id="sub-list">${listSkeletonRows()}</div>
     <div class="pager" id="pager"></div>
-    `
-  );
+  `;
 
   document.getElementById("status-filter").value = listState.status;
   document.getElementById("cls-filter").value = listState.classification;
@@ -273,6 +248,20 @@ function attachToolbarPlaceholder() {
     listState.offset = 0;
     loadAndRenderListBody().catch(() => {});
   });
+
+  try {
+    await loadAndRenderListBody();
+  } catch (e) {
+    document.getElementById("sub-list").innerHTML =
+      `<div class="error-state">Impossibile caricare le sottomissioni: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+
+  // Auto-refresh leggero: solo se non si sta digitando nella ricerca
+  listPollTimer = setInterval(() => {
+    const searchFocused = document.activeElement?.id === "search-input";
+    if (!searchFocused) loadAndRenderListBody().catch(() => {});
+  }, 15000);
 }
 
 async function loadAndRenderListBody() {
@@ -340,6 +329,8 @@ async function loadAndRenderListBody() {
 // ----------------------------------------------------------- detail view
 
 async function renderDetail(id) {
+  // Un solo back-link, dentro il markup prodotto da buildDetailHtml —
+  // niente elementi duplicati tra lo stato di caricamento e quello finale.
   root.innerHTML = `<button class="back-link" id="back-link">← Torna alle sottomissioni</button><div class="loading-state">Caricamento analisi…</div>`;
   document.getElementById("back-link").addEventListener("click", () => navigate("#/"));
 
@@ -355,7 +346,7 @@ async function renderDetail(id) {
     return;
   }
 
-  root.querySelector(".loading-state").outerHTML = buildDetailHtml(id, graph, artifacts);
+  root.innerHTML = buildDetailHtml(id, graph, artifacts);
   wireDetail(id, graph);
 
   // Se l'analisi è ancora in corso, ricontrolla periodicamente
@@ -369,7 +360,6 @@ async function renderDetail(id) {
         const freshArtifacts = await fetchJSON(`/analyses/${id}/artifacts`).catch(() => ({ files: [] }));
         root.innerHTML = buildDetailHtml(id, fresh, freshArtifacts);
         wireDetail(id, fresh);
-        document.getElementById("back-link").addEventListener("click", () => navigate("#/"));
       } catch (_) {
         /* riprova al prossimo tick */
       }
