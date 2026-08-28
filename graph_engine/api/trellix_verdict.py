@@ -171,11 +171,7 @@ def build_signature(
 # ---------------------------------------------------------------------------
 
 
-def build_trellix_response(
-    data: dict | None,
-    *,
-    timed_out: bool = False,
-) -> dict:
+def build_trellix_response(data: dict | None) -> dict:
     """Costruisce la risposta Trellix dal risultato dell'analisi.
 
     Args:
@@ -183,32 +179,12 @@ def build_trellix_response(
               ``target`` (AnalysisTarget), ``verdict`` (Verdict | None),
               ``evidence`` (list[Evidence]), ``states``, ``transitions``.
               Può essere ``None`` se l'analisi non è ancora iniziata.
-        timed_out: Se ``True``, forza la risposta "incompleta" anche se
-                   l'analisi è effettivamente terminata nel frattempo
-                   (usato quando il wrapper ha già deciso di rispondere
-                   prima del completamento).
 
     Returns:
         Un dict con le chiavi attese da Trellix:
         ``verdict``, ``confidence``, ``signature``,
         ``recommended_action``, ``reason``.
     """
-    # ── Timeout ────────────────────────────────────────────────────────
-    if timed_out:
-        return {
-            "verdict": "safe",
-            "confidence": 0.1,
-            "signature": _SIG_INCOMPLETE,
-            "recommended_action": "allow",
-            "reason": (
-                "L'analisi non è terminata entro la finestra di tempo "
-                "Trellix (60s). Il risultato sarà disponibile a breve "
-                "interrogando l'endpoint REST /analyses/{id}. "
-                "Questa risposta è deliberatamente safe per non bloccare "
-                "l'utente su un'analisi incompleta."
-            ),
-        }
-
     # ── Nessun dato ────────────────────────────────────────────────────
     if data is None:
         return {

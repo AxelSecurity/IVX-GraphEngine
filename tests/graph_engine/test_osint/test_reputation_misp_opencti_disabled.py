@@ -162,9 +162,9 @@ class TestNetworkBlockedExplicit:
 
 
 class TestMispOpenCtiTimeoutPropagation:
-    """Il ``timeout_s`` dell'analisi (es. ``FAST_L2_TIMEOUT_S=5.0`` nel
-    path Trellix) DEVE raggiungere la chiamata HTTP dei provider
-    configurati: senza, il floor resterebbe ``MISP_TIMEOUT``/
+    """Il ``timeout_s`` dell'analisi (es. un timeout ridotto passato da
+    un chiamante con budget personalizzato) DEVE raggiungere la chiamata
+    HTTP dei provider configurati: senza, il floor resterebbe ``MISP_TIMEOUT``/
     ``OPENCTI_TIMEOUT`` = 15s e il fast profile non avrebbe effetto."""
 
     async def test_misp_timeout_s_passed_to_http_call(self, monkeypatch):

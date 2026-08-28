@@ -70,9 +70,9 @@ class UrlhausProvider(ReputationProvider):
         timeout_s: Optional[float] = None,
     ) -> dict:
         headers = {"Auth-Key": self._api_key} if self._api_key else {}
-        # Il timeout effettivo della chiamata: quello fast dell'analisi
-        # se presente (es. FAST_L2_TIMEOUT_S nel path Trellix), altrimenti
-        # il default del provider.
+        # Il timeout effettivo della chiamata: quello dell'analisi se
+        # presente (es. un timeout_s ridotto da un chiamante con budget
+        # personalizzato), altrimenti il default del provider.
         effective_timeout = (
             timeout_s if timeout_s is not None else URLHAUS_TIMEOUT
         )

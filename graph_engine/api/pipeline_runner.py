@@ -247,7 +247,7 @@ async def run_full_analysis(
         capture_artifacts: Se ``True``, salva screenshot, DOM, HAR per
                            ogni stato.
         captcha_wait_s: Secondi di attesa per auto-risoluzione CAPTCHA
-                        (default: 8s; fast path Trellix: 4s).
+                        (default: 8s).
         l2_timeout_s: Timeout in secondi per le query OSINT L2
                       (ctlogs.dev, RDAP, DNS e reputation provider).  Se
                       ``None``, ogni provider usa il proprio default.
@@ -255,9 +255,9 @@ async def run_full_analysis(
                       usa il default (10s).  Le altre sonde L3
                       mantengono i propri timeout interni.
         settle_max_wait_s: Tetto massimo del settle post-navigazione di
-                           L4 (default: 4.0s; fast path Trellix: 3.0s).
+                           L4 (default: 4.0s).
         page_timeout_ms: Timeout di navigazione Playwright in ms
-                         (default: 30000; fast path Trellix: 15000).
+                         (default: 30000).
         browser_pool: Pool del browser condiviso (app.state.browser_pool
                       della route).  Se ``None``, L4 usa un browser
                       effimero per singola analisi (comportamento
@@ -306,8 +306,8 @@ async def run_full_analysis(
 
         # ── L2 passive OSINT ∥ L3 active low-interaction (async, rete) ───
         # Nessuno scambio dati tra i due strati → corrono in PARALLELO
-        # (gather, non sequenziali): nel fast path Trellix il tempo
-        # L2+L3 si dimezza (entrambi cappati a FAST_*_TIMEOUT_S).
+        # (gather, non sequenziali): il tempo L2+L3 si dimezza rispetto
+        # all'esecuzione sequenziale.
         from graph_engine.osint.analyzer import analyze as l2_analyze
         from graph_engine.active.analyzer import analyze as l3_analyze
 

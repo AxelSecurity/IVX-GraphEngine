@@ -221,9 +221,10 @@ class TestUrlhausNotConfigured:
 
 
 class TestUrlhausTimeoutPropagation:
-    """Il ``timeout_s`` dell'analisi (es. ``FAST_L2_TIMEOUT_S=5.0`` nel
-    path Trellix) DEVE raggiungere la chiamata HTTP: senza, il floor
-    resterebbe ``URLHAUS_TIMEOUT=10s`` e il fast profile non avrebbe
+    """Il ``timeout_s`` dell'analisi (es. un timeout ridotto passato da
+    un chiamante con budget personalizzato) DEVE raggiungere la chiamata
+    HTTP: senza, il floor resterebbe ``URLHAUS_TIMEOUT=10s`` e il
+    chiamante non avrebbe
     effetto su questo provider."""
 
     async def test_timeout_s_passed_to_http_call(self, monkeypatch):

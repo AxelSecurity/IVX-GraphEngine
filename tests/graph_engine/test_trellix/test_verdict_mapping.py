@@ -130,17 +130,13 @@ class TestBuildSignature:
 class TestBuildTrellixResponse:
     """Test di build_trellix_response."""
 
-    def test_timed_out_forces_safe_allow(self):
-        """timed_out=True → safe/allow con reason onesto."""
-        resp = build_trellix_response(None, timed_out=True)
-        assert resp["verdict"] == "safe"
-        assert resp["recommended_action"] == "allow"
-        assert "Analysis-Incomplete" in resp["signature"]
-        assert resp["reason"]  # non vuoto
-        assert "analisi non è terminata" in resp["reason"].lower()
-
     def test_none_data_returns_incomplete(self):
-        """data=None → safe/allow/0.1."""
+        """data=None → safe/allow/0.1.
+
+        Ramo DIFENSIVO (nessuna analisi presente su SQLite): la route
+        attende sempre il completamento reale, quindi questo ramo non
+        è più raggiungibile dal path principale — resta come rete di
+        sicurezza."""
         resp = build_trellix_response(None)
         assert resp["verdict"] == "safe"
         assert resp["confidence"] == 0.1
