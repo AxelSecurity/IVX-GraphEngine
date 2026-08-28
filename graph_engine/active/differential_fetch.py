@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from typing import Callable
+from typing import Callable, Optional
 
 import httpx
 
@@ -332,6 +332,50 @@ def recommend_profile(
         key=lambda n: results.get(n, {}).get("content_length", 0),
     )
     profile = PROFILES.get(best_name, PROFILES["desktop_chrome"])
+    return {
+        "user_agent": profile["user_agent"],
+        "headers": dict(profile.get("headers", {})),
+    }
+
+
+def cloaking_probe_profile(
+    results: dict[str, dict],
+    cloaking: dict,
+) -> Optional[dict]:
+    """Profilo divergente più ricco da esplorare come secondo ramo in L4.
+
+    Il "più ricco" è il profilo divergente con ``content_length``
+    maggiore: è il contenuto che il crawler vede ma il visitatore
+    normale no (es. pagina phishing servita solo a Googlebot).
+
+    Ritorna ``None`` quando: nessun cloaking, lista dei divergenti
+    vuota, tutti i profili divergenti falliti (``error``), o nome del
+    profilo non presente in ``PROFILES``.
+
+    Args:
+        results: dict ``{profile_name: {...}}`` da ``differential_fetch()``.
+        cloaking: dict da ``detect_cloaking()``.
+
+    Returns:
+        dict con ``user_agent`` e ``headers`` pronti per il secondo
+        ``browser.new_context()`` di Playwright, o ``None``.
+    """
+    if not cloaking.get("cloaking_detected"):
+        return None
+    divergent = cloaking.get("divergent_profiles", [])
+    successful = [
+        (name, results[name])
+        for name in divergent
+        if name in results and "error" not in results[name]
+    ]
+    if not successful:
+        return None
+    best_name = max(
+        successful, key=lambda item: item[1].get("content_length", 0)
+    )[0]
+    profile = PROFILES.get(best_name)
+    if profile is None:
+        return None
     return {
         "user_agent": profile["user_agent"],
         "headers": dict(profile.get("headers", {})),

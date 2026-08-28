@@ -86,8 +86,17 @@ def _get_brand_names() -> set[str]:
 def build_signature(
     verdict,
     evidence: list[dict],
+    *,
+    mapped: str = "safe",
 ) -> str:
     """Costruisce la firma testuale per il verdetto Trellix.
+
+    Le firme specifiche (brand impersonation, gate bypass, credential
+    harvesting) descrivono un ATTACCO: vengono cercate SOLO quando il
+    verdetto mappato è ``malicious``.  Su un verdetto ``safe`` una
+    firma "Phishing: X Impersonation" sarebbe contraddittoria per il
+    consumatore (caso reale: example.org classificato benign con
+    ``verdict.brand="IANA"`` valorizzato da Foundry).
 
     Priorità di ricerca (la prima che matcha vince):
 
@@ -102,43 +111,45 @@ def build_signature(
     (``pipeline_runner._run_classification`` li inizializza a ``[]``),
     quindi il rilevamento credenziali usa solo i segnali L1 persistiti.
     """
-    # 1. Brand impersonation
-    brand_names = _get_brand_names()
+    if mapped == "malicious":
+        # 1. Brand impersonation
+        brand_names = _get_brand_names()
 
-    # Cerca nelle evidence con key="typosquat" (L1)
-    for ev in evidence:
-        if isinstance(ev, dict) and ev.get("key") == "typosquat":
-            value = ev.get("value", "")
-            if isinstance(value, str):
-                try:
-                    parsed = json.loads(value)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                if isinstance(parsed, dict) and "brand" in parsed:
-                    return _SIG_BRAND.format(brand=parsed["brand"])
-            elif isinstance(value, dict) and "brand" in value:
-                return _SIG_BRAND.format(brand=value["brand"])
+        # Cerca nelle evidence con key="typosquat" (L1)
+        for ev in evidence:
+            if isinstance(ev, dict) and ev.get("key") == "typosquat":
+                value = ev.get("value", "")
+                if isinstance(value, str):
+                    try:
+                        parsed = json.loads(value)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if isinstance(parsed, dict) and "brand" in parsed:
+                        return _SIG_BRAND.format(brand=parsed["brand"])
+                elif isinstance(value, dict) and "brand" in value:
+                    return _SIG_BRAND.format(brand=value["brand"])
 
-    # Cerca nel verdict.brand
-    v_brand = getattr(verdict, "brand", None)
-    if v_brand:
-        return _SIG_BRAND.format(brand=v_brand)
+        # Cerca nel verdict.brand
+        v_brand = getattr(verdict, "brand", None)
+        if v_brand:
+            return _SIG_BRAND.format(brand=v_brand)
 
-    # 2. Gate bypass — cerca transition con kind="gate_solved"
-    #    (le evidence con key="gate_solved" vengono prodotte dall'explorer)
-    for ev in evidence:
-        if isinstance(ev, dict) and ev.get("key") == "gate_solved":
-            return _SIG_GATE
+        # 2. Gate bypass — cerca transition con kind="gate_solved"
+        #    (le evidence con key="gate_solved" vengono prodotte
+        #    dall'explorer)
+        for ev in evidence:
+            if isinstance(ev, dict) and ev.get("key") == "gate_solved":
+                return _SIG_GATE
 
-    # 3. Credential harvesting — evidenza L1 "aitm_email_payload"
-    for ev in evidence:
-        if isinstance(ev, dict) and ev.get("key") == "aitm_email_payload":
+        # 3. Credential harvesting — evidenza L1 "aitm_email_payload"
+        for ev in evidence:
+            if isinstance(ev, dict) and ev.get("key") == "aitm_email_payload":
+                return _SIG_CREDENTIAL
+
+        # Anche kit_family sul verdict
+        kit = getattr(verdict, "kit_family", None)
+        if kit and any(kw in kit.lower() for kw in ("aitm", "harvest", "evilginx")):
             return _SIG_CREDENTIAL
-
-    # Anche kit_family sul verdict
-    kit = getattr(verdict, "kit_family", None)
-    if kit and any(kw in kit.lower() for kw in ("aitm", "harvest", "evilginx")):
-        return _SIG_CREDENTIAL
 
     # 4. Firma generica
     classification = (
@@ -160,11 +171,7 @@ def build_signature(
 # ---------------------------------------------------------------------------
 
 
-def build_trellix_response(
-    data: dict | None,
-    *,
-    timed_out: bool = False,
-) -> dict:
+def build_trellix_response(data: dict | None) -> dict:
     """Costruisce la risposta Trellix dal risultato dell'analisi.
 
     Args:
@@ -172,32 +179,12 @@ def build_trellix_response(
               ``target`` (AnalysisTarget), ``verdict`` (Verdict | None),
               ``evidence`` (list[Evidence]), ``states``, ``transitions``.
               Può essere ``None`` se l'analisi non è ancora iniziata.
-        timed_out: Se ``True``, forza la risposta "incompleta" anche se
-                   l'analisi è effettivamente terminata nel frattempo
-                   (usato quando il wrapper ha già deciso di rispondere
-                   prima del completamento).
 
     Returns:
         Un dict con le chiavi attese da Trellix:
         ``verdict``, ``confidence``, ``signature``,
         ``recommended_action``, ``reason``.
     """
-    # ── Timeout ────────────────────────────────────────────────────────
-    if timed_out:
-        return {
-            "verdict": "safe",
-            "confidence": 0.1,
-            "signature": _SIG_INCOMPLETE,
-            "recommended_action": "allow",
-            "reason": (
-                "L'analisi non è terminata entro la finestra di tempo "
-                "Trellix (60s). Il risultato sarà disponibile a breve "
-                "interrogando l'endpoint REST /analyses/{id}. "
-                "Questa risposta è deliberatamente safe per non bloccare "
-                "l'utente su un'analisi incompleta."
-            ),
-        }
-
     # ── Nessun dato ────────────────────────────────────────────────────
     if data is None:
         return {
@@ -294,7 +281,7 @@ def build_trellix_response(
             confidence = round(max(0.9, confidence), 2)
         action = "allow"
 
-    signature = build_signature(verdict, evidence_dicts)
+    signature = build_signature(verdict, evidence_dicts, mapped=mapped)
 
     reason = rationale or (
         "Analisi completata — nessun indicatore di phishing rilevato."

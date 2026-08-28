@@ -15,29 +15,40 @@ import pytest
 
 
 @pytest.mark.integration
-class TestRealCertspotter:
-    """crt.sh su un dominio noto con molti certificati (google.com)."""
+class TestRealCtlogs:
+    """ctlogs.dev su un dominio noto con molti certificati (google.com).
 
-    async def test_crtsh_real_returns_certificates(self):
-        """crt.sh su google.com deve restituire certificati o errore trasparente."""
+    Senza ``CTLOGS_API_KEY`` gira in modalità anonima (niente SAN list);
+    con la chiave in modalità API (sibling dai dettagli).  Il test è
+    valido per entrambe.
+    """
+
+    async def test_ctlogs_real_returns_certificates(self):
+        """ctlogs.dev su google.com deve restituire la cronologia certificati
+        (e sibling se in modalità API) o errore trasparente."""
         import httpx
-        from graph_engine.osint.certificate_transparency import query_crtsh
+        from graph_engine.osint.certificate_transparency import query_ctlogs
 
         async with httpx.AsyncClient() as client:
-            result = await query_crtsh("google.com", client)
+            result = await query_ctlogs("google.com", client)
 
-        # Accetta sia successo che errori transitori (es. 502 Bad Gateway)
+        # Accetta sia successo che errori transitori (rate limit, quota)
         # — il formato della risposta è ciò che ci interessa
         if "error" in result:
-            pytest.skip(f"crt.sh temporaneamente non disponibile: {result['error']}")
+            pytest.skip(f"ctlogs.dev temporaneamente non disponibile: {result['error']}")
             return
 
-        assert result["total_certs"] > 0, "Nessun certificato trovato per google.com"
-        assert result["total_siblings"] > 0
+        assert result["source"] == "ctlogs.dev"
+        assert result["mode"] in ("api", "anonymous")
         assert isinstance(result["sibling_domains"], list)
-        assert "google.com" not in result["sibling_domains"]
+        # google.com è paginato (has_next): oldest e total restano None
         assert result["newest_cert_days"] is not None
-        assert result["oldest_cert_days"] is not None
+        if result["mode"] == "api":
+            assert result["total_siblings"] > 0
+            assert "google.com" not in result["sibling_domains"]
+        else:
+            # Modalità anonima: niente SAN list → sibling vuoti
+            assert result["sibling_domains"] == []
 
 
 @pytest.mark.integration

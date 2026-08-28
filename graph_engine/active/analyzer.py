@@ -15,6 +15,7 @@ import httpx
 
 from graph_engine.active.differential_fetch import (
     PROFILES,
+    cloaking_probe_profile,
     detect_cloaking,
     differential_fetch,
     recommend_profile,
@@ -68,16 +69,18 @@ async def analyze(
 
     Args:
         canonical_url: URL normalizzato (output di L0 canonicalize).
-        timeout_s: Timeout in secondi per JARM. Se ``None``, usa il
-                   default (10s). Le altre sonde (redirect_chain,
-                   favicon, differential_fetch) mantengono i propri
-                   timeout interni.
+        timeout_s: Timeout in secondi per JARM e ceiling del client
+                   HTTP condiviso (redirect_chain, favicon).  Se
+                   ``None``, usa i default (10s per JARM, 30s per il
+                   client).
 
     Returns:
         dict con chiavi:
         - ``evidence``: list[dict] — evidenze L3 raccolte
         - ``recommended_profile``: dict — profilo raccomandato per L4
           (``user_agent`` + ``headers``)
+        - ``cloaking_profile``: dict o None — profilo divergente più ricco
+          da esplorare come secondo ramo L4 (``None`` se nessun cloaking)
     """
     parsed = urlparse(canonical_url)
     hostname = parsed.hostname or ""
@@ -91,9 +94,16 @@ async def analyze(
                 "user_agent": PROFILES["desktop_chrome"]["user_agent"],
                 "headers": dict(PROFILES["desktop_chrome"].get("headers", {})),
             },
+            "cloaking_profile": None,
         }
 
-    async with httpx.AsyncClient(timeout=_HTTPX_TIMEOUT) as client:
+    # Il ceiling del client condiviso segue il timeout dell'analisi:
+    # nel fast path (timeout_s=5.0) redirect_chain e favicon sono
+    # cappate a 5s per richiesta invece dei 30s di default.
+    # differential_fetch usa un client proprio (15s per profilo).
+    async with httpx.AsyncClient(
+        timeout=timeout_s if timeout_s is not None else _HTTPX_TIMEOUT
+    ) as client:
         # ── Lancio parallelo di TUTTE le sonde ───────────────────────────
         redirect_task = trace_redirect_chain(canonical_url, client)
         favicon_task = fetch_favicon_hash(canonical_url, client)
@@ -203,11 +213,13 @@ async def analyze(
             "user_agent": PROFILES["desktop_chrome"]["user_agent"],
             "headers": dict(PROFILES["desktop_chrome"].get("headers", {})),
         }
+        cloaking_profile = None
 
         if isinstance(diff_result, dict) and "results" in diff_result:
             diff_results = diff_result["results"]
             cloaking = detect_cloaking(diff_results)
             recommended_profile = recommend_profile(diff_results, cloaking)
+            cloaking_profile = cloaking_probe_profile(diff_results, cloaking)
 
             if cloaking.get("cloaking_detected"):
                 evidence.append(_make_evidence(
@@ -246,6 +258,7 @@ async def analyze(
     return {
         "evidence": evidence,
         "recommended_profile": recommended_profile,
+        "cloaking_profile": cloaking_profile,
     }
 
 

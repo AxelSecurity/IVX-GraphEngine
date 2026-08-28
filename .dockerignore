@@ -1,10 +1,22 @@
-.git
-.gitignore
-.venv
+# Ambiente di sviluppo locale — non serve nell'immagine
+.venv/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Dati di runtime locali — nel container vivono nel volume ./data
 data/
+
+# Credenziali e configurazione locale — .env viene iniettato a runtime
+# da docker-compose (env_file), MAI copiato nell'immagine
 .env
+
+# Non necessario in produzione
+tests/
+.git/
+.gitignore
+.dockerignore
+
+# Varie
 .DS_Store
-docs/
+*.log

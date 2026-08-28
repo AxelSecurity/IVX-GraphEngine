@@ -1,10 +1,11 @@
 """Test di regressione: serializzazione dict/list in ``Evidence.value``.
 
-Caso reale: ``rinnovospid.cc/pay`` — crt.sh ha risposto HTTP 404 e
-l'analyzer osint ha prodotto un'evidence ``provider_unavailable`` con
-``value`` dict.  Prima della fix, i loop di registrazione in ``cli.py``
-passavano il dict direttamente a ``Evidence`` (``value: str``) →
-``ValidationError`` → crash dell'intera esplorazione.
+Caso reale: ``rinnovospid.cc/pay`` — il provider CT ha risposto HTTP
+404 (all'epoca crt.sh) e l'analyzer osint ha prodotto un'evidence
+``provider_unavailable`` con ``value`` dict.  Prima della fix, i loop
+di registrazione in ``cli.py`` passavano il dict direttamente a
+``Evidence`` (``value: str``) → ``ValidationError`` → crash
+dell'intera esplorazione.
 
 Questo test esegue ``cli._main`` end-to-end con tutti gli stage di rete
 mocked e verifica che il value diventi una stringa JSON deserializzabile
@@ -19,9 +20,9 @@ import json
 from tests.graph_engine.test_api.conftest import FakeExplorer, FakePlaywright
 
 
-CRTSH_ERROR = {
-    "provider": "crtsh",
-    "reason": "crt.sh HTTP error: 404 Not Found",
+CTLOGS_ERROR = {
+    "provider": "ctlogs.dev",
+    "reason": "ctlogs.dev HTTP error: 404",
 }
 
 
@@ -59,13 +60,13 @@ class TestCliEvidenceSerialization:
         )
 
         async def _fake_l2(url):
-            """Simula il caso reale: crt.sh 404 → provider_unavailable dict."""
+            """Simula il caso reale: provider CT 404 → provider_unavailable dict."""
             return {
                 "evidence": [
                     {
                         "layer": "L2",
                         "key": "provider_unavailable",
-                        "value": CRTSH_ERROR,
+                        "value": CTLOGS_ERROR,
                         "weight": 0.0,
                         "produced_by": "osint",
                     }
@@ -108,4 +109,4 @@ class TestCliEvidenceSerialization:
         assert isinstance(stored, str), (
             f"Evidence.value deve essere str, trovato {type(stored).__name__}"
         )
-        assert json.loads(stored) == CRTSH_ERROR
+        assert json.loads(stored) == CTLOGS_ERROR

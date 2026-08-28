@@ -41,6 +41,7 @@ serializzato su richiesta). Artefatti binari (HAR, screenshot, DOM) su filesyste
 | `new_tab` | Apertura nuovo contesto/tab (`target=_blank`, `window.open`) |
 | `gate_solved` | Superamento di CAPTCHA / challenge anti-bot |
 | `ws_message` | Cambio di stato guidato da messaggio WebSocket (tipico AiTM) |
+| `cloaking_probe` | Collegamento dal root primario al root del ramo esplorato col profilo divergente (L3 cloaking) |
 
 ### Normalizzazione DOM (dom_hash)
 
@@ -71,6 +72,37 @@ while frontier and within_budget():
             frontier.push(s2)
     if stop_condition(s): break
 ```
+
+### Cloaking probe (secondo ramo)
+
+Quando L3 rileva cloaking, il contenuto servito al profilo divergente
+(es. Googlebot) non è mai visibile al visitatore normale. Il motore
+esplora quindi un SECONDO albero col profilo divergente:
+
+1. L3 produce `cloaking_profile` (`cloaking_probe_profile` in
+   `differential_fetch.py`): il profilo divergente con content_length
+   maggiore, o `None` se nessun cloaking / divergenti tutti falliti.
+2. `StateGraphExplorer.run(cloaking_profile=...)` — subito dopo la
+   navigazione del root primario, PRIMA del BFS primario — apre un
+   secondo context Playwright con user_agent/header del profilo
+   divergente e naviga lo stesso `start_url`
+   (`_explore_cloaking_branch`). L'ordine è deliberato: dopo il BFS
+   primario il ramo non partirebbe mai sui target che reindirizzano a
+   siti "infiniti" (es. Google), dove il primario consuma l'intero
+   timeout globale.
+3. Il nuovo root è collegato al root primario da una
+   `Transition(cloaking_probe)`; il sotto-albero riusa lo stesso loop
+   BFS (`_bfs_loop`) con max_depth ridotta a `min(2, budget.max_depth)`.
+4. Budget residuo CONDIVISO con riserva di 2 nodi: se il ramo non
+   partirebbe con abbastanza budget, viene registrata evidenza
+   `cloaking_probe` status `skipped` e non si apre alcun context.
+5. Replay: nessuna modifica necessaria — il goto del root sul context
+   divergente incarna il cambio profilo; gli stati del ramo si
+   raggiungono via click/gate sul context divergente stesso.
+
+Il primario resta invariato: `root_state_id` e `final_url` del target
+sono del primo pass. I leaf del ramo divergente entrano nel bundle L5
+automaticamente (leaf = stato senza transizioni outbound).
 
 ## Interaction engine (fasi successive, non in questo primo batch)
 
@@ -137,12 +169,38 @@ Il livello L5 trasforma i dati grezzi raccolti durante l'esplorazione L4 in un
 ### Pipeline a due stadi
 
 1. **Prefiltro deterministico** (`graph_engine/classifier/prefilter.py`):
-   intercetta casi banalmente inconclusivi (1 stato senza testo visibile, errore
-   non gestito senza altri segnali) e restituisce direttamente un Verdict
-   `suspicious` a bassa confidenza, senza chiamare il modello. È
-   deliberatamente debole perché L1 (reputazione dominio, età registrazione)
-   e L2 (blacklist, certificate transparency) non esistono ancora — quando
-   saranno costruiti, questo filtro intercetterà molti più casi.
+   due famiglie di intercettazione, senza chiamare il modello.
+
+   a. **Hit IOC verificato (MISP `to_ids=true` o OpenCTI attivo) →
+      Verdict `phishing` diretto** (regola prioritaria, 2026-08-27).
+      Un valore trovato in un feed MISP con `to_ids=true` è un IOC
+      curato manualmente dagli analisti e destinato agli IDS (es.
+      feed CERT-AGID con tag `campaign-type:phishing`); un osservabile
+      OpenCTI con almeno un Indicator correlato ATTIVO (non revoked,
+      non scaduto) è un IOC sulla piattaforma di threat intel. In
+      entrambi i casi è segnale malevolo VERIFICATO. La regola scatta
+      prima di ogni altra e non delega al modello — una landing decoy
+      o in errore non deve mai prevalere su un IOC curato (caso reale
+      2026-08-27: `s.kemkes.go.id/ejuiaer`, short link di phishing con
+      4 eventi MISP to_ids — Foundry lo aveva classificato `benign`
+      perché L4 vedeva solo la pagina d'errore della SPA). Confidenza
+      modulata: match su URL/hostname → 0.95; match solo su dominio
+      registrabile/IP (infrastruttura) → 0.85. Il brand impersonato
+      viene estratto dai tag `phishing-name:*` (solo MISP — i label
+      OpenCTI non seguono quella convenzione, brand resta `None`).
+      Quando entrambi i feed colpiscono vince il Verdict MISP
+      (confidenza e brand), ma il rationale cita anche OpenCTI come
+      corroborazione ("Confermato anche da OpenCTI: …") — l'analista
+      deve vedere che entrambe le piattaforme hanno confermato l'URL.
+
+   b. **Casi banalmente inconclusivi** (1 stato senza testo visibile,
+      errore non gestito senza altri segnali) → Verdict `suspicious` a
+      confidenza minima (0.05).
+
+   Per tutto il resto il prefilter restituisce `None`: L1/L2/L3 con
+   segnale reale non vengono MAI intercettati come "dati insufficienti"
+   (bug 2026-08: un dominio di phishing live con `passive_risk_score`
+   alto veniva short-circuited) — in quei casi decide Foundry.
 
 2. **Classificatore Foundry** (`graph_engine/classifier/foundry_classifier.py`):
    chiama un Azure AI Foundry Agent con un *evidence bundle* compatto. Il
@@ -262,16 +320,50 @@ impone tre vincoli non negoziabili:
 ## L2 — Passivo / OSINT
 
 Il livello L2 raccoglie informazioni da fonti esterne senza interagire con
-il target. Tutte le query sono in **parallelo** (`asyncio.gather` con
-`return_exceptions=True`): un fallimento su una fonte non blocca mai le altre.
+il target. La sequenza NON è interamente parallela: la risoluzione **DNS
+avviene prima** (round-trip sul cammino critico, mitigato dalla cache 1h),
+poi ctlogs.dev, RDAP e i reputation provider partono **in parallelo**
+(`asyncio.gather` con `return_exceptions=True`). La sequenzialità è
+voluta: gli IP risolti alimentano la query dei reputation provider
+(MISP cerca anche per `ip-dst`), quindi una query MISP senza IP
+coprirebbe solo URL/hostname/dominio e perderebbe i match su
+infrastruttura condivisa. Un fallimento su una fonte non blocca mai
+le altre.
 
 ### Fonti attive
 
 | Fonte | Tipo | Endpoint | Cache TTL |
 |---|---|---|---|
-| **crt.sh** | Certificate Transparency | `https://crt.sh/?q=<domain>&output=json` | 6 ore |
+| **ctlogs.dev** | Certificate Transparency | API: `https://api.ctlogs.dev/v1/domain/{host}` + `/v1/cert/{id}`; anonimo: `https://ctlogs.dev/search?q=<domain>&output=json` | 6 ore (cache separata per modalità) |
 | **RDAP** | WHOIS moderno (via bootstrap IANA) | `https://data.iana.org/rdap/dns.json` → server TLD-specifico | 24 ore |
 | **DNS** | Risoluzione A/AAAA | `loop.getaddrinfo` (asyncio nativo, nessuna dipendenza esterna) | 1 ora |
+
+**ctlogs.dev è l'unico provider CT** (crt.sh rimosso il 2026-08-27:
+502 sistematici nel collaudo live — 3 richieste su 3). L'analyzer
+interroga SEMPRE ctlogs.dev in una di due modalità:
+
+- **API con chiave** (`CTLOGS_API_KEY`): `/v1/domain/{host}` (righe
+  SENZA SAN list, ordinate per `not_before` discendente, paginate) e
+  poi `/v1/cert/{id}` in parallelo per i primi 25 certificati più
+  recenti, che restituisce `san_dns` — l'array completo dei dNSName.
+  L'evidenza prodotta è la stessa `sibling_domains` con `source:
+  "ctlogs.dev"`.
+- **Anonima** (senza chiave): endpoint pubblico
+  `https://ctlogs.dev/search?q=<domain>&output=json` (stessa forma
+  `rows`/`has_next`/`next_cursor`, verificata live). Nessuna SAN list
+  → niente sibling; l'evidenza prodotta è `certificate_history`:
+  un cert emesso da < 30 giorni pesa 0.15 (infrastruttura appena
+  messa in piedi), altrimenti è informativa (weight 0.0).
+
+Onestà sui dati parziali (entrambe le modalità): con risposta paginata
+(`has_next`) `oldest_cert_days` e `total_certs` sono `None` (mai un
+numero inventato — un oldest falsato produrrebbe un falso "dominio
+appena creato"); `newest_cert_days` è sempre affidabile (prima riga).
+Un dettaglio non recuperabile è best-effort (si ignora quel
+certificato). Chiave rilasciata su richiesta via email da
+api.ctlogs.dev; ogni richiesta costa 1 unit della quota mensile. La cache è
+separata per modalità: quando la chiave arriva, un risultato anonimo
+(senza sibling) non viene riusato dall'API.
 
 ### Adapter predisposti (disabilitati di default)
 
@@ -293,20 +385,90 @@ Per attivare URLhaus, MISP o OpenCTI, basta impostare le variabili
 d'ambiente corrispondenti. Nessuna modifica al codice necessaria: il
 `registry.py` rileva le variabili a runtime e istanzia i provider.
 
+#### MISP — restSearch multi-tipo e semantica to_ids
+
+Il provider MISP invia **una sola** chiamata a `/attributes/restSearch`
+con una lista di valori candidati — URL completo, hostname, dominio
+registrabile (riusando `_registrable_domain` di L1, stessa funzione
+tldextract) e gli IP risolti (`known_ips`) — e una lista di tipi
+(`domain`, `hostname`, `url`, `ip-dst`). Forma verificata contro la
+documentazione ufficiale (OpenAPI `restSearchAttributes` e sorgente
+MISP 2.4): `value` e `type` accettano liste nel body JSON e
+`includeContext: 1` annida l'oggetto `Event` completo (`info`,
+`threat_level_id`, `Tag`) in ogni attributo della risposta.
+
+La risposta viene riassunta in forma compatta (mai payload grezzo):
+`match_count`, `matched_types`, `tags` deduplicati (dall'Attributo E
+dall'Evento), `event_count`, `to_ids_match`. Il flag `to_ids` NON è
+equiparato tra i due valori:
+
+- `to_ids=true` (almeno un match) → `listed=True`, hit reale: l'IOC è
+  destinato agli IDS ed è curato manualmente dagli analisti.
+- SOLO `to_ids=false` → `listed=False` ma `details.context_only=True`:
+  contesto informativo, mai un hit (principio: mai penalizzare per
+  segnale debole).
+
+#### OpenCTI — osservabili GraphQL e semantica IOC-attivo
+
+Il provider OpenCTI interroga `POST /graphql` (auth `Bearer <API key>`,
+come il client ufficiale `pycti`) con una **sola** query
+`stixCyberObservables` che cerca i valori candidati (stesso modulo
+condiviso `_search_values.py` usato da MISP: URL, hostname, dominio
+registrabile, IP) come **confronti esatti**: un filtro
+`{ key: ["value"], values: [x], operator: eq }` per candidato,
+combinati con `FilterGroup` `mode: or`. Forma verificata contro la
+documentazione ufficiale (docs.opencti.io) e il sorgente
+`OpenCTI-Platform/opencti`. Il search full-text `search:` è
+deliberatamente NON usato per la decisione: è una query_string Lucene
+con wildcard trailing implicita — un match per prefisso
+(`example.com` → `example.com.evil.net`) non è un IOC verificato.
+
+La risposta viene riassunta in forma compatta (mai payload grezzo):
+`match_count`, `matched_types` (entity_type STIX), conteggi indicatori,
+`labels`, `markings` (TLP), `created_by`, score min/max/medio. La
+semantica è "IOC-attivo", perché su OpenCTI qualsiasi organizzazione
+può pubblicare:
+
+- Osservabile con ≥1 Indicator correlato ATTIVO (non `revoked`, con
+  `valid_until` non superato) → `listed=True` con
+  `active_ioc_match=True`: hit reale, decide il prefilter.
+- Osservabile senza Indicator attivo (nessuno, tutti revoked o tutti
+  scaduti) → `listed=False` ma `details.context_only=True`: contesto
+  informativo, mai un hit. Un `valid_until` illeggibile rende
+  l'indicatore NON attivo (conservativo).
+
 ### Segnali estratti
 
 - **Domini fratelli di campagna** (`sibling_domains`): dalla SAN list
-  aggregata di crt.sh, deduplicata, con il dominio interrogato escluso.
-  Limite 50 domini; se il numero reale è superiore, viene impostato
-  `truncated: true` con il conteggio reale in `total_siblings`.
+  aggregata di ctlogs.dev (vedi sopra), deduplicata, con il dominio
+  interrogato escluso.  Il valore dell'evidenza porta `source`
+  (`ctlogs.dev`).  Limite 50 domini; se il numero
+  reale è superiore, viene impostato `truncated: true` con il conteggio
+  reale in `total_siblings`.
   Questo è il pivot a più alto valore secondo l'architettura originale.
+
+- **Cronologia certificati** (`certificate_history`): da ctlogs.dev
+  quando non ci sono sibling (modalità anonima, o dominio
+  senza SAN condivisi).  Un cert emesso da < 30 giorni pesa 0.15
+  (infrastruttura appena messa in piedi); oltre è informativa
+  (weight 0.0).  Il valore porta `source`, `mode` (`api`/`anonymous`),
+  `newest_cert_days` e — quando noti — `oldest_cert_days`/`total_certs`
+  (`None` con risposta paginata: mai inventati).
 
 - **Età del dominio** (`domain_age_days`): dal record RDAP. Soglie:
   < 30 giorni → peso 0.35 (sospetto), 30-90 giorni → peso 0.15 (moderato),
   > 90 giorni → nessuna penalizzazione (dominio stagionato).
 
 - **Reputation hit** (`reputation_hit`): URL presente in un feed di
-  minacce (es. URLhaus). Peso 0.50 (il più alto).
+  minacce (es. URLhaus). Peso 0.50 — sale a **0.55** quando il match
+  è MISP con `to_ids=true` o OpenCTI con IOC attivo (fonti con IOC
+  verificato, leggermente più affidabili di un feed automatizzato).
+
+- **Context match informativo** (`<provider>_context_match`): match
+  MISP con SOLO `to_ids=false`, oppure osservabile OpenCTI senza
+  Indicator attivo. Peso 0.0 (informativa): l'IOC esiste ma non è un
+  flag attivo — mai penalizzare per segnale debole. L'evidenza resta
+  comunque nel bundle per il classificatore.
 
 - **Record A** (`dns_a_records`): indirizzi IPv4 risolti per il dominio.
   Peso 0.0 (informativo). Colma una lacuna IOC: gli IP servono ai
@@ -327,7 +489,9 @@ d'ambiente corrispondenti. Nessuna modifica al codice necessaria: il
 | `_W_DOMAIN_AGE_YOUNG` | 0.35 | Dominio < 30 giorni |
 | `_W_DOMAIN_AGE_MODERATE` | 0.15 | Dominio 30-90 giorni |
 | `_W_SIBLING_DOMAINS` | 0.30 | Presenza domini fratelli nella SAN list |
-| `_W_REPUTATION_HIT` | 0.50 | URL presente in feed di minacce |
+| `_W_REPUTATION_HIT` | 0.50 | URL presente in feed di minacce (URLhaus, ecc.) |
+| `_W_MISP_IDS_HIT` | 0.55 | Hit MISP con `to_ids=true` — feed curato manualmente |
+| `_W_OPENCTI_ACTIVE_HIT` | 0.55 | IOC attivo su OpenCTI (non revoked, non scaduto) |
 
 Il punteggio è clampato a [0, 1]. **MAI** penalizzare per l'assenza di
 segnale — solo per la presenza.
@@ -358,7 +522,7 @@ Cache filesystem sotto `data/osint_cache/<provider>/<hash>.json`.
 TTL differenziati per tipo di dato:
 
 - RDAP: 24 ore (i dati WHOIS cambiano molto raramente)
-- crt.sh: 6 ore (nuovi certificati possono comparire)
+- ctlogs.dev: 6 ore (nuovi certificati possono comparire)
 - URLhaus: 1 ora (feed di minacce, più dinamico)
 - IANA bootstrap: 30 giorni (la mappatura TLD→server RDAP è stabile)
 
@@ -377,17 +541,18 @@ per i TLD a due componenti.
 ```
 graph_engine/osint/
     __init__.py
-    analyzer.py          — orchestratore parallelo
+    analyzer.py          — orchestratore: DNS prima, poi resto in parallelo
     cache.py             — cache filesystem con TTL
-    certificate_transparency.py — crt.sh
+    certificate_transparency.py — ctlogs.dev (provider CT unico)
     dns_resolve.py       — risoluzione DNS A/AAAA (asyncio nativo)
     rdap.py              — RDAP con bootstrap IANA
     reputation/
         __init__.py
-        base.py          — ReputationProvider (ABC)
+        base.py          — ReputationProvider (ABC, con known_ips)
         urlhaus.py       — URLhaus (richiede Auth-Key)
-        misp.py           — MISP adapter (disabilitato di default)
-        opencti.py        — OpenCTI adapter (disabilitato di default)
+        misp.py           — MISP: restSearch multi-tipo + includeContext
+        opencti.py        — OpenCTI: stixCyberObservables eq + IOC-attivo
+        _search_values.py — valori candidati condivisi (MISP/OpenCTI)
         registry.py       — get_enabled_providers()
 ```
 
@@ -473,6 +638,11 @@ raccomandato il profilo che ha ricevuto la risposta "più ricca"
 **Recommend profile**: restituisce un dict `{user_agent, headers}` pronto
 per `browser.new_context()` di Playwright in L4.
 
+**Cloaking probe profile** (`cloaking_probe_profile`): il profilo
+divergente più ricco (content_length maggiore, esclusi quelli con
+`error`) da esplorare come secondo ramo L4. Ritorna `None` quando non
+c'è cloaking o nessun divergente ha avuto successo.
+
 ### Orchestratore (`graph_engine/active/analyzer.py`)
 
 `analyze(canonical_url)` esegue tutte e quattro le sonde IN PARALLELO.
@@ -503,6 +673,11 @@ Playwright applica questi header a OGNI richiesta HTTP del browser,
 permettendo di emulare il profilo che L3 ha determinato essere il più
 adatto per quel target (es. il profilo che ha ricevuto la risposta
 "più ricca" in caso di cloaking).
+
+In caso di cloaking, l'analyzer produce anche `cloaking_profile` che
+viene passato a `StateGraphExplorer.run(cloaking_profile=...)` per il
+secondo ramo (vedi "Cloaking probe (secondo ramo)" nella sezione del
+motore di esplorazione).
 
 ### Architettura del package
 
@@ -746,7 +921,7 @@ Altri parametri del profilo:
 - `FAST_TOP_N_ACTIONS = 1` — un solo candidato click per stato (default: 3)
 - `FAST_CAPTCHA_WAIT_S = 4` — metà dell'attesa standard (default: 8)
 - `FAST_L2_TIMEOUT_S = 5.0`, `FAST_L3_TIMEOUT_S = 5.0` — timeout di rete
-  dimezzati (default: crt.sh/RDAP 15s, DNS 5s, JARM 10s)
+  dimezzati (default: ctlogs.dev/RDAP 15s, DNS 5s, JARM 10s)
 - `TRELLIX_RESPONSE_TIMEOUT_S = 48` — attesa massima del wrapper (12s di
   margine sulla deadline di 60s)
 
@@ -757,7 +932,7 @@ configurata può sforare la finestra → il wrapper risponde onestamente
 Per supportare il profilo fast, le funzioni L2/L3 accettano un parametro
 `timeout`/`timeout_s` opzionale (backward-compatible, default invariati):
 
-- `osint/certificate_transparency.py`: `query_crtsh(..., timeout=CRTSH_TIMEOUT)`
+- `osint/certificate_transparency.py`: `query_ctlogs(..., timeout=CTLOGS_TIMEOUT)`
 - `osint/rdap.py`: `query_rdap(..., timeout=RDAP_TIMEOUT)`
 - `osint/dns_resolve.py`: `resolve_dns(..., timeout=_DNS_TIMEOUT)`
 - `osint/analyzer.py`: `analyze(..., timeout_s=None)`

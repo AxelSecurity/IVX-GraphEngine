@@ -23,6 +23,7 @@ CRITICAL DESIGN CONSTRAINT — read before modifying:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -71,9 +72,14 @@ async def classify(bundle: dict) -> Verdict:
 
     try:
         raw_json = await _call_foundry_agent(prompt_text)
-    except _FoundryNotConfigured:
+    except _FoundryNotConfigured as exc:
+        # Il motivo reale (env mancanti O SDK non installato) è nel
+        # messaggio dell'eccezione: loggarlo evita il falso allarme
+        # "not configured" quando il .env è a posto ma manca un pacchetto.
         logger.warning(
-            "Azure Foundry not configured — falling back to heuristic verdict"
+            "Azure Foundry unavailable (%s) — falling back to "
+            "heuristic verdict",
+            exc,
         )
         return _heuristic_fallback(bundle)
     except Exception as exc:
@@ -148,8 +154,27 @@ def _build_user_message(bundle: dict) -> str:
 
 
 async def _call_foundry_agent(prompt: str) -> str:
+    """Run the (blocking) Foundry SDK flow in a worker thread.
+
+    The AgentsClient SDK is fully synchronous: ``create_and_process``
+    blocks for the whole run duration.  Running it on the event loop
+    would freeze the entire API server (10-40s+ with a real agent) and
+    prevent the Trellix 48s response timeout from ever firing — the
+    frontdoor deadline would be missed silently.  ``asyncio.to_thread``
+    keeps the loop responsive while the agent runs.
+
+    NO ``asyncio.wait_for`` around the thread: the Foundry run has no
+    time cap by design (user decision — L5 must not be limited).  The
+    caller (``classify``) stays cancellable-cooperative on the loop.
+    """
+    # NESSUN wait_for: il run Foundry resta senza tetto (decisione utente)
+    return await asyncio.to_thread(_call_foundry_agent_sync, prompt)
+
+
+def _call_foundry_agent_sync(prompt: str) -> str:
     """Create a fresh thread, send the prompt, run, and return the reply.
 
+    Blocking body executed in a worker thread (see ``_call_foundry_agent``).
     Raises ``_FoundryNotConfigured`` if env vars are missing.
     """
 
@@ -269,8 +294,10 @@ def _heuristic_fallback(bundle: dict) -> Verdict:
     low confidence rather than guessing.
     """
     flags = bundle.get("flags", {})
-    leaves = bundle.get("leaf_states", [])
-    total_fields = sum(len(leaf.get("form_fields", [])) for leaf in leaves)
+    graph_states = bundle.get("states", [])
+    total_fields = sum(
+        len(st.get("form_fields", [])) for st in graph_states
+    )
 
     # If nothing was collected (1 state, no fields, no errors), data is sparse
     if bundle.get("num_states", 0) <= 1 and total_fields == 0:

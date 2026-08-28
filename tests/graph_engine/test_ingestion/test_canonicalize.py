@@ -54,6 +54,23 @@ class TestSameLogicalUrlProducesSameHash:
         # %252F = %25 2F → % decodes to % → %2F → / decodes to /
         assert "/" in c1
 
+    def test_empty_path_normalized_to_slash(self):
+        """https://example.org e https://example.org/ → stesso hash
+        (RFC 3986 §6.2.3 — il path vuoto è equivalente a "/").
+        Regressione del collaudo Trellix (2026-08-27): la cache 24h
+        non riconosceva le due scritture come la stessa analisi e
+        rilanciare una seconda esplorazione completa."""
+        c1, h1 = canonicalize_and_hash("https://example.org")
+        c2, h2 = canonicalize_and_hash("https://example.org/")
+        assert h1 == h2
+        assert c1 == c2 == "https://example.org/"
+
+    def test_empty_path_with_query_normalized(self):
+        """La normalizzazione vale anche con query string presente."""
+        _, h1 = canonicalize_and_hash("https://example.org?a=1&b=2")
+        _, h2 = canonicalize_and_hash("https://example.org/?a=1&b=2")
+        assert h1 == h2
+
 
 class TestDifferentUrlsProduceDifferentHash:
     def test_different_paths(self):
@@ -64,6 +81,13 @@ class TestDifferentUrlsProduceDifferentHash:
     def test_different_domains(self):
         _, h1 = canonicalize_and_hash("https://evil.example/page")
         _, h2 = canonicalize_and_hash("https://benign.example/page")
+        assert h1 != h2
+
+    def test_non_empty_path_trailing_slash_preserved(self):
+        """/path e /path/ possono essere risorse diverse: hash diversi
+        (la normalizzazione RFC vale SOLO per il path vuoto)."""
+        _, h1 = canonicalize_and_hash("https://evil.example/login")
+        _, h2 = canonicalize_and_hash("https://evil.example/login/")
         assert h1 != h2
 
 

@@ -43,7 +43,7 @@ Tutti modelli Pydantic v2 con `from __future__ import annotations`:
 
 ### Enum
 
-- **`TransitionKind`** (9 valori): `http_3xx`, `meta_refresh`, `js_location`, `history_push`, `click`, `form_submit` (mantenuto per retrocompatibilità, **non più prodotto**), `new_tab`, `gate_solved`, `ws_message`
+- **`TransitionKind`** (10 valori): `http_3xx`, `meta_refresh`, `js_location`, `history_push`, `click`, `form_submit` (mantenuto per retrocompatibilità, **non più prodotto**), `new_tab`, `gate_solved`, `ws_message`, `cloaking_probe` (collegamento root primario → root del ramo col profilo divergente)
 - **`TargetStatus`**: `queued`, `running`, `done`, `error`
 - **`EvidenceScope`**: `target`, `state`, `transition`
 - **`Classification`**: `benign`, `suspicious`, `phishing` — **NON esiste `aitm`** (la classificazione riguarda *cosa* è il sito, non *come* esfiltra; la tecnica va in `kit_family`/`rationale`)
@@ -57,12 +57,12 @@ Tutti modelli Pydantic v2 con `from __future__ import annotations`:
 | `dom_hash.py` | 132 | Normalizzazione DOM + SHA-256 via lxml; rimuove nonce/CSRF/timestamp/UUID/hash, ordina attributi, elimina `value` da elementi con segnale effimero |
 | `actions.py` | 212 | Scoring elementi interagibili: `ActionCandidate` + `enumerate_actionable(page)` con script JS inlinato (keyword match W=0.50, salienza visiva 0.30, posizione 0.20); ~30 keyword; selettori `#id`, `tag:has-text(...)`, o tag+classe |
 | `gate_solver.py` | 116 | `detect_captcha(page)` (riconoscimento iframe: cloudflare_turnstile/hcaptcha/recaptcha) + `try_pass_gate(page, wait_seconds=8)` — attesa auto-risoluzione, singolo click checkbox, mai puzzle reali |
-| `explorer.py` | 1079 | `StateGraphExplorer` — il motore BFS principale (vedi sotto) |
+| `explorer.py` | 1392 | `StateGraphExplorer` — il motore BFS principale: loop estratto in `_bfs_loop` (riusabile) + secondo ramo cloaking `_explore_cloaking_branch` (vedi sotto) |
 | `cli.py` | 251 | CLI argparse: `python -m graph_engine.cli <url> [opzioni]` |
 | `classifier/__init__.py` | 1 | Marker: "L5 — Classification layer" |
 | `classifier/form_inventory.py` | 110 | `scan_form_fields(page)` — scansione passiva sola lettura via JS; enumera `{tag, type, name_or_id, nearby_label_text}` per input/select/textarea visibili; esclude hidden/submit/button/checkbox/radio/file |
 | `classifier/evidence_bundle.py` | 156 | `build_evidence_bundle(...)` — dict semplice (NON Pydantic); `bundle_to_prompt_text(bundle)` — sezioni testuali etichettate, deliberatamente non JSON |
-| `classifier/prefilter.py` | 88 | `prefilter(bundle)` → Verdict o None; intercetta solo casi banalmente inconclusivi; restituisce `suspicious` conf 0.05, `produced_by="prefilter"` |
+| `classifier/prefilter.py` | 379 | `prefilter(bundle)` → Verdict o None; hit IOC verificato — MISP `to_ids=true` o OpenCTI `active_ioc_match=true` — → `phishing` deterministico (conf 0.85/0.95, regola prioritaria; MISP vince su OpenCTI se entrambi); casi banalmente inconclusivi → `suspicious` conf 0.05; altrimenti None (delega a Foundry) |
 | `classifier/foundry_classifier.py` | 315 | `classify(bundle)` → Verdict; richiede env `AZURE_FOUNDRY_ENDPOINT` e `AZURE_FOUNDRY_AGENT_ID`; fallback `_heuristic_fallback` se non configurato. **Nessun allegato immagine**: il contenuto visivo arriva come TESTO nel bundle via Azure AI Vision (il modello gpt-5-mini non supporta immagini). Auth: `ClientSecretCredential` se service principal completo, altrimenti `DefaultAzureCredential` |
 | `classifier/system_prompt.txt` | 55 | System prompt per l'agente Foundry |
 
@@ -75,11 +75,16 @@ Tutti modelli Pydantic v2 con `from __future__ import annotations`:
 - **`_execute_click_action`**: pagina fresca per click, replay path, confronto `dom_hash` pre/post + URL; nessun cambiamento → ramo scartato; stato post con depth+1
 - **Contenimento errori**: il loop BFS wrappa ogni stato in try/except → evidenza `unhandled_node_error`; un singolo fallimento non crasha l'esplorazione
 - **Cattura artefatti**: `_save_artifacts` scrive `data/graph_artifacts/<target_id>/<state_id>/` con `screenshot.png` (full_page), `dom.html`, `snapshot.har` (HAR 1.2 minimale costruito da listener request/response)
-- **Evidenze prodotte**: `navigation_error`, `replay_fallback_used`, `unhandled_node_error`, `blocked_by_gate`, `Artifact error — ...`
+- **`_bfs_loop(page, context, budget, start_state, max_depth_limit=None)`**: il corpo del BFS estratto da `run()` e riusabile sul secondo ramo; `max_depth_limit` riduce la profondità del sotto-albero (default: `budget.max_depth`); budget, dedup e conteggio nodi restano condivisi
+- **Ramo cloaking**: `run(cloaking_profile=...)` (subito dopo il root, PRIMA del BFS primario — così ha una finestra di budget garantita: dopo il primario non partirebbe mai sui target che reindirizzano a siti infiniti come Google) → `_explore_cloaking_branch`: apre un secondo context col profilo divergente di L3, naviga lo stesso `start_url`, collega il nuovo root con `Transition(cloaking_probe)` ed esplora con `max_depth_limit=min(2, budget.max_depth)`. Budget CONDIVISO con riserva di 2 nodi (altrimenti evidenza status `skipped`); dedup dom_hash contro root primario e `_visited` → `deduped`; primario invariato (`root_state_id`/`final_url` del primo pass); replay senza modifiche (il goto del root sul context divergente incarna il cambio profilo)
+- **Evidenze prodotte**: `navigation_error`, `replay_fallback_used`, `unhandled_node_error`, `blocked_by_gate`, `cloaking_probe` (status `explored`/`deduped`/`skipped`/`error`, weight 0.0), `cloaking_probe_error`, `Artifact error — ...`
 
 ### Pipeline L5 a due stadi
 
-1. **`prefilter()`** — deterministico, deliberatamente debole (L1/L2 non ancora implementati): intercetta solo "1 stato + nessun testo visibile" e "errore non gestito + nessun altro segnale"
+1. **`prefilter()`** — deterministico. Due famiglie di intercettazione:
+   - **Hit IOC verificato → Verdict `phishing` DIRETTO** (regola prioritaria, 2026-08-27): MISP con `to_ids=true` (IOC curato manualmente dagli analisti e destinato agli IDS, es. feed CERT-AGID) O OpenCTI con `active_ioc_match=true` (osservabile con ≥1 Indicator correlato attivo: non revoked, non scaduto). In entrambi i casi segnale malevolo verificato: decide SENZA il modello e una landing decoy/in errore non lo indebolisce. Confidenza 0.95 (match su URL/hostname) o 0.85 (solo dominio/IP); brand estratto dai tag `phishing-name:*` (solo MISP; con entrambi i feed vince il Verdict MISP ma il rationale cita OpenCTI come corroborazione).
+   - **Casi banalmente inconclusivi** ("1 stato + nessun testo visibile", "errore non gestito + nessun altro segnale") → `suspicious` conf 0.05.
+   - Per il resto `None`: L1/L2/L3 con segnale reale NON vengono mai intercettati come "dati insufficienti".
 2. **`classify()`** → Foundry Agent (Azure AI Projects SDK) — solo se il prefilter restituisce None
 
 ## Vincoli NON NEGOZIABILI
@@ -119,12 +124,13 @@ lxml>=5.1.0
 pytest
 pytest-asyncio
 azure-ai-projects>=0.1.0   # opzionale — solo per --classify
+azure-ai-agents>=1.0.0     # opzionale — solo per --classify (AgentsClient conversazionale: threads/messages/runs)
 azure-identity>=1.16.0     # opzionale — solo per --classify
 ```
 
 - **Python 3.9.6** (venv di sistema macOS CommandLineTools). `from __future__ import annotations` è usato ovunque; `asyncio.Queue[int]` funziona su 3.9.
 - **Non esiste `pyproject.toml`** — per aggiungere dipendenze si modifica `requirements.txt`
-- I moduli Azure NON sono installati nel venv; il classificatore degrada a fallback euristico senza
+- Senza i moduli Azure (`azure-ai-agents` in particolare) il classificatore degrada a fallback euristico anche con `.env` completo — il warning logga il motivo reale (SDK mancante vs env mancanti)
 
 ## Variabili d'ambiente
 
@@ -134,6 +140,10 @@ Solo per `--classify`:
 - `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` — service principal AAD; se TUTTE e tre presenti il classificatore usa `ClientSecretCredential` (autenticazione stabile via `.env`, senza `az login`), altrimenti `DefaultAzureCredential`. NOTA: pydantic-settings non esporta i valori del `.env` in `os.environ` — è `foundry_classifier.py` a passarli esplicitamente a `ClientSecretCredential`
 - `AZURE_VISION_ENDPOINT` / `AZURE_VISION_KEY` — arricchimento Vision (OCR + Brand Detection) sugli screenshot; vedi `.env.example`
 
+Provider L2 (opzionali, si attivano solo con chiave presente):
+- `MISP_URL` / `MISP_API_KEY`, `OPENCTI_URL` / `OPENCTI_API_KEY`, `URLHAUS_API_KEY` — reputation provider; vedi `.env.example`
+- `CTLOGS_API_KEY` — certificate transparency (ctlogs.dev REST API, UNICO provider CT da 2026-08-27, quando crt.sh è stato rimosso); chiave rilasciata su richiesta da api.ctlogs.dev. SENZA chiave il provider funziona comunque in modalità anonima sull'endpoint pubblico (nessuna SAN list → evidenza `certificate_history` invece di `sibling_domains`)
+
 `.env` è in `.gitignore`. Nessuna credenziale viene mai hardcodata o committata.
 
 ## Note aggiuntive
@@ -141,6 +151,6 @@ Solo per `--classify`:
 - Il progetto non ha remote git configurato; branch `main`, ~22 commit
 - `data/graph_artifacts/` è gitignorato — sono artefatti di runtime locali
 - La persistenza SQLite (aiosqlite) è pianificata ma non ancora implementata
-- I layer L1 (reputazione dominio, TLD risk) e L2 (blacklist, certificate transparency) sono lavori futuri che rafforzeranno il prefilter
+- I layer L1 (reputazione dominio, TLD risk) e L2 (blacklist, certificate transparency) sono stati implementati; nuove fonti potranno aggiungere ulteriori regole al prefilter
 - Evidenze di errore prodotte dall'explorer hanno `produced_by="StateGraphExplorer"`
 - L'integrazione con IntelIVX avviene via HTTP/code, MAI tramite import diretto

@@ -1,20 +1,37 @@
 """Deterministic pre-filter — cheap, honest, deliberately limited.
 
 This filter runs BEFORE the Foundry Agent call.  It returns a Verdict
-ONLY when the evidence bundle is so sparse that no model could make a
-reliable judgment.  In all other cases it returns None, delegating to
-the full classifier.
+in exactly two situations:
 
-DESIGN NOTE — why this is deliberately weak:
-    The pre-filter only catches the trivially inconclusive case of
-    "we barely explored anything" (sparse L4).  It does NOT intercept
-    when L1/L2/L3 have already produced real signal — lexical/passive
-    risk scores above threshold or strong evidence keys — because there
-    the signal exists and is merely un-aggregated, which is exactly the
-    classifier's job.  Intercepting there would burn real cases to save
-    model calls (2026-08: a live phishing domain with a high
-    passive_risk_score was short-circuited as "insufficient data"
-    because L4 had visited a single, text-less state).
+1. **Verified IOC hit (MISP to_ids / OpenCTI active)** — the URL (or
+   its hostname/domain/IP) appears in a threat-intel source with a
+   verified malicious IOC: a MISP attribute with ``to_ids=true``
+   (analyst-curated, IDS-grade — e.g. CERT-AGID feeds), or an
+   OpenCTI observable with at least one ACTIVE related Indicator
+   (not revoked, not past ``valid_until``).  That is a verified
+   malicious signal, so the filter decides ``phishing`` at high
+   confidence WITHOUT consulting the model.  Rationale: a
+   decoy/error landing page must never outweigh a curated IOC
+   (2026-08-27: s.kemkes.go.id/ejuiaer short-link — MISP/CERT-AGID
+   had 4 phishing events with to_ids=true, but Foundry judged the
+   broken error page "benign" because L4 saw no credential fields).
+2. **Trivially inconclusive L4** — the bundle is so sparse that no
+   model could make a reliable judgment → ``suspicious`` at minimal
+   confidence.
+
+In all other cases it returns None, delegating to the full classifier.
+
+DESIGN NOTE — why the rest of the filter stays deliberately weak:
+    Apart from the MISP-to_ids rule above, the pre-filter only catches
+    the trivially inconclusive case of "we barely explored anything"
+    (sparse L4).  It does NOT intercept when L1/L2/L3 have already
+    produced real signal — lexical/passive risk scores above threshold
+    or strong evidence keys — because there the signal exists and is
+    merely un-aggregated, which is exactly the classifier's job.
+    Intercepting there would burn real cases to save model calls
+    (2026-08: a live phishing domain with a high passive_risk_score
+    was short-circuited as "insufficient data" because L4 had visited
+    a single, text-less state).
 """
 
 from __future__ import annotations
@@ -33,6 +50,234 @@ from graph_engine.models import Classification, Verdict
 # material for the model even if L4 barely explored.  Below this the
 # score alone doesn't prove the case is classifiable.
 _RISK_SCORE_SIGNAL_THRESHOLD = 0.5
+
+
+# ---------------------------------------------------------------------------
+# MISP to_ids rule (verified malicious signal — decides WITHOUT the model)
+# ---------------------------------------------------------------------------
+# A ``reputation_hit`` Evidence carries the provider's ``details`` dict in
+# ``bundle["strong_evidence_details"]["reputation_hit"]``.  Only MISP
+# produces ``to_ids_match=True`` (URLhaus/OpenCTI have no such field), so
+# its presence identifies the MISP feed unambiguously.
+#
+# to_ids=true in MISP means the IOC is published FOR intrusion-detection
+# systems — attributes flagged this way are curated by human analysts
+# (CERT-AGID feeds carry them with tags like ``campaign-type:phishing``).
+# Per user decision (2026-08-27): a MISP to_ids hit means the URL is
+# malicious, full stop — the verdict must not depend on the model, and
+# a decoy/error landing page must not dilute it.
+
+# Confidence modulation: a match on the full URL or hostname is the
+# strongest possible signal; a match limited to the registrable domain
+# or an IP still identifies malicious infrastructure, but slightly less
+# precisely (shared hosting is possible).
+_MISP_IDS_URL_CONFIDENCE = 0.95      # matched_types include url/hostname
+_MISP_IDS_INFRA_CONFIDENCE = 0.85    # match only on domain/ip-dst
+
+# Tag prefixes that carry threat-intel semantics (kept in the rationale);
+# transport/administrative tags like ``tlp:*`` are filtered out.
+_TAG_PREFIXES_KEPT = (
+    "CERT-",
+    "campaign-type:",
+    "phishing-name:",
+    "country-target:",
+    "attack-method:",
+    "theme:",
+    "via:",
+)
+
+_MAX_RATIONALE_TAGS = 8
+
+
+def _misp_to_ids_details(bundle: dict) -> Optional[dict]:
+    """Return the details of a MISP ``reputation_hit`` with to_ids=true.
+
+    Returns None when no such evidence exists (no MISP feed configured,
+    only ``to_ids=false`` context matches, or a non-MISP provider hit).
+
+    Robusto alla serializzazione: il bundle costruito da
+    ``build_evidence_bundle`` coerce già il valore a dict, ma per una
+    regola di sicurezza il valore stringa (JSON) viene coerd anche qui —
+    la decisione "malevolo su IOC verificato" non deve mai saltare per
+    un dettaglio di serializzazione.
+    """
+    from graph_engine.classifier.evidence_bundle import _coerce_evidence_value
+
+    for rep in bundle.get("strong_evidence_details", {}).get(
+        "reputation_hit", []
+    ):
+        rep = _coerce_evidence_value(rep)
+        if isinstance(rep, dict) and rep.get("to_ids_match") is True:
+            return rep
+    return None
+
+
+def _misp_verdict(
+    bundle: dict, hit: dict, opencti_hit: Optional[dict] = None
+) -> Verdict:
+    """Build the deterministic phishing Verdict from a MISP to_ids hit.
+
+    ``opencti_hit`` (optional) carries the details of a concurrent
+    OpenCTI active-IOC hit: the verdict stays MISP (confidence, brand),
+    but the rationale cites OpenCTI as corroboration so the analyst
+    sees both feeds confirmed the URL.
+    """
+    matched_types = set(hit.get("matched_types") or [])
+    if {"url", "hostname"} & matched_types:
+        confidence = _MISP_IDS_URL_CONFIDENCE
+    else:
+        confidence = _MISP_IDS_INFRA_CONFIDENCE
+
+    # I tag ``phishing-name:*`` del feed identificano il brand impersonato
+    brands = sorted({
+        tag.split(":", 1)[1].strip()
+        for tag in hit.get("tags") or []
+        if isinstance(tag, str)
+        and tag.startswith("phishing-name:")
+        and len(tag.split(":", 1)) == 2
+    })
+    brand = ", ".join(brands) or None
+
+    info_tags = [
+        tag for tag in hit.get("tags") or []
+        if isinstance(tag, str) and tag.startswith(_TAG_PREFIXES_KEPT)
+    ]
+    tag_str = ", ".join(info_tags[:_MAX_RATIONALE_TAGS])
+
+    match_count = hit.get("match_count", "?")
+    event_count = hit.get("event_count", "?")
+    types_str = ", ".join(sorted(matched_types))
+
+    # Corroborazione OpenCTI: stessi dettagli chiave del rationale
+    # OpenCTI standalone (osservabili, indicatori attivi, marcatura,
+    # score), in forma compatta.
+    opencti_str = ""
+    if opencti_hit is not None:
+        octi_types = ", ".join(
+            sorted(str(t) for t in (opencti_hit.get("matched_types") or []))
+        )
+        octi_match = opencti_hit.get("match_count", "?")
+        octi_active = opencti_hit.get("active_indicator_count", "?")
+        octi_total = opencti_hit.get("total_indicator_count", "?")
+        octi_markings = ", ".join(opencti_hit.get("markings") or [])
+        octi_score = opencti_hit.get("score_avg")
+        obs_word = "osservabile" if octi_match == 1 else "osservabili"
+        ind_word = (
+            "indicatore attivo" if octi_active == 1 else "indicatori attivi"
+        )
+        opencti_str = (
+            f" Confermato anche da OpenCTI: {octi_match} {obs_word} "
+            f"({octi_types}), {octi_active} {ind_word} su "
+            f"{octi_total}."
+            + (f" Marcatura: {octi_markings}." if octi_markings else "")
+            + (f" Score medio: {octi_score}." if octi_score is not None else "")
+        )
+
+    feed_closing = (
+        "Feed verificati" if opencti_hit is not None else "Feed verificato"
+    )
+
+    return Verdict(
+        target_id=bundle.get("target_id", ""),
+        classification=Classification.phishing,
+        confidence=confidence,
+        produced_by="prefilter",
+        brand=brand,
+        kit_family=None,
+        rationale=(
+            "Hit MISP con to_ids=true: l'URL o la sua infrastruttura è "
+            "presente in un feed di minacce curato manualmente dagli "
+            f"analisti (IOC per IDS). Dettagli: {match_count} attributi "
+            f"({types_str}) in {event_count} eventi."
+            + (f" Tag: {tag_str}." if tag_str else "")
+            + opencti_str
+            + f" {feed_closing} → classificato malevolo senza consultare "
+            "il classificatore AI."
+        ),
+        final_url=bundle.get("canonical_url") or bundle.get("input_url"),
+        exfil_endpoint=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# OpenCTI active-IOC rule (same deterministic semantics as MISP)
+# ---------------------------------------------------------------------------
+# OpenCTI is a CTI platform where any org can publish: the raw observable
+# alone is NOT a verified signal.  An IOC is "detected" only when an
+# observable matches AND it has at least one related Indicator that is
+# still ACTIVE (not revoked, not past valid_until).  Only the OpenCTI
+# provider produces ``active_ioc_match=True``, so its presence
+# identifies the feed unambiguously.
+# Per user decision (2026-08-27): an active OpenCTI IOC means the URL is
+# malicious, same as MISP to_ids.
+
+# Same confidence modulation as MISP: a match on the exact Url/Hostname
+# observable is the strongest signal; a match limited to the registrable
+# domain (Domain-Name) or an IP is slightly less precise.
+_OPENCTI_ACTIVE_URL_CONFIDENCE = 0.95
+_OPENCTI_ACTIVE_INFRA_CONFIDENCE = 0.85
+
+
+def _opencti_active_details(bundle: dict) -> Optional[dict]:
+    """Return the details of an OpenCTI ``reputation_hit`` with an
+    active IOC match.
+
+    Returns None when no such evidence exists (no OpenCTI configured,
+    only revoked/expired context matches, or a non-OpenCTI provider
+    hit).  Same serialization robustness as ``_misp_to_ids_details``:
+    a JSON-stringified value must never break the security rule.
+    """
+    from graph_engine.classifier.evidence_bundle import _coerce_evidence_value
+
+    for rep in bundle.get("strong_evidence_details", {}).get(
+        "reputation_hit", []
+    ):
+        rep = _coerce_evidence_value(rep)
+        if isinstance(rep, dict) and rep.get("active_ioc_match") is True:
+            return rep
+    return None
+
+
+def _opencti_verdict(bundle: dict, hit: dict) -> Verdict:
+    """Build the deterministic phishing Verdict from an OpenCTI
+    active-IOC hit."""
+    matched_types = {str(t).lower() for t in (hit.get("matched_types") or [])}
+    if {"url", "hostname"} & matched_types:
+        confidence = _OPENCTI_ACTIVE_URL_CONFIDENCE
+    else:
+        confidence = _OPENCTI_ACTIVE_INFRA_CONFIDENCE
+
+    # OpenCTI labels follow no phishing-name:* convention we can rely
+    # on: the brand stays None and the labels go into the rationale.
+    label_str = ", ".join(hit.get("labels") or [])
+    marking_str = ", ".join(hit.get("markings") or [])
+    types_str = ", ".join(sorted(hit.get("matched_types") or []))
+
+    match_count = hit.get("match_count", "?")
+    active_count = hit.get("active_indicator_count", "?")
+    total_count = hit.get("total_indicator_count", "?")
+    score_avg = hit.get("score_avg")
+
+    return Verdict(
+        target_id=bundle.get("target_id", ""),
+        classification=Classification.phishing,
+        confidence=confidence,
+        produced_by="prefilter",
+        brand=None,
+        kit_family=None,
+        rationale=(
+            "Hit OpenCTI: osservabile con IOC attivo (non revoked, non "
+            f"scaduto). Dettagli: {match_count} osservabili ({types_str}), "
+            f"{active_count} indicatori attivi su {total_count}."
+            + (f" Label: {label_str}." if label_str else "")
+            + (f" Marcatura: {marking_str}." if marking_str else "")
+            + (f" Score medio: {score_avg}." if score_avg is not None else "")
+            + " IOC attivo su piattaforma di threat intel → classificato "
+            "malevolo senza consultare il classificatore AI."
+        ),
+        final_url=bundle.get("canonical_url") or bundle.get("input_url"),
+        exfil_endpoint=None,
+    )
 
 
 def _has_strong_signal(bundle: dict) -> bool:
@@ -63,15 +308,33 @@ def _has_strong_signal(bundle: dict) -> bool:
 
 
 def prefilter(bundle: dict) -> Optional[Verdict]:
-    """Return a Verdict for trivially insufficient data, or None.
+    """Return a deterministic Verdict, or None to delegate to Foundry.
 
-    Cases intercepted (return non-None) — only when NO layer produced
-    signal:
+    Cases intercepted (return non-None):
+
+    0. MISP ``reputation_hit`` with ``to_ids_match=True``, or OpenCTI
+       ``reputation_hit`` with ``active_ioc_match=True`` — verified
+       threat-intel IOC → ``phishing`` at high confidence.  These
+       rules run FIRST and override everything else, including the
+       strong-signal delegation below: a decoy landing page must not
+       outvote a curated IDS feed (2026-08-27 kemkes case).
+
+    Then, only when NO layer produced signal:
+
     1. Only 1 state AND no visible text was extracted from it
        → exploration didn't get anywhere useful.
     2. ``had_unhandled_error`` is True AND no other signals
        (no gate, no form fields, no navigation errors, no redirects)
        → the exploration simply failed; we can't classify.
+
+    In both sparse cases, a TLS failure on the hostname certificate
+    (``flags["had_tls_error"]``: ERR_CERT / CERTIFICATE_VERIFY_FAILED)
+    upgrades the verdict to suspicious 0.6 with an explicit TLS
+    rationale — a certificate that doesn't match the hostname is itself
+    a signal (classic phishing pattern, e.g. ``www`` on blogspot
+    subdomains), not neutral "insufficient data".  With real L4 content
+    the case still delegates to Foundry, which sees the TLS evidence in
+    the bundle.
 
     NOT intercepted (return None → delegate to Foundry):
     - L1/L2 risk score above ``_RISK_SCORE_SIGNAL_THRESHOLD``;
@@ -80,6 +343,23 @@ def prefilter(bundle: dict) -> Optional[Verdict]:
     - anything with real L4 content.
     """
 
+    # ── Rule 0: verified IOC hit → malicious, decide now ────────────────
+    # Priority over the strong-signal delegation: a decoy/error landing
+    # page must never outweigh a curated IDS-grade IOC (see module
+    # docstring for the 2026-08-27 false-negative case).
+    misp_hit = _misp_to_ids_details(bundle)
+    opencti_hit = _opencti_active_details(bundle)
+    if misp_hit is not None:
+        # Con entrambi i feed il Verdict MISP guida (curatela IDS,
+        # brand dai tag phishing-name), ma il rationale cita OpenCTI
+        # come corroborazione — l'analista deve vedere che entrambe le
+        # piattaforme hanno confermato l'URL.
+        return _misp_verdict(bundle, misp_hit, opencti_hit=opencti_hit)
+
+    # OpenCTI active IOC: same deterministic semantics as MISP.
+    if opencti_hit is not None:
+        return _opencti_verdict(bundle, opencti_hit)
+
     # L1/L2/L3 signal takes precedence over L4 sparsity: when other
     # layers already produced real signal, do NOT intercept — the model
     # has enough to judge, we just haven't aggregated it yet.
@@ -87,39 +367,70 @@ def prefilter(bundle: dict) -> Optional[Verdict]:
         return None
 
     flags = bundle.get("flags", {})
-    leaves = bundle.get("leaf_states", [])
+    graph_states = bundle.get("states", [])
     num_states = bundle.get("num_states", 0)
     transition_kinds = bundle.get("transition_kinds_seen", {})
 
-    # Extract all visible text from leaves: DOM text AND OCR text from
-    # screenshots.  Una pagina che rende testo solo via canvas/immagini
-    # ha visible_text vuoto ma ocr_text non vuoto — NON è "nessun testo
-    # visibile" (il DOM da solo non basta più a giudicare la sparsità).
+    # Extract all visible text from every graph state: DOM text AND OCR
+    # text from screenshots.  Una pagina che rende testo solo via
+    # canvas/immagini ha visible_text vuoto ma ocr_text non vuoto — NON
+    # è "nessun testo visibile" (il DOM da solo non basta più a
+    # giudicare la sparsità).
     all_visible_text = " ".join(
-        (leaf.get("visible_text", "") or "")
+        (st.get("visible_text", "") or "")
         + " "
-        + (leaf.get("ocr_text", "") or "")
-        for leaf in leaves
+        + (st.get("ocr_text", "") or "")
+        for st in graph_states
     ).strip()
 
     # Count total form fields
     total_fields = sum(
-        len(leaf.get("form_fields", [])) for leaf in leaves
+        len(st.get("form_fields", [])) for st in graph_states
     )
 
-    # ---- Case 1: single state, no visible content -----------------------
-    if num_states <= 1 and not all_visible_text:
+    # TLS failure sul certificato dell'hostname: segnale deterministico
+    # (regressione 2026-08-28: www.facebook-login-redirect.blogspot.com
+    # rispondeva safe/0.05 "dati insufficienti" nonostante il
+    # CERTIFICATE_VERIFY_FAILED).  Vale SOLO quando l'esplorazione resta
+    # sparsa: se c'è contenuto reale si delega a Foundry, che vede le
+    # evidenze TLS nel bundle e può emettere phishing.
+    tls_failure = bool(flags.get("had_tls_error"))
+
+    def _sparse_verdict(rationale: str) -> Verdict:
+        """Verdict per esplorazione sparsa: il TLS failure alza la
+        confidenza e cambia il rationale (pattern phishing), altrimenti
+        resta 'dati insufficienti' a 0.05."""
+        if tls_failure:
+            return Verdict(
+                target_id=bundle.get("target_id", ""),
+                classification=Classification.suspicious,
+                confidence=0.6,
+                produced_by="prefilter",
+                rationale=(
+                    "TLS failure: il certificato non è valido per "
+                    "l'hostname richiesto (ERR_CERT o "
+                    "CERTIFICATE_VERIFY_FAILED). Pattern tipico degli "
+                    "URL di phishing diffusi su hosting condiviso (es. "
+                    "www su sottodomini blogspot). L'esplorazione è "
+                    "proseguita oltre l'errore ma non ha estratto "
+                    "contenuto utile."
+                ),
+            )
         return Verdict(
             target_id=bundle.get("target_id", ""),
             classification=Classification.suspicious,
             confidence=0.05,
             produced_by="prefilter",
-            rationale=(
-                "Explorazione inconclusiva: è stato visitato solo il "
-                "root state e non è stato possibile estrarre testo "
-                "visibile dalla pagina. Dati insufficienti per un "
-                "giudizio affidabile."
-            ),
+            rationale=rationale,
+        )
+
+    # ---- Case 1: single state, no visible content -----------------------
+    if num_states <= 1 and not all_visible_text:
+        return _sparse_verdict(
+            "Explorazione inconclusiva: è stato visitato solo il "
+            "root state e non è stato possibile estrarre testo "
+            "visibile dalla pagina. Dati insufficienti per un "
+            "giudizio affidabile."
         )
 
     # ---- Case 2: unhandled error with no other signals ------------------
@@ -129,18 +440,12 @@ def prefilter(bundle: dict) -> Optional[Verdict]:
         and not flags.get("had_navigation_error")
         and len(transition_kinds) <= 1
     ):
-        return Verdict(
-            target_id=bundle.get("target_id", ""),
-            classification=Classification.suspicious,
-            confidence=0.05,
-            produced_by="prefilter",
-            rationale=(
-                "Esplorazione inconclusiva: un errore non gestito ha "
-                "interrotto l'esplorazione e non sono stati raccolti "
-                "segnali sufficienti (nessun gate, nessun form field, "
-                "nessun redirect). Dati insufficienti per un giudizio "
-                "affidabile."
-            ),
+        return _sparse_verdict(
+            "Esplorazione inconclusiva: un errore non gestito ha "
+            "interrotto l'esplorazione e non sono stati raccolti "
+            "segnali sufficienti (nessun gate, nessun form field, "
+            "nessun redirect). Dati insufficienti per un giudizio "
+            "affidabile."
         )
 
     # ---- Normal path: delegate to Foundry -------------------------------

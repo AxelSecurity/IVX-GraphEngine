@@ -108,6 +108,15 @@ _SETTLE_QUIET_CYCLES = 2       # consecutive mature cycles with nothing
                                # new → page is stable, stop waiting
 
 # ---------------------------------------------------------------------------
+# Gate settle — fase 3 di try_pass_gate() (attesa post-click del checkbox)
+# ---------------------------------------------------------------------------
+# Ridotta nel fast path (captcha_wait_s <= 4, es. Trellix) per non bruciare
+# budget sul secondo rilevamento; standard altrimenti.
+
+_GATE_SETTLE_FAST_S = 1.5
+_GATE_SETTLE_DEFAULT_S = 3.0
+
+# ---------------------------------------------------------------------------
 # Explorer
 # ---------------------------------------------------------------------------
 
@@ -150,10 +159,17 @@ class StateGraphExplorer:
         browser: Browser,
         profile: Optional[dict] = None,
         page_timeout_ms: int = 30000,
+        ignore_https_errors: bool = True,
     ) -> None:
         self._browser = browser
         self._profile: dict = profile or {}
         self._page_timeout_ms = page_timeout_ms
+        # True di default: il modulo deve VEDERE cosa c'è dietro un
+        # errore di certificato (pattern classico del phishing: www su
+        # sottodomini blogspot senza cert valido).  L'errore TLS non va
+        # perso: la sonda L3 (redirect_chain) lo registra comunque come
+        # evidenza, e il prefilter lo valuta deterministicamente.
+        self._ignore_https_errors = ignore_https_errors
 
         self._artifact_base: Path = Path("data") / "graph_artifacts"
 
@@ -195,6 +211,7 @@ class StateGraphExplorer:
         captcha_wait_s: int = 8,
         settle_max_wait_s: float = 4.0,
         target_id: Optional[uuid.UUID] = None,
+        cloaking_profile: Optional[dict] = None,
     ) -> AnalysisTarget:
         """Explore *start_url* passively and return the populated AnalysisTarget.
 
@@ -224,12 +241,28 @@ class StateGraphExplorer:
         provided (by the API layer), all child records (states, transitions,
         evidence) are born with this UUID from the start, eliminating the
         need for post-hoc re-parenting.
+
+        *cloaking_profile* is the divergent profile detected by L3
+        (``{"user_agent", "headers"}``).  When set, a SECOND branch is
+        explored with this profile BEFORE the primary BFS loop, linked
+        to the primary root by a ``TransitionKind.cloaking_probe``
+        transition.  Budget is shared (residual) and the branch max depth
+        is capped at ``min(2, budget.max_depth)``.  The branch runs first
+        so it is guaranteed a budget window: after the primary loop it
+        would never start on targets that redirect to "infinite" sites
+        (e.g. Google), where the primary tree consumes the whole global
+        timeout.
         """
         budget = budget or Budget()
         self._capture_artifacts_flag = capture_artifacts
         self._top_n_actions = top_n_actions
         self._captcha_wait_s = captcha_wait_s
         self._settle_max_wait_s = settle_max_wait_s
+        self._gate_settle_s = (
+            _GATE_SETTLE_FAST_S
+            if captcha_wait_s <= 4
+            else _GATE_SETTLE_DEFAULT_S
+        )
         if profile is not None:
             self._profile = profile
 
@@ -258,6 +291,7 @@ class StateGraphExplorer:
             locale=self._profile.get("locale", "en-US"),
             timezone_id=self._profile.get("timezone", "America/New_York"),
             extra_http_headers=extra_headers if extra_headers else None,
+            ignore_https_errors=self._ignore_https_errors,
         )
         try:
             page = await context.new_page()
@@ -276,119 +310,17 @@ class StateGraphExplorer:
             self.states.append(root_state)
             self._node_count += 1
 
-            # --- BFS loop --------------------------------------------------
-            frontier: asyncio.Queue[State] = asyncio.Queue()
-            await frontier.put(root_state)
+            # --- secondo ramo cloaking (profilo divergente) ----------------
+            # PRIMA del BFS primario: il ramo ha così una finestra di
+            # budget garantita. Dopo il primario non partirebbe mai sui
+            # target che reindirizzano a siti "infiniti" (es. Google):
+            # il primario consumerebbe l'intero timeout globale.
+            await self._explore_cloaking_branch(
+                start_url, budget, cloaking_profile, root_state
+            )
 
-            while not frontier.empty():
-                if not self._within_budget(budget):
-                    break
-
-                state = await frontier.get()
-
-                if state.dom_hash in self._visited:
-                    continue
-                self._visited.add(state.dom_hash)
-
-                if state.depth >= budget.max_depth:
-                    continue
-
-                try:
-                    # Replay the transition path so *page* shows this state's DOM
-                    # (critical for SPA / multi-step forms where URL doesn't change).
-                    if state.depth > 0:
-                        replay_ok = await self._replay_to_state(page, state)
-                        if not replay_ok:
-                            # Replay fell back to goto(state.url) — the DOM may
-                            # differ from the original exploration; treat as leaf.
-                            continue
-
-                    # ---- gate detection / solving --------------------------------
-                    if self._captcha_wait_s > 0:
-                        captcha = await detect_captcha(page)
-                        if captcha is not None:
-                            gate_passed = await try_pass_gate(
-                                page, self._captcha_wait_s
-                            )
-                            if gate_passed:
-                                # The DOM changed (gate iframe gone / replaced) —
-                                # record a new State + Transition.
-                                post_html = await page.content()
-                                post_hash = normalise_and_hash(post_html)
-                                post_url = page.url
-
-                                if post_hash != state.dom_hash:
-                                    gate_state = State(
-                                        target_id=self.target.id,  # type: ignore[union-attr]
-                                        url=post_url,
-                                        dom_hash=post_hash,
-                                        depth=state.depth + 1,
-                                    )
-                                    if self._capture_artifacts_flag:
-                                        await self._save_artifacts(
-                                            gate_state, page, post_html, []
-                                        )
-                                    gate_transition = Transition(
-                                        target_id=self.target.id,  # type: ignore[union-attr]
-                                        from_state=state.id,
-                                        to_state=gate_state.id,
-                                        kind=TransitionKind.gate_solved,
-                                        trigger={
-                                            "provider": captcha,
-                                            "wait_s": self._captcha_wait_s,
-                                        },
-                                    )
-                                    self.states.append(gate_state)
-                                    self.transitions.append(gate_transition)
-                                    self._node_count += 1
-                                    if gate_state.dom_hash not in self._visited:
-                                        await frontier.put(gate_state)
-                                continue
-                            else:
-                                # Gate still present — record and treat as leaf.
-                                self._record_error(
-                                    scope=EvidenceScope.state,
-                                    scope_id=state.id,
-                                    key="blocked_by_gate",
-                                    message=(
-                                        f"Gate not passed after "
-                                        f"{self._captcha_wait_s}s: {captcha}"
-                                    ),
-                                )
-                                continue
-
-                    # Enumerate *passive* actions from this state
-                    actions = await self._enumerate_passive_actions(page, state)
-
-                    # Enumerate *click* actions if enabled
-                    if self._top_n_actions > 0:
-                        click_actions = await self._enumerate_click_actions(
-                            page, state
-                        )
-                        actions.extend(click_actions)
-
-                    for action in actions:
-                        if not self._within_budget(budget):
-                            break
-                        new_state = await self._execute_action(
-                            page, context, state, action
-                        )
-                        if new_state is not None:
-                            self.states.append(new_state)
-                            self._node_count += 1
-                            if new_state.dom_hash not in self._visited:
-                                await frontier.put(new_state)
-
-                except Exception as exc:
-                    self._record_error(
-                        scope=EvidenceScope.state,
-                        scope_id=state.id,
-                        key="unhandled_node_error",
-                        message=(
-                            f"Unhandled error processing state "
-                            f"{state.id}: {exc}"
-                        ),
-                    )
+            # --- BFS loop primario -----------------------------------------
+            await self._bfs_loop(page, context, budget, root_state)
 
             self.target.status = TargetStatus.done
 
@@ -396,6 +328,297 @@ class StateGraphExplorer:
             await context.close()
 
         return self.target
+
+    async def _bfs_loop(
+        self,
+        page,
+        context,
+        budget: Budget,
+        start_state: State,
+        max_depth_limit: Optional[int] = None,
+    ) -> None:
+        """BFS del grafo a partire da *start_state* su *page*/*context*.
+
+        Corpo estratto da ``run()`` per essere riusato sul secondo ramo
+        cloaking: *max_depth_limit* riduce la profondità massima del
+        sotto-albero (default: ``budget.max_depth``). Budget, dedup
+        (``self._visited``) e conteggio nodi restano CONDIVISI tra
+        albero primario e ramo divergente.
+        """
+        depth_limit = (
+            max_depth_limit if max_depth_limit is not None else budget.max_depth
+        )
+        frontier: asyncio.Queue[State] = asyncio.Queue()
+        await frontier.put(start_state)
+
+        while not frontier.empty():
+            if not self._within_budget(budget):
+                break
+
+            state = await frontier.get()
+
+            if state.dom_hash in self._visited:
+                continue
+            self._visited.add(state.dom_hash)
+
+            if state.depth >= depth_limit:
+                continue
+
+            try:
+                # Replay the transition path so *page* shows this state's DOM
+                # (critical for SPA / multi-step forms where URL doesn't change).
+                if state.depth > 0:
+                    replay_ok = await self._replay_to_state(page, state)
+                    if not replay_ok:
+                        # Replay fell back to goto(state.url) — the DOM may
+                        # differ from the original exploration; treat as leaf.
+                        continue
+
+                # ---- gate detection / solving --------------------------------
+                if self._captcha_wait_s > 0:
+                    captcha = await detect_captcha(page)
+                    if captcha is not None:
+                        gate_passed = await try_pass_gate(
+                            page,
+                            self._captcha_wait_s,
+                            settle_s=self._gate_settle_s,
+                        )
+                        if gate_passed:
+                            # The DOM changed (gate iframe gone / replaced) —
+                            # record a new State + Transition.
+                            post_html = await page.content()
+                            post_hash = normalise_and_hash(post_html)
+                            post_url = page.url
+
+                            if post_hash != state.dom_hash:
+                                gate_state = State(
+                                    target_id=self.target.id,  # type: ignore[union-attr]
+                                    url=post_url,
+                                    dom_hash=post_hash,
+                                    depth=state.depth + 1,
+                                )
+                                if self._capture_artifacts_flag:
+                                    await self._save_artifacts(
+                                        gate_state, page, post_html, []
+                                    )
+                                gate_transition = Transition(
+                                    target_id=self.target.id,  # type: ignore[union-attr]
+                                    from_state=state.id,
+                                    to_state=gate_state.id,
+                                    kind=TransitionKind.gate_solved,
+                                    trigger={
+                                        "provider": captcha,
+                                        "wait_s": self._captcha_wait_s,
+                                    },
+                                )
+                                self.states.append(gate_state)
+                                self.transitions.append(gate_transition)
+                                self._node_count += 1
+                                if gate_state.dom_hash not in self._visited:
+                                    await frontier.put(gate_state)
+                            continue
+                        else:
+                            # Gate still present — record and treat as leaf.
+                            self._record_error(
+                                scope=EvidenceScope.state,
+                                scope_id=state.id,
+                                key="blocked_by_gate",
+                                message=(
+                                    f"Gate not passed after "
+                                    f"{self._captcha_wait_s}s: {captcha}"
+                                ),
+                            )
+                            continue
+
+                # Enumerate *passive* actions from this state
+                actions = await self._enumerate_passive_actions(page, state)
+
+                # Enumerate *click* actions if enabled
+                if self._top_n_actions > 0:
+                    click_actions = await self._enumerate_click_actions(
+                        page, state
+                    )
+                    actions.extend(click_actions)
+
+                for action in actions:
+                    if not self._within_budget(budget):
+                        break
+                    new_state = await self._execute_action(
+                        page, context, state, action
+                    )
+                    if new_state is not None:
+                        self.states.append(new_state)
+                        self._node_count += 1
+                        if new_state.dom_hash not in self._visited:
+                            await frontier.put(new_state)
+
+            except Exception as exc:
+                self._record_error(
+                    scope=EvidenceScope.state,
+                    scope_id=state.id,
+                    key="unhandled_node_error",
+                    message=(
+                        f"Unhandled error processing state "
+                        f"{state.id}: {exc}"
+                    ),
+                )
+
+    # ------------------------------------------------------------------
+    # Cloaking probe branch (second L4 tree with the divergent profile)
+    # ------------------------------------------------------------------
+
+    def _record_cloaking_probe_evidence(
+        self,
+        status: str,
+        reason: str = "",
+        detail: str = "",
+    ) -> None:
+        """Evidenza L4 sull'esito del ramo cloaking (weight 0: telemetria)."""
+        value: dict = {"status": status}
+        if reason:
+            value["reason"] = reason
+        if detail:
+            value["detail"] = detail
+        self.evidence.append(
+            Evidence(
+                target_id=self.target.id,  # type: ignore[union-attr]
+                scope=EvidenceScope.target,
+                scope_id=self.target.id,  # type: ignore[union-attr]
+                layer="L4",
+                key="cloaking_probe",
+                value=json.dumps(value),
+                weight=0.0,
+                produced_by="StateGraphExplorer",
+            )
+        )
+
+    async def _explore_cloaking_branch(
+        self,
+        start_url: str,
+        budget: Budget,
+        cloaking_profile: Optional[dict],
+        root_state: State,
+    ) -> None:
+        """Secondo ramo L4 col profilo divergente rilevato da L3.
+
+        Quando L3 rileva cloaking, il contenuto servito al profilo
+        divergente (es. Googlebot) non è mai visibile al visitatore
+        normale: qui viene esplorato come albero parallelo collegato al
+        root primario da una ``Transition(cloaking_probe)``.
+
+        Viene eseguito subito dopo la navigazione del root primario,
+        PRIMA del BFS primario: così il ramo ha una finestra di budget
+        garantita (il primario, su target che reindirizzano a siti
+        infiniti, consumerebbe l'intero timeout globale).
+
+        Vincoli:
+        - budget CONDIVISO (stessi ``_node_count``/``_start_ts``);
+        - riserva di 2 nodi: il ramo parte solo con abbastanza budget,
+          altrimenti evidenza status ``skipped``;
+        - max_depth del sotto-albero ridotta a ``min(2, budget.max_depth)``;
+        - dedup contro il root primario (non ancora in ``self._visited``)
+          e contro gli stati già visitati;
+        - contenimento errori: un fallimento produce evidenza
+          ``cloaking_probe_error`` e MAI una eccezione verso l'esterno.
+        """
+        if cloaking_profile is None:
+            return
+
+        if (
+            self._node_count >= budget.max_nodes - 2
+            or not self._within_budget(budget)
+        ):
+            self._record_cloaking_probe_evidence(
+                status="skipped",
+                reason="budget",
+                detail=(
+                    f"residual budget insufficient: {self._node_count}/"
+                    f"{budget.max_nodes} nodes used"
+                ),
+            )
+            return
+
+        context2 = await self._browser.new_context(
+            user_agent=cloaking_profile.get(
+                "user_agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            ),
+            viewport={"width": 1280, "height": 720},
+            locale="en-US",
+            timezone_id="America/New_York",
+            extra_http_headers=cloaking_profile.get("headers") or None,
+            ignore_https_errors=self._ignore_https_errors,
+        )
+        try:
+            page2 = await context2.new_page()
+            page2.set_default_timeout(self._page_timeout_ms)
+
+            div_root = await self._navigate_and_create_state(
+                page2, start_url, depth=0
+            )
+            if div_root is None:
+                self._record_cloaking_probe_evidence(
+                    status="error",
+                    reason="navigation",
+                    detail="divergent-profile root navigation failed",
+                )
+                return
+
+            if (
+                div_root.dom_hash == root_state.dom_hash
+                or div_root.dom_hash in self._visited
+            ):
+                self._record_cloaking_probe_evidence(
+                    status="deduped",
+                    reason="duplicate_dom",
+                    detail=(
+                        "divergent root dom_hash already explored: "
+                        f"{div_root.dom_hash}"
+                    ),
+                )
+                return
+
+            self.states.append(div_root)
+            self._node_count += 1
+
+            probe_transition = Transition(
+                target_id=self.target.id,  # type: ignore[union-attr]
+                from_state=self.target.root_state_id,  # type: ignore[union-attr]
+                to_state=div_root.id,
+                kind=TransitionKind.cloaking_probe,
+                trigger={
+                    "user_agent": cloaking_profile.get("user_agent"),
+                    "reason": "divergent_profile_detected",
+                },
+            )
+            self.transitions.append(probe_transition)
+
+            self._record_cloaking_probe_evidence(
+                status="explored",
+                reason="divergent_profile_detected",
+                detail=(
+                    f"exploring {start_url} as "
+                    f"{cloaking_profile.get('user_agent')}"
+                ),
+            )
+
+            await self._bfs_loop(
+                page2,
+                context2,
+                budget,
+                div_root,
+                max_depth_limit=min(2, budget.max_depth),
+            )
+        except Exception as exc:
+            self._record_error(
+                scope=EvidenceScope.target,
+                scope_id=self.target.id,  # type: ignore[union-attr]
+                key="cloaking_probe_error",
+                message=str(exc),
+            )
+        finally:
+            await context2.close()
 
     # ------------------------------------------------------------------
     # Budget
@@ -521,7 +744,9 @@ class StateGraphExplorer:
                 captcha = await detect_captcha(page)
                 if captcha is not None:
                     gate_passed = await try_pass_gate(
-                        page, wait_seconds=wait_s
+                        page,
+                        wait_seconds=wait_s,
+                        settle_s=self._gate_settle_s,
                     )
                     if not gate_passed:
                         self._record_error(

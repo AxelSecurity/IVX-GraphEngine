@@ -10,6 +10,8 @@ resta disabilitato e ``check()`` restituisce immediatamente
 
 from __future__ import annotations
 
+from typing import Optional
+
 import httpx
 
 from graph_engine.config import settings
@@ -32,8 +34,20 @@ class UrlhausProvider(ReputationProvider):
         self._provider = "urlhaus"
         self._api_key = settings.urlhaus_api_key or ""
 
-    async def check(self, url: str, client: httpx.AsyncClient) -> dict:
-        """Interroga URLhaus per *url*. Se non configurato, skipped."""
+    async def check(
+        self,
+        url: str,
+        client: httpx.AsyncClient,
+        timeout_s: Optional[float] = None,
+        known_ips: Optional[list[str]] = None,
+    ) -> dict:
+        """Interroga URLhaus per *url*. Se non configurato, skipped.
+
+        ``known_ips`` è accettato per uniformità col contratto di
+        ``ReputationProvider`` ma IGNORATO: l'API di URLhaus cerca
+        solo per URL.
+        """
+        del known_ips  # accettato per contratto, non usato
         if not _is_configured():
             return {
                 "provider": self._provider,
@@ -45,18 +59,29 @@ class UrlhausProvider(ReputationProvider):
         if cached is not None:
             return cached
 
-        result = await self._query(url, client)
+        result = await self._query(url, client, timeout_s)
         cache_set("urlhaus", url, result)
         return result
 
-    async def _query(self, url: str, client: httpx.AsyncClient) -> dict:
+    async def _query(
+        self,
+        url: str,
+        client: httpx.AsyncClient,
+        timeout_s: Optional[float] = None,
+    ) -> dict:
         headers = {"Auth-Key": self._api_key} if self._api_key else {}
+        # Il timeout effettivo della chiamata: quello dell'analisi se
+        # presente (es. un timeout_s ridotto da un chiamante con budget
+        # personalizzato), altrimenti il default del provider.
+        effective_timeout = (
+            timeout_s if timeout_s is not None else URLHAUS_TIMEOUT
+        )
         try:
             response = await client.post(
                 URLHAUS_API_URL,
                 headers=headers,
                 data={"url": url},
-                timeout=URLHAUS_TIMEOUT,
+                timeout=effective_timeout,
             )
             response.raise_for_status()
             data = response.json()
@@ -64,7 +89,9 @@ class UrlhausProvider(ReputationProvider):
             return {
                 "provider": self._provider,
                 "listed": False,
-                "details": {"error": f"URLhaus timeout after {URLHAUS_TIMEOUT}s"},
+                "details": {
+                    "error": f"URLhaus timeout after {effective_timeout}s"
+                },
             }
         except httpx.HTTPStatusError as exc:
             # 401 = Auth-Key assente, invalida o scaduta — gestito come

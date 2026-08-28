@@ -2,7 +2,7 @@
 
 Five entities implemented as Pydantic v2 models:
 - AnalysisTarget, State, Transition, Evidence, Verdict
-- TransitionKind enum (9 navigation types)
+- TransitionKind enum (10 navigation types)
 - Classification enum for Verdict outcome.
 """
 
@@ -33,6 +33,7 @@ class TransitionKind(str, Enum):
     new_tab = "new_tab"
     gate_solved = "gate_solved"
     ws_message = "ws_message"
+    cloaking_probe = "cloaking_probe"
 
 
 class TargetStatus(str, Enum):

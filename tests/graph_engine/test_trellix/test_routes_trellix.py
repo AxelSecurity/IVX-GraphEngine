@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import datetime, timedelta, timezone
 
 from graph_engine.api.allowlist import add_entry
@@ -184,23 +183,21 @@ class TestRoutesTrellix:
         assert called, "run_full_analysis was NOT called despite stale cache"
 
     # ------------------------------------------------------------------
-    # Fire-and-continue: timeout test
+    # Analisi sincrona: la route attende il completamento reale
     # ------------------------------------------------------------------
 
-    async def test_timeout_fire_and_continue(self, app, tmp_path, monkeypatch):
-        """Timeout scade → risposta timed_out, MA il task continua in background."""
+    async def test_waits_for_completion_no_deadline(self, app, tmp_path, monkeypatch):
+        """La route attende il completamento REALE della pipeline anche
+        quando è lenta: risponde col verdetto finale persistito — mai
+        una risposta "incompleta" autoimposta.  La finestra di tempo è
+        gestita a monte (Front Door / Trellix), non dal modulo."""
         from graph_engine.api.routes_trellix import build_trellix_router
 
         db = str(tmp_path / "test.db")
-        wait_s = 0.5  # timeout ridotto per il test
-
-        done_event = asyncio.Event()
-        saved_event = asyncio.Event()
 
         async def _slow_pipeline(*args, **kwargs):
-            """Pipeline lenta: dorme più del timeout ma POI completa."""
-            await asyncio.sleep(1.5)  # più del timeout di 0.5s
-            # Simula il salvataggio finale
+            """Pipeline lenta che però completa e persiste il verdetto."""
+            await asyncio.sleep(0.5)
             t = kwargs.get("target")
             if t:
                 t.status = TargetStatus.done
@@ -214,8 +211,6 @@ class TestRoutesTrellix:
                     ),
                     db_path=db,
                 )
-                saved_event.set()
-            done_event.set()
             return str(t.id) if t else "done"
 
         monkeypatch.setattr(
@@ -223,9 +218,7 @@ class TestRoutesTrellix:
             _slow_pipeline,
         )
 
-        # App minima con il solo router Trellix a timeout ridotto
-        # (create_app usa il timeout di produzione, non iniettabile)
-        trellix_router = build_trellix_router(db_path=db, wait_timeout_s=wait_s)
+        trellix_router = build_trellix_router(db_path=db)
 
         from fastapi import FastAPI
 
@@ -237,27 +230,17 @@ class TestRoutesTrellix:
         async with AsyncClient(
             transport=ASGITransport(app=test_app), base_url="http://test"
         ) as c:
-            t0 = time.monotonic()
-            res = await c.get(
-                "/trellix/analyze?url=https://slow.example.com"
-            )
-            elapsed = time.monotonic() - t0
+            res = await c.get("/trellix/analyze?url=https://slow.example.com")
 
-        # 1. La risposta deve arrivare entro ~2s (molto meno dei 3s del task)
+        # La risposta porta il verdetto finale della pipeline lenta —
+        # nessuna deadline, nessuna Analysis-Incomplete autoimposta
         assert res.status_code == 200
-        assert elapsed < 3.0, f"Response took {elapsed}s, expected < 3s"
-
         body = res.json()
-        # 2. Deve essere timed_out → safe/allow/Analysis-Incomplete
         assert body["verdict"] == "safe"
-        assert "Analysis-Incomplete" in body["signature"]
+        assert "Analysis-Incomplete" not in body["signature"]
+        assert body["confidence"] == 0.9
 
-        # 3. Il task DEVE continuare in background (NON cancellato)
-        #    Aspettiamo che completi
-        await asyncio.wait_for(done_event.wait(), timeout=10)
-        await asyncio.wait_for(saved_event.wait(), timeout=5)
-
-        # 4. Dopo il completamento, il risultato DEVE essere su SQLite
+        # Il risultato è persistito su SQLite
         from graph_engine.storage.repository import get_latest_for_url_hash
         from graph_engine.ingestion.pipeline import ingest
 
@@ -301,3 +284,135 @@ class TestRoutesTrellix:
         assert received_url == "https://example.com/login", (
             f"Expected 'https://example.com/login', got '{received_url}'"
         )
+
+    # ------------------------------------------------------------------
+    # URL in chiaro nella query string (il formato reale di Trellix)
+    # ------------------------------------------------------------------
+
+    async def test_plain_url_passed_unchanged(self, app, client, tmp_path, monkeypatch):
+        """URL in chiaro senza caratteri speciali → arriva identico alla
+        pipeline (formato Trellix: ?url=http://example.org)."""
+        db = str(tmp_path / "test.db")
+
+        received_url = None
+
+        async def _fake_pipeline(raw_url, **kwargs):
+            nonlocal received_url
+            received_url = raw_url
+            t = kwargs.get("target")
+            if t:
+                t.status = TargetStatus.done
+                await save_target(t, [], [], [], None, db_path=db)
+            return str(t.id) if t else "done"
+
+        monkeypatch.setattr(
+            "graph_engine.api.routes_trellix.run_full_analysis",
+            _fake_pipeline,
+        )
+
+        res = await client.get("/trellix/analyze?url=http://example.org")
+        assert res.status_code == 200
+        assert received_url == "http://example.org", (
+            f"Expected 'http://example.org', got '{received_url}'"
+        )
+
+    async def test_plain_url_with_embedded_query_not_truncated(
+        self, app, client, tmp_path, monkeypatch,
+    ):
+        """Regressione: URL in chiaro con & e = propri (es. link di
+        sicurezza email) NON deve essere troncato al primo &.  Il parsing
+        standard di FastAPI lo troncherebbe — la route usa la query
+        string grezza."""
+        db = str(tmp_path / "test.db")
+
+        received_url = None
+
+        async def _fake_pipeline(raw_url, **kwargs):
+            nonlocal received_url
+            received_url = raw_url
+            t = kwargs.get("target")
+            if t:
+                t.status = TargetStatus.done
+                await save_target(t, [], [], [], None, db_path=db)
+            return str(t.id) if t else "done"
+
+        monkeypatch.setattr(
+            "graph_engine.api.routes_trellix.run_full_analysis",
+            _fake_pipeline,
+        )
+
+        target = "https://evil.example/redirect?a=1&b=2"
+        res = await client.get(
+            "/trellix/analyze?url=" + target,
+        )
+        assert res.status_code == 200
+        assert received_url == target, (
+            f"URL troncato: expected '{target}', got '{received_url}'"
+        )
+
+    async def test_missing_url_param_returns_422(self, app, client):
+        """GET senza il parametro url → 422."""
+        res = await client.get("/trellix/analyze")
+        assert res.status_code == 422
+
+    async def test_pipeline_runs_with_full_defaults(
+        self, app, client, tmp_path, monkeypatch,
+    ):
+        """La route Trellix non comprime più la pipeline: nessun budget
+        fast, nessun timeout di pagina/settle/captcha ridotto — l'analisi
+        gira con i default PIENI del runner.  Regressione sulla vecchia
+        finestra dei 60s (il fast path è stato rimosso: la deadline è
+        gestita a monte da Front Door / Trellix)."""
+        db = str(tmp_path / "test.db")
+
+        captured = {}
+
+        async def _fake_pipeline(*args, **kwargs):
+            captured.update(kwargs)
+            t = kwargs.get("target")
+            if t:
+                t.status = TargetStatus.done
+                await save_target(
+                    t, [], [], [],
+                    Verdict(
+                        target_id=t.id,
+                        classification=Classification.suspicious,
+                        confidence=0.4,
+                        produced_by="foundry",
+                    ),
+                    db_path=db,
+                )
+            return str(t.id) if t else "done"
+
+        monkeypatch.setattr(
+            "graph_engine.api.routes_trellix.run_full_analysis",
+            _fake_pipeline,
+        )
+
+        res = await client.get(
+            "/trellix/analyze?url=https://full.example.com/login"
+        )
+        assert res.status_code == 200
+        # La risposta porta il verdetto persistito dal mock
+        body = res.json()
+        assert body["verdict"] == "safe"
+        assert body["confidence"] == 0.4
+
+        # Nessuna compressione fast: i parametri della vecchia finestra
+        # NON vengono passati — il runner usa i propri default pieni
+        # (artefatti inclusi: Vision + bundle continuano a vedere la
+        # pagina)
+        for key in (
+            "budget",
+            "top_n_actions",
+            "captcha_wait_s",
+            "l2_timeout_s",
+            "l3_timeout_s",
+            "settle_max_wait_s",
+            "page_timeout_ms",
+            "capture_artifacts",
+        ):
+            assert captured.get(key) is None, (
+                f"Parametro fast '{key}' ancora passato alla pipeline: "
+                "la route deve usare i default pieni del runner"
+            )

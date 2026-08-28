@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 import aiosqlite
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
 from graph_engine.api.pipeline_runner import DEFAULT_ARTIFACT_ROOT, run_full_analysis
@@ -124,7 +124,7 @@ def build_router(
         status_code=202,
         response_model=AnalysisCreatedResponse,
     )
-    async def create_analysis(payload: AnalysisCreateRequest):
+    async def create_analysis(payload: AnalysisCreateRequest, request: Request):
         """Avvia una nuova analisi in background.
 
         Il target viene creato e salvato come ``queued`` **prima** di
@@ -146,6 +146,10 @@ def build_router(
             )
 
         # Avvia la pipeline in background (NON await — rispondiamo subito)
+        # Browser condiviso dal lifespan dell'app (app.state.browser_pool):
+        # nessun launch Chromium per richiesta.  Nei test con router
+        # standalone (nessun lifespan eseguito) il getattr dà None e la
+        # pipeline degrada al browser effimero — invariato.
         task = asyncio.create_task(
             run_full_analysis(
                 url,
@@ -153,6 +157,7 @@ def build_router(
                 classify=payload.classify,
                 target=target,
                 db_path=db_path,
+                browser_pool=getattr(request.app.state, "browser_pool", None),
             )
         )
         task.add_done_callback(_on_task_done)

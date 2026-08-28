@@ -2,10 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from graph_engine.config import settings
 from graph_engine.osint.analyzer import analyze
+
+
+class _RecordingAsyncClient:
+    """Fake context manager al posto di ``httpx.AsyncClient`` — registra
+    i kwargs del costruttore così i test possono ispezionare il timeout
+    (ceiling del client condiviso)."""
+
+    created: list[dict] = []
+
+    def __init__(self, **kwargs):
+        type(self).created.append(kwargs)
+        self.client = MagicMock()
+
+    async def __aenter__(self):
+        return self.client
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 class TestAnalyzerIntegration:
@@ -17,9 +37,9 @@ class TestAnalyzerIntegration:
         # Per questo test, mockiamo direttamente le tre funzioni di query
         # per evitare di dover mockare httpx a più livelli
         with patch(
-            "graph_engine.osint.analyzer.query_crtsh",
+            "graph_engine.osint.analyzer.query_ctlogs",
             new_callable=AsyncMock,
-        ) as mock_crtsh, patch(
+        ) as mock_ctlogs, patch(
             "graph_engine.osint.analyzer.query_rdap",
             new_callable=AsyncMock,
         ) as mock_rdap, patch(
@@ -30,7 +50,7 @@ class TestAnalyzerIntegration:
             new_callable=AsyncMock,
         ) as mock_urlhaus:
 
-            mock_crtsh.return_value = {
+            mock_ctlogs.return_value = {
                 "sibling_domains": ["sibling1.example.com"],
                 "truncated": False,
                 "total_siblings": 1,
@@ -57,7 +77,7 @@ class TestAnalyzerIntegration:
             result = await analyze("https://evil.example.com/login")
 
             # Tutte le fonti devono essere state chiamate
-            mock_crtsh.assert_called_once()
+            mock_ctlogs.assert_called_once()
             mock_rdap.assert_called_once()
             mock_dns.assert_called_once()
             mock_urlhaus.assert_called_once()
@@ -66,9 +86,9 @@ class TestAnalyzerIntegration:
         """Se una fonte fallisce, le altre producono comunque risultati."""
         monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         with patch(
-            "graph_engine.osint.analyzer.query_crtsh",
+            "graph_engine.osint.analyzer.query_ctlogs",
             new_callable=AsyncMock,
-        ) as mock_crtsh, patch(
+        ) as mock_ctlogs, patch(
             "graph_engine.osint.analyzer.query_rdap",
             new_callable=AsyncMock,
         ) as mock_rdap, patch(
@@ -79,8 +99,8 @@ class TestAnalyzerIntegration:
             new_callable=AsyncMock,
         ) as mock_urlhaus:
 
-            # crt.sh fallisce
-            mock_crtsh.side_effect = RuntimeError("crash!")
+            # Il provider CT fallisce (eccezione catturata dal gather)
+            mock_ctlogs.side_effect = RuntimeError("crash!")
             # RDAP funziona
             mock_rdap.return_value = {
                 "domain_age_days": 5,
@@ -120,10 +140,10 @@ class TestAnalyzerIntegration:
             ]
             assert len(dns_ev) == 1
 
-            # crt.sh deve aver fallito → evidenza provider_unavailable
+            # Il provider CT deve aver fallito → evidenza provider_unavailable
             unavail = [
                 e for e in result["evidence"]
-                if e["key"] == "provider_unavailable" and "crtsh" in str(e["value"])
+                if e["key"] == "provider_unavailable" and "ctlogs" in str(e["value"])
             ]
             assert len(unavail) == 1
 
@@ -137,7 +157,7 @@ class TestAnalyzerIntegration:
         """Dominio < 30 giorni → peso alto (0.35)."""
         monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         with patch(
-            "graph_engine.osint.analyzer.query_crtsh",
+            "graph_engine.osint.analyzer.query_ctlogs",
             new_callable=AsyncMock,
             return_value={"sibling_domains": [], "truncated": False,
                           "total_siblings": 0, "newest_cert_days": None,
@@ -166,7 +186,7 @@ class TestAnalyzerIntegration:
         """URLhaus hit → peso molto alto (0.50)."""
         monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         with patch(
-            "graph_engine.osint.analyzer.query_crtsh",
+            "graph_engine.osint.analyzer.query_ctlogs",
             new_callable=AsyncMock,
             return_value={"sibling_domains": [], "truncated": False,
                           "total_siblings": 0, "newest_cert_days": None,
@@ -199,7 +219,7 @@ class TestAnalyzerIntegration:
         """Il rischio non supera mai 1.0."""
         monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         with patch(
-            "graph_engine.osint.analyzer.query_crtsh",
+            "graph_engine.osint.analyzer.query_ctlogs",
             new_callable=AsyncMock,
             return_value={
                 "sibling_domains": ["s1.com", "s2.com"],
@@ -233,7 +253,7 @@ class TestAnalyzerIntegration:
         """Tutte le evidenze devono avere layer='L2'."""
         monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         with patch(
-            "graph_engine.osint.analyzer.query_crtsh",
+            "graph_engine.osint.analyzer.query_ctlogs",
             new_callable=AsyncMock,
             return_value={
                 "sibling_domains": ["sib.example.com"],
@@ -266,7 +286,7 @@ class TestAnalyzerIntegration:
         """Dominio > 90 giorni → NESSUNA evidenza domain_age (nessuna penalità)."""
         monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         with patch(
-            "graph_engine.osint.analyzer.query_crtsh",
+            "graph_engine.osint.analyzer.query_ctlogs",
             new_callable=AsyncMock,
             return_value={"sibling_domains": [], "truncated": False,
                           "total_siblings": 0, "newest_cert_days": None,
@@ -294,6 +314,71 @@ class TestAnalyzerIntegration:
             assert len(age_ev) == 0
             assert result["passive_risk_score"] == 0.0
 
+    async def test_client_timeout_follows_timeout_s(self, monkeypatch):
+        """Il ceiling del client HTTP condiviso segue ``timeout_s``:
+        ``analyze(url, timeout_s=5.0)`` costruisce il client con
+        timeout 5.0 (fast path), senza parametro resta il default 30.0."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        _RecordingAsyncClient.created = []
+        with patch(
+            "graph_engine.osint.analyzer.httpx.AsyncClient",
+            _RecordingAsyncClient,
+        ), patch(
+            "graph_engine.osint.analyzer.query_ctlogs",
+            new_callable=AsyncMock,
+            return_value={"sibling_domains": [], "truncated": False,
+                          "total_siblings": 0, "newest_cert_days": None,
+                          "oldest_cert_days": None, "total_certs": 0},
+        ), patch(
+            "graph_engine.osint.analyzer.query_rdap",
+            new_callable=AsyncMock,
+            return_value={"domain_age_days": 365, "registrar": "OldReg",
+                          "nameservers": []},
+        ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value={"a_records": ["93.184.216.34"], "aaaa_records": [],
+                          "error": None},
+        ), patch(
+            "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
+            new_callable=AsyncMock,
+            return_value={"provider": "urlhaus", "listed": False,
+                          "details": {"query_status": "no_results"}},
+        ):
+            await analyze("https://old.example.com/login", timeout_s=5.0)
+
+        assert _RecordingAsyncClient.created == [{"timeout": 5.0}]
+
+        _RecordingAsyncClient.created = []
+        with patch(
+            "graph_engine.osint.analyzer.httpx.AsyncClient",
+            _RecordingAsyncClient,
+        ), patch(
+            "graph_engine.osint.analyzer.query_ctlogs",
+            new_callable=AsyncMock,
+            return_value={"sibling_domains": [], "truncated": False,
+                          "total_siblings": 0, "newest_cert_days": None,
+                          "oldest_cert_days": None, "total_certs": 0},
+        ), patch(
+            "graph_engine.osint.analyzer.query_rdap",
+            new_callable=AsyncMock,
+            return_value={"domain_age_days": 365, "registrar": "OldReg",
+                          "nameservers": []},
+        ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value={"a_records": ["93.184.216.34"], "aaaa_records": [],
+                          "error": None},
+        ), patch(
+            "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
+            new_callable=AsyncMock,
+            return_value={"provider": "urlhaus", "listed": False,
+                          "details": {"query_status": "no_results"}},
+        ):
+            await analyze("https://old.example.com/login")
+
+        assert _RecordingAsyncClient.created == [{"timeout": 30.0}]
+
 
 class TestRiskScoreDerivedFromWeights:
     """Proprietà strutturale: passive_risk_score È la somma dei weight
@@ -306,7 +391,7 @@ class TestRiskScoreDerivedFromWeights:
     atteso di un singolo caso.
     """
 
-    _CRTSH_CLEAN = {
+    _CTLOGS_CLEAN = {
         "sibling_domains": [], "truncated": False, "total_siblings": 0,
         "newest_cert_days": None, "oldest_cert_days": None, "total_certs": 0,
     }
@@ -318,13 +403,13 @@ class TestRiskScoreDerivedFromWeights:
         "details": {"query_status": "no_results"},
     }
 
-    async def _analyze(self, monkeypatch, crtsh_result, rdap_result,
+    async def _analyze(self, monkeypatch, ctlogs_result, rdap_result,
                        dns_result, urlhaus_result):
         monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
         with patch(
-            "graph_engine.osint.analyzer.query_crtsh",
+            "graph_engine.osint.analyzer.query_ctlogs",
             new_callable=AsyncMock,
-            return_value=crtsh_result,
+            return_value=ctlogs_result,
         ), patch(
             "graph_engine.osint.analyzer.query_rdap",
             new_callable=AsyncMock,
@@ -353,7 +438,7 @@ class TestRiskScoreDerivedFromWeights:
         """Young (0.35) → score == somma dei weight."""
         result = await self._analyze(
             monkeypatch,
-            self._CRTSH_CLEAN,
+            self._CTLOGS_CLEAN,
             self._RDAP_YOUNG,
             self._DNS_CLEAN,
             self._URLHAUS_CLEAN,
@@ -363,13 +448,13 @@ class TestRiskScoreDerivedFromWeights:
 
     async def test_young_plus_siblings(self, monkeypatch):
         """Young + siblings (0.35 + 0.30) → score == somma."""
-        crtsh = {
+        ctlogs_result = {
             "sibling_domains": ["sib1.example.com", "sib2.example.com"],
             "truncated": False, "total_siblings": 2,
             "newest_cert_days": 30, "oldest_cert_days": 60, "total_certs": 3,
         }
         result = await self._analyze(
-            monkeypatch, crtsh, self._RDAP_YOUNG,
+            monkeypatch, ctlogs_result, self._RDAP_YOUNG,
             self._DNS_CLEAN, self._URLHAUS_CLEAN,
         )
         self._assert_score_equals_weight_sum(result)
@@ -382,7 +467,7 @@ class TestRiskScoreDerivedFromWeights:
             "details": {"threat": "phishing"},
         }
         result = await self._analyze(
-            monkeypatch, self._CRTSH_CLEAN, self._RDAP_MODERATE,
+            monkeypatch, self._CTLOGS_CLEAN, self._RDAP_MODERATE,
             self._DNS_CLEAN, urlhaus_hit,
         )
         self._assert_score_equals_weight_sum(result)
@@ -390,7 +475,7 @@ class TestRiskScoreDerivedFromWeights:
 
     async def test_sum_exceeding_one_still_clamped(self, monkeypatch):
         """Somma > 1.0 → la proprietà vale salvo clamp (score == 1.0)."""
-        crtsh = {
+        ctlogs_result = {
             "sibling_domains": ["sib.example.com"],
             "truncated": False, "total_siblings": 1,
             "newest_cert_days": 30, "oldest_cert_days": 60, "total_certs": 3,
@@ -400,7 +485,7 @@ class TestRiskScoreDerivedFromWeights:
             "details": {"threat": "phishing"},
         }
         result = await self._analyze(
-            monkeypatch, crtsh, self._RDAP_YOUNG,
+            monkeypatch, ctlogs_result, self._RDAP_YOUNG,
             self._DNS_CLEAN, urlhaus_hit,
         )
         self._assert_score_equals_weight_sum(result)
@@ -412,11 +497,608 @@ class TestRiskScoreDerivedFromWeights:
     ):
         """Evidenze informative (provider_unavailable, dns_*) hanno
         weight=0.0 e non alterano la somma."""
-        crtsh_error = {"error": "crt.sh down"}
+        ctlogs_error = {"error": "ctlogs.dev down"}
         result = await self._analyze(
-            monkeypatch, crtsh_error, self._RDAP_YOUNG,
+            monkeypatch, ctlogs_error, self._RDAP_YOUNG,
             self._DNS_CLEAN, self._URLHAUS_CLEAN,
         )
         self._assert_score_equals_weight_sum(result)
         # Solo young (0.35): provider_unavailable e dns_a_records sono 0.0
         assert result["passive_risk_score"] == 0.35
+
+
+class TestDnsFirstSequencing:
+    """La nuova orchestrazione L2: DNS PRIMA, poi ctlogs.dev/RDAP/
+    reputation in parallelo — con gli IP risolti passati ai provider.
+
+    La sequenzialità è voluta (gli IP alimentano la query MISP per
+    ``ip-dst``) e va verificata con un handshake deterministico:
+    le fonti successive devono partire SOLO a DNS completato.
+    """
+
+    _CTLOGS_CLEAN = {
+        "sibling_domains": [], "truncated": False, "total_siblings": 0,
+        "newest_cert_days": None, "oldest_cert_days": None, "total_certs": 0,
+    }
+    _RDAP_OLD = {"domain_age_days": 365, "registrar": "R", "nameservers": []}
+    _URLHAUS_CLEAN = {
+        "provider": "urlhaus", "listed": False,
+        "details": {"query_status": "no_results"},
+    }
+
+    async def test_dns_resolved_before_other_sources_start(self, monkeypatch):
+        """ctlogs.dev/RDAP/reputation devono partire SOLO dopo che il DNS è
+        completato (handshake con asyncio.Event: deterministico, non
+        basato sul caso)."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        dns_done = asyncio.Event()
+
+        async def dns_then_set(*args, **kwargs):
+            try:
+                return {
+                    "a_records": ["1.2.3.4"], "aaaa_records": [],
+                    "error": None,
+                }
+            finally:
+                dns_done.set()
+
+        async def assert_dns_done(*args, **kwargs):
+            assert dns_done.is_set(), (
+                "fonte partita PRIMA che la risoluzione DNS finisse — "
+                "la sequenza DNS-prima-poi-resto è rotta"
+            )
+            return {"sibling_domains": [], "truncated": False,
+                    "total_siblings": 0, "newest_cert_days": None,
+                    "oldest_cert_days": None, "total_certs": 0}
+
+        with patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            side_effect=dns_then_set,
+        ), patch(
+            "graph_engine.osint.analyzer.query_ctlogs",
+            new_callable=AsyncMock,
+            side_effect=assert_dns_done,
+        ), patch(
+            "graph_engine.osint.analyzer.query_rdap",
+            new_callable=AsyncMock,
+            side_effect=assert_dns_done,
+        ), patch(
+            "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
+            new_callable=AsyncMock,
+            side_effect=assert_dns_done,
+        ):
+            result = await analyze("https://evil.example.com/login")
+
+        assert "evidence" in result
+
+    async def test_known_ips_forwarded_to_reputation_providers(self, monkeypatch):
+        """Gli IP risolti (A + AAAA, filtrati dai valori sporchi)
+        devono arrivare come ``known_ips`` al check dei provider."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        with patch(
+            "graph_engine.osint.analyzer.query_ctlogs",
+            new_callable=AsyncMock,
+            return_value=self._CTLOGS_CLEAN,
+        ), patch(
+            "graph_engine.osint.analyzer.query_rdap",
+            new_callable=AsyncMock,
+            return_value=self._RDAP_OLD,
+        ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value={
+                # None e stringa vuota: sporcizia da filtrare
+                "a_records": ["93.184.216.34", "", None],
+                "aaaa_records": ["2606:2800:220:1:248:1893:25c8:1946"],
+                "error": None,
+            },
+        ), patch(
+            "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
+            new_callable=AsyncMock,
+            return_value=self._URLHAUS_CLEAN,
+        ) as mock_urlhaus:
+            await analyze("https://evil.example.com/login")
+
+        mock_urlhaus.assert_called_once()
+        assert mock_urlhaus.call_args.kwargs["known_ips"] == [
+            "93.184.216.34",
+            "2606:2800:220:1:248:1893:25c8:1946",
+        ]
+
+    async def test_dns_failure_gives_empty_known_ips(self, monkeypatch):
+        """DNS in errore → known_ips lista vuota (mai None): i provider
+        ricevono comunque il parametro."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        with patch(
+            "graph_engine.osint.analyzer.query_ctlogs",
+            new_callable=AsyncMock,
+            return_value=self._CTLOGS_CLEAN,
+        ), patch(
+            "graph_engine.osint.analyzer.query_rdap",
+            new_callable=AsyncMock,
+            return_value=self._RDAP_OLD,
+        ), patch(
+            "graph_engine.osint.analyzer.resolve_dns",
+            new_callable=AsyncMock,
+            return_value={
+                "a_records": [], "aaaa_records": [],
+                "error": "No DNS records found for evil.example.com",
+            },
+        ), patch(
+            "graph_engine.osint.reputation.urlhaus.UrlhausProvider.check",
+            new_callable=AsyncMock,
+            return_value=self._URLHAUS_CLEAN,
+        ) as mock_urlhaus:
+            await analyze("https://evil.example.com/login")
+
+        assert mock_urlhaus.call_args.kwargs["known_ips"] == []
+
+
+class TestMispWeighting:
+    """La ponderazione MISP nel risk score: hit reale (to_ids=true)
+    pesa 0.55; match context-only (solo to_ids=false) pesa 0.0 ma
+    resta visibile come evidenza informativa.
+
+    MISP è l'unico provider abilitato (nessuna Auth-Key URLhaus) e
+    le altre fonti sono patchate a valori neutri.
+    """
+
+    _CTLOGS_CLEAN = {
+        "sibling_domains": [], "truncated": False, "total_siblings": 0,
+        "newest_cert_days": None, "oldest_cert_days": None, "total_certs": 0,
+    }
+    _RDAP_OLD = {"domain_age_days": 365, "registrar": "R", "nameservers": []}
+    _DNS_CLEAN = {"a_records": ["1.2.3.4"], "aaaa_records": [], "error": None}
+
+    @staticmethod
+    def _patch_neutral_sources():
+        """ctlogs.dev/RDAP/DNS patchati a risultati senza segnale."""
+        return [
+            patch(
+                "graph_engine.osint.analyzer.query_ctlogs",
+                new_callable=AsyncMock,
+                return_value=TestMispWeighting._CTLOGS_CLEAN,
+            ),
+            patch(
+                "graph_engine.osint.analyzer.query_rdap",
+                new_callable=AsyncMock,
+                return_value=TestMispWeighting._RDAP_OLD,
+            ),
+            patch(
+                "graph_engine.osint.analyzer.resolve_dns",
+                new_callable=AsyncMock,
+                return_value=TestMispWeighting._DNS_CLEAN,
+            ),
+        ]
+
+    async def test_to_ids_hit_weights_high(self, monkeypatch):
+        """Hit MISP con to_ids_match → reputation_hit a peso 0.55
+        (leggermente sopra il 0.50 dei feed automatizzati)."""
+        monkeypatch.setattr(settings, "misp_url", "https://misp.example")
+        monkeypatch.setattr(settings, "misp_api_key", "test-key")
+
+        misp_hit = {
+            "provider": "misp",
+            "listed": True,
+            "details": {
+                "match_count": 2,
+                "matched_types": ["domain", "ip-dst"],
+                "tags": ["phishing"],
+                "event_count": 2,
+                "to_ids_match": True,
+                "context_only": False,
+            },
+        }
+
+        with ExitStack() as stack:
+            for pm in self._patch_neutral_sources():
+                stack.enter_context(pm)
+            stack.enter_context(patch(
+                "graph_engine.osint.reputation.misp.MispProvider.check",
+                new_callable=AsyncMock,
+                return_value=misp_hit,
+            ))
+            result = await analyze("https://evil.example.com/login")
+
+        hit_ev = [e for e in result["evidence"] if e["key"] == "reputation_hit"]
+        assert len(hit_ev) == 1
+        assert hit_ev[0]["weight"] == 0.55
+        assert result["passive_risk_score"] == 0.55
+
+    async def test_context_only_match_zero_weight(self, monkeypatch):
+        """Match MISP solo to_ids=false → evidenza ``misp_context_match``
+        informativa a peso 0.0: nessuna penalizzazione."""
+        monkeypatch.setattr(settings, "misp_url", "https://misp.example")
+        monkeypatch.setattr(settings, "misp_api_key", "test-key")
+
+        misp_context = {
+            "provider": "misp",
+            "listed": False,
+            "details": {
+                "match_count": 3,
+                "matched_types": ["domain"],
+                "tags": ["tlp:white"],
+                "event_count": 1,
+                "to_ids_match": False,
+                "context_only": True,
+            },
+        }
+
+        with ExitStack() as stack:
+            for pm in self._patch_neutral_sources():
+                stack.enter_context(pm)
+            stack.enter_context(patch(
+                "graph_engine.osint.reputation.misp.MispProvider.check",
+                new_callable=AsyncMock,
+                return_value=misp_context,
+            ))
+            result = await analyze("https://evil.example.com/login")
+
+        ctx_ev = [
+            e for e in result["evidence"]
+            if e["key"] == "misp_context_match"
+        ]
+        assert len(ctx_ev) == 1
+        assert ctx_ev[0]["weight"] == 0.0
+        # Nessuna reputation_hit: un context_only NON è un hit
+        assert not [
+            e for e in result["evidence"] if e["key"] == "reputation_hit"
+        ]
+        # Dominio vecchio → unico segnale possibile era MISP: score 0
+        assert result["passive_risk_score"] == 0.0
+
+
+class TestOpenCtiWeighting:
+    """La ponderazione OpenCTI nel risk score: IOC attivo (non revoked,
+    non scaduto) pesa 0.55 come il MISP to_ids; match context-only
+    (osservabile senza Indicator attivo) pesa 0.0 ma resta visibile
+    come evidenza informativa ``opencti_context_match``.
+
+    OpenCTI è l'unico provider abilitato (MISP e URLhaus non
+    configurati) e le altre fonti sono patchate a valori neutri.
+    """
+
+    _CTLOGS_CLEAN = {
+        "sibling_domains": [], "truncated": False, "total_siblings": 0,
+        "newest_cert_days": None, "oldest_cert_days": None, "total_certs": 0,
+    }
+    _RDAP_OLD = {"domain_age_days": 365, "registrar": "R", "nameservers": []}
+    _DNS_CLEAN = {"a_records": ["1.2.3.4"], "aaaa_records": [], "error": None}
+
+    @staticmethod
+    def _patch_neutral_sources():
+        """ctlogs.dev/RDAP/DNS patchati a risultati senza segnale."""
+        return [
+            patch(
+                "graph_engine.osint.analyzer.query_ctlogs",
+                new_callable=AsyncMock,
+                return_value=TestOpenCtiWeighting._CTLOGS_CLEAN,
+            ),
+            patch(
+                "graph_engine.osint.analyzer.query_rdap",
+                new_callable=AsyncMock,
+                return_value=TestOpenCtiWeighting._RDAP_OLD,
+            ),
+            patch(
+                "graph_engine.osint.analyzer.resolve_dns",
+                new_callable=AsyncMock,
+                return_value=TestOpenCtiWeighting._DNS_CLEAN,
+            ),
+        ]
+
+    async def test_active_ioc_hit_weights_high(self, monkeypatch):
+        """Hit OpenCTI con IOC attivo → reputation_hit a peso 0.55
+        (come il MISP to_ids: segnale malevolo verificato)."""
+        monkeypatch.setattr(settings, "opencti_url", "https://opencti.example")
+        monkeypatch.setattr(settings, "opencti_api_key", "test-key")
+
+        opencti_hit = {
+            "provider": "opencti",
+            "listed": True,
+            "details": {
+                "match_count": 1,
+                "matched_types": ["Url"],
+                "active_indicator_count": 1,
+                "total_indicator_count": 1,
+                "labels": ["phishing"],
+                "markings": ["TLP:AMBER"],
+                "created_by": ["CERT-AGID"],
+                "score_min": 85,
+                "score_max": 85,
+                "score_avg": 85.0,
+                "active_ioc_match": True,
+                "context_only": False,
+            },
+        }
+
+        with ExitStack() as stack:
+            for pm in self._patch_neutral_sources():
+                stack.enter_context(pm)
+            stack.enter_context(patch(
+                "graph_engine.osint.reputation.opencti.OpenCtiProvider.check",
+                new_callable=AsyncMock,
+                return_value=opencti_hit,
+            ))
+            result = await analyze("https://evil.example.com/login")
+
+        hit_ev = [e for e in result["evidence"] if e["key"] == "reputation_hit"]
+        assert len(hit_ev) == 1
+        assert hit_ev[0]["weight"] == 0.55
+        assert result["passive_risk_score"] == 0.55
+
+    async def test_context_only_match_zero_weight(self, monkeypatch):
+        """Osservabile OpenCTI senza IOC attivo → evidenza
+        ``opencti_context_match`` informativa a peso 0.0: nessuna
+        penalizzazione e NESSUNA chiave misp_context_match spuria."""
+        monkeypatch.setattr(settings, "opencti_url", "https://opencti.example")
+        monkeypatch.setattr(settings, "opencti_api_key", "test-key")
+
+        opencti_context = {
+            "provider": "opencti",
+            "listed": False,
+            "details": {
+                "match_count": 1,
+                "matched_types": ["Domain-Name"],
+                "active_indicator_count": 0,
+                "total_indicator_count": 1,
+                "labels": [],
+                "markings": [],
+                "created_by": ["Sconosciuti"],
+                "score_min": None,
+                "score_max": None,
+                "score_avg": None,
+                "active_ioc_match": False,
+                "context_only": True,
+            },
+        }
+
+        with ExitStack() as stack:
+            for pm in self._patch_neutral_sources():
+                stack.enter_context(pm)
+            stack.enter_context(patch(
+                "graph_engine.osint.reputation.opencti.OpenCtiProvider.check",
+                new_callable=AsyncMock,
+                return_value=opencti_context,
+            ))
+            result = await analyze("https://evil.example.com/login")
+
+        ctx_ev = [
+            e for e in result["evidence"]
+            if e["key"] == "opencti_context_match"
+        ]
+        assert len(ctx_ev) == 1
+        assert ctx_ev[0]["weight"] == 0.0
+        # Nessuna reputation_hit: un context_only NON è un hit
+        assert not [
+            e for e in result["evidence"] if e["key"] == "reputation_hit"
+        ]
+        # La chiave MISP non deve comparire per un match OpenCTI
+        assert not [
+            e for e in result["evidence"] if e["key"] == "misp_context_match"
+        ]
+        assert result["passive_risk_score"] == 0.0
+
+
+
+
+class TestCtlogsEvidence:
+    """ctlogs.dev come UNICO provider CT (crt.sh rimosso il 2026-08-27).
+
+    Due modalità decise dal provider: API (con CTLOGS_API_KEY →
+    ``sibling_domains``) e anonima (senza chiave → ``certificate_history``
+    senza sibling).  Un errore del provider produce ``provider_unavailable``
+    informativo (weight 0.0) e nessuna evidenza CT.
+    """
+
+    def _patch_l2_sources(self, ctlogs_side_effect=None):
+        """Patch di query_ctlogs + RDAP + DNS + URLhaus, restituisce i mock."""
+        from graph_engine.osint.analyzer import (
+            query_ctlogs,
+            query_rdap,
+            resolve_dns,
+        )
+        from graph_engine.osint.reputation.urlhaus import UrlhausProvider
+
+        mock_ctlogs = AsyncMock(side_effect=ctlogs_side_effect)
+        mock_rdap = AsyncMock(return_value={
+            "domain_age_days": 2000,  # vecchio → peso 0.0, non disturba
+            "registrar": "TestReg",
+            "nameservers": [],
+        })
+        mock_dns = AsyncMock(return_value={
+            "a_records": ["1.2.3.4"],
+            "aaaa_records": [],
+            "error": None,
+        })
+        mock_urlhaus = AsyncMock(return_value={
+            "provider": "urlhaus",
+            "listed": False,
+            "details": {"query_status": "no_results"},
+        })
+
+        return (
+            patch("graph_engine.osint.analyzer.query_ctlogs", mock_ctlogs),
+            patch("graph_engine.osint.analyzer.query_rdap", mock_rdap),
+            patch("graph_engine.osint.analyzer.resolve_dns", mock_dns),
+            patch.object(UrlhausProvider, "check", mock_urlhaus),
+            mock_ctlogs,
+        )
+
+    async def test_sibling_evidence_with_key(self, monkeypatch):
+        """Sibling dal provider → sibling_domains weight 0.30, source
+        ctlogs.dev; nessuna certificate_history."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        monkeypatch.setattr(settings, "ctlogs_api_key", "test-key")
+        p_ctlogs, p_rdap, p_dns, p_urlhaus, mock_ctlogs = (
+            self._patch_l2_sources()
+        )
+        mock_ctlogs.return_value = {
+            "sibling_domains": ["sib.example.com"],
+            "truncated": False,
+            "total_siblings": 1,
+            "newest_cert_days": 2,
+            "oldest_cert_days": None,
+            "total_certs": None,
+            "source": "ctlogs.dev",
+            "mode": "api",
+        }
+
+        with p_ctlogs, p_rdap, p_dns, p_urlhaus:
+            result = await analyze("https://evil.example.com/login")
+
+        siblings = [
+            e for e in result["evidence"] if e["key"] == "sibling_domains"
+        ]
+        assert len(siblings) == 1
+        assert siblings[0]["value"]["domains"] == ["sib.example.com"]
+        assert siblings[0]["value"]["source"] == "ctlogs.dev"
+        assert siblings[0]["weight"] == 0.30
+        assert not [
+            e for e in result["evidence"]
+            if e["key"] == "certificate_history"
+        ]
+        assert result["passive_risk_score"] == 0.30
+
+    async def test_provider_error_adds_unavailable(self, monkeypatch):
+        """Errore del provider → provider_unavailable ctlogs.dev
+        (informativo), nessuna evidenza sibling/certificate."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        monkeypatch.setattr(settings, "ctlogs_api_key", "test-key")
+        p_ctlogs, p_rdap, p_dns, p_urlhaus, mock_ctlogs = (
+            self._patch_l2_sources()
+        )
+        mock_ctlogs.return_value = {"error": "ctlogs.dev HTTP error: 404"}
+
+        with p_ctlogs, p_rdap, p_dns, p_urlhaus:
+            result = await analyze("https://evil.example.com/login")
+
+        unavail = [
+            e for e in result["evidence"]
+            if e["key"] == "provider_unavailable"
+        ]
+        providers = {u["value"]["provider"] for u in unavail}
+        assert providers == {"ctlogs.dev"}
+        assert unavail[0]["weight"] == 0.0
+        assert not [
+            e for e in result["evidence"] if e["key"] == "sibling_domains"
+        ]
+        assert not [
+            e for e in result["evidence"]
+            if e["key"] == "certificate_history"
+        ]
+        assert result["passive_risk_score"] == 0.0
+
+    async def test_anonymous_certificate_history(self, monkeypatch):
+        """Senza sibling ma con cronologia → certificate_history; cert
+        fresco (≤30 giorni) pesato 0.15."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        monkeypatch.setattr(settings, "ctlogs_api_key", None)
+        p_ctlogs, p_rdap, p_dns, p_urlhaus, mock_ctlogs = (
+            self._patch_l2_sources()
+        )
+        mock_ctlogs.return_value = {
+            "sibling_domains": [],
+            "truncated": False,
+            "total_siblings": 0,
+            "newest_cert_days": 5,
+            "oldest_cert_days": 90,
+            "total_certs": 2,
+            "source": "ctlogs.dev",
+            "mode": "anonymous",
+        }
+
+        with p_ctlogs, p_rdap, p_dns, p_urlhaus:
+            result = await analyze("https://evil.example.com/login")
+
+        hist = [
+            e for e in result["evidence"] if e["key"] == "certificate_history"
+        ]
+        assert len(hist) == 1
+        assert hist[0]["value"]["source"] == "ctlogs.dev"
+        assert hist[0]["value"]["mode"] == "anonymous"
+        assert hist[0]["value"]["newest_cert_days"] == 5
+        assert hist[0]["weight"] == 0.15  # cert di 5 giorni → fresh
+        assert result["passive_risk_score"] == 0.15
+
+    async def test_old_cert_history_informative(self, monkeypatch):
+        """Cronologia con cert vecchio → certificate_history weight 0.0
+        (informativa — mai penalizzare per assenza di segnale)."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        monkeypatch.setattr(settings, "ctlogs_api_key", None)
+        p_ctlogs, p_rdap, p_dns, p_urlhaus, mock_ctlogs = (
+            self._patch_l2_sources()
+        )
+        mock_ctlogs.return_value = {
+            "sibling_domains": [],
+            "truncated": False,
+            "total_siblings": 0,
+            "newest_cert_days": 400,
+            "oldest_cert_days": 500,
+            "total_certs": 3,
+            "source": "ctlogs.dev",
+            "mode": "anonymous",
+        }
+
+        with p_ctlogs, p_rdap, p_dns, p_urlhaus:
+            result = await analyze("https://evil.example.com/login")
+
+        hist = [
+            e for e in result["evidence"] if e["key"] == "certificate_history"
+        ]
+        assert len(hist) == 1
+        assert hist[0]["weight"] == 0.0
+        assert result["passive_risk_score"] == 0.0
+
+    async def test_no_cert_history_when_newest_unknown(self, monkeypatch):
+        """Sibling vuoti E newest ignoto → nessuna evidenza CT
+        (niente da dire senza cronologia, mai inventare)."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        monkeypatch.setattr(settings, "ctlogs_api_key", None)
+        p_ctlogs, p_rdap, p_dns, p_urlhaus, mock_ctlogs = (
+            self._patch_l2_sources()
+        )
+        mock_ctlogs.return_value = {
+            "sibling_domains": [],
+            "truncated": False,
+            "total_siblings": 0,
+            "newest_cert_days": None,
+            "oldest_cert_days": None,
+            "total_certs": 0,
+            "source": "ctlogs.dev",
+            "mode": "anonymous",
+        }
+
+        with p_ctlogs, p_rdap, p_dns, p_urlhaus:
+            result = await analyze("https://evil.example.com/login")
+
+        assert not [
+            e for e in result["evidence"]
+            if e["key"] == "certificate_history"
+        ]
+        assert not [
+            e for e in result["evidence"] if e["key"] == "sibling_domains"
+        ]
+        assert result["passive_risk_score"] == 0.0
+
+    async def test_exception_from_gather_adds_unavailable(
+        self, monkeypatch
+    ):
+        """Il provider LANCIA (eccezione catturata dal gather) →
+        provider_unavailable ctlogs.dev, mai crash."""
+        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
+        monkeypatch.setattr(settings, "ctlogs_api_key", "test-key")
+        p_ctlogs, p_rdap, p_dns, p_urlhaus, mock_ctlogs = (
+            self._patch_l2_sources(ctlogs_side_effect=RuntimeError("crash!"))
+        )
+
+        with p_ctlogs, p_rdap, p_dns, p_urlhaus:
+            result = await analyze("https://evil.example.com/login")
+
+        unavail = [
+            e for e in result["evidence"]
+            if e["key"] == "provider_unavailable"
+        ]
+        providers = {u["value"]["provider"] for u in unavail}
+        assert providers == {"ctlogs.dev"}
+        assert result["passive_risk_score"] == 0.0

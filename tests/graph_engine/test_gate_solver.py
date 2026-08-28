@@ -272,6 +272,38 @@ class TestTryPassGate:
             finally:
                 await browser.close()
 
+    async def test_settle_s_controls_final_wait(self):
+        """``settle_s`` parametrizza la fase 3: con 0.0 nessuno sleep
+        extra (fast path Trellix), con 3.0 il default.  Lo sleep è
+        mockato — il test è istantaneo e deterministico."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from graph_engine.gate_solver import try_pass_gate
+
+        page = MagicMock()
+        page.evaluate = AsyncMock(return_value=[
+            "https://challenges.cloudflare.com/cdn-cgi/challenge/x"
+        ])
+        page.frames = []  # nessun iframe su cui cliccare
+
+        sleep_calls: list[float] = []
+
+        async def _fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        with patch("graph_engine.gate_solver.asyncio.sleep", _fake_sleep):
+            result = await try_pass_gate(page, wait_seconds=1, settle_s=0.0)
+
+        assert result is False
+        # L'ultima sleep è quella di fase 3 → riflette settle_s
+        assert sleep_calls[-1] == 0.0
+
+        sleep_calls.clear()
+        with patch("graph_engine.gate_solver.asyncio.sleep", _fake_sleep):
+            await try_pass_gate(page, wait_seconds=1, settle_s=3.0)
+
+        assert sleep_calls[-1] == 3.0
+
 
 # ---------------------------------------------------------------------------
 # 3 — Explorer integration: blocked_by_gate

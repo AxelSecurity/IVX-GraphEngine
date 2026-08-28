@@ -11,6 +11,10 @@ pytest-asyncio
 # Azure AI Foundry Agents SDK — L5 classification.
 # Required only when --classify is used; the engine works without it.
 azure-ai-projects>=0.1.0
+# azure-ai-agents — client CONVERSAZIONALE (AgentsClient: threads/messages/
+# runs), separato da azure-ai-projects nelle versioni SDK correnti.  Senza
+# di esso classify() degrada a fallback euristico anche con .env completo.
+azure-ai-agents>=1.0.0
 azure-identity>=1.16.0
 # Azure AI Vision SDK — arricchimento L5 (OCR sugli screenshot).
 # Opzionale: senza di essa l'OCR degrada a error nel dict del bundle,

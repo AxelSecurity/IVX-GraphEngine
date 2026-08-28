@@ -23,8 +23,9 @@ from graph_engine.models import (
 # ---------------------------------------------------------------------------
 
 
-def test_transition_kind_has_nine_values():
-    assert len(TransitionKind) == 9
+def test_transition_kind_has_ten_values():
+    assert len(TransitionKind) == 10
+    assert TransitionKind.cloaking_probe.value == "cloaking_probe"
 
 
 # ---------------------------------------------------------------------------

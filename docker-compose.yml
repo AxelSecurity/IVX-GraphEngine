@@ -1,17 +1,32 @@
-# Avvio: docker compose up --build
-# Tool + API + dashboard di monitoraggio sono lo stesso servizio, sulla
-# stessa porta: http://localhost:8000/dashboard
-#
-# Per abilitare --classify (Foundry) / arricchimento Vision / provider L2
-# extra: copia .env.example in .env, valorizzalo, e decommenta "env_file".
+# IVX-GraphEngine — deployment single-node (decisione presa all'inizio
+# del progetto): UN solo servizio, SQLite su volume locale, niente
+# orchestrazione multi-nodo.
 
 services:
   graph-engine:
     build: .
+    image: ivx-graph-engine:local
+    container_name: ivx-graph-engine
     ports:
-      - "8000:8000"
+      # Porta host configurabile via variabile d'ambiente HOST_PORT
+      # (default 8000):  HOST_PORT=8080 docker compose up -d
+      - "${HOST_PORT:-8000}:8000"
+    env_file:
+      # Copiare .env.example in .env nella STESSA cartella di questo file
+      # (radice del progetto, NON dentro data/): le variabili vengono
+      # iniettate nell'ambiente del container, non montate come file.
+      - .env
     volumes:
+      # La "risorsa preziosa": DB SQLite (graph_engine.db), artefatti di
+      # esplorazione (graph_artifacts/) e cache OSINT (osint_cache/).
+      # Sopravvive al riavvio e alla ricreazione del container.
       - ./data:/app/data
-    # env_file:
-    #   - .env
     restart: unless-stopped
+    healthcheck:
+      # curl è installato nel Dockerfile apposta per questo check
+      # (python:3.11-slim non include né curl né wget).
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

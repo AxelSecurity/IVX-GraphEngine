@@ -53,8 +53,9 @@ def canonicalize_and_hash(url: str) -> tuple[str, str]:
     2. Decode percent-encoding iteratively (nested encoding).
     3. Lower-case scheme + hostname.
     4. Remove default port (:80 / :443).
-    5. Sort query string alphabetically.
-    6. Compute SHA-256 of the canonical form.
+    5. Normalise empty path to "/" (RFC 3986 §6.2.3).
+    6. Sort query string alphabetically.
+    7. Compute SHA-256 of the canonical form.
 
     Returns ``(canonical_url, url_hash)``.
     """
@@ -84,6 +85,16 @@ def canonicalize_and_hash(url: str) -> tuple[str, str]:
     path = _decode_percent_iterative(parsed.path) if parsed.path else ""
     query = _sort_query(_decode_percent_iterative(parsed.query)) if parsed.query else ""
     fragment = _decode_percent_iterative(parsed.fragment) if parsed.fragment else ""
+
+    # RFC 3986 §6.2.3: il path vuoto è equivalente a "/" (es.
+    # https://example.org vs https://example.org/).  Normalizzare PRIMA
+    # dell'hash fa sì che la cache 24h e il dedup dei target trattino le
+    # due scritture come la STESSA analisi (regressione del collaudo
+    # Trellix 2026-08-27).  Path NON vuoti non vengono toccati: /path e
+    # /path/ possono essere risorse diverse.  Guard su hostname: URL non
+    # gerarchici (es. mailto:) non hanno il concetto di path vuoto.
+    if not path and hostname:
+        path = "/"
 
     canonical = urlunparse((scheme, netloc, path, "", query, fragment))
 

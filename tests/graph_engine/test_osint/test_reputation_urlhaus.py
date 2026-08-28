@@ -12,7 +12,10 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 
 from graph_engine.config import settings
-from graph_engine.osint.reputation.urlhaus import UrlhausProvider
+from graph_engine.osint.reputation.urlhaus import (
+    URLHAUS_TIMEOUT,
+    UrlhausProvider,
+)
 
 _TEST_API_KEY = "test-urlhaus-api-key"
 
@@ -215,3 +218,68 @@ class TestUrlhausNotConfigured:
         assert result["details"]["skipped"] == "not configured"
         # Verifica ATTIVA: il client httpx non deve mai essere invocato
         mock_client.post.assert_not_called()
+
+
+class TestUrlhausTimeoutPropagation:
+    """Il ``timeout_s`` dell'analisi (es. un timeout ridotto passato da
+    un chiamante con budget personalizzato) DEVE raggiungere la chiamata
+    HTTP: senza, il floor resterebbe ``URLHAUS_TIMEOUT=10s`` e il
+    chiamante non avrebbe
+    effetto su questo provider."""
+
+    async def test_timeout_s_passed_to_http_call(self, monkeypatch):
+        """timeout_s esplicito → usato come timeout della chiamata."""
+        _configure_urlhaus(monkeypatch)
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"query_status": "no_results"}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        provider = UrlhausProvider()
+        result = await provider.check(
+            "http://timeout-probe.example", mock_client, timeout_s=5.0
+        )
+
+        assert result["listed"] is False
+        assert mock_client.post.call_args.kwargs["timeout"] == 5.0
+
+    async def test_default_timeout_without_timeout_s(self, monkeypatch):
+        """Senza timeout_s → resta il default del provider (backward-compat)."""
+        _configure_urlhaus(monkeypatch)
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"query_status": "no_results"}
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        provider = UrlhausProvider()
+        await provider.check("http://timeout-probe.example", mock_client)
+
+        assert (
+            mock_client.post.call_args.kwargs["timeout"] == URLHAUS_TIMEOUT
+        )
+
+    async def test_timeout_error_message_uses_effective_timeout(
+        self, monkeypatch
+    ):
+        """Il messaggio d'errore riporta il timeout EFFETTIVO, non la
+        costante di default."""
+        _configure_urlhaus(monkeypatch)
+
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(
+            side_effect=httpx.TimeoutException("timed out")
+        )
+
+        provider = UrlhausProvider()
+        result = await provider.check(
+            "http://timeout-probe.example", mock_client, timeout_s=2.5
+        )
+
+        assert result["listed"] is False
+        assert "2.5" in result["details"]["error"]

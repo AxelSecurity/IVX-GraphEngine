@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import enum
 import sys
+import threading
+import time
 import uuid
 from types import ModuleType, SimpleNamespace
 
@@ -50,7 +52,7 @@ def _sample_bundle() -> dict:
             "had_unhandled_error": False,
         },
         "evidence_summary": {"blocked_by_gate": 1},
-        "leaf_states": [
+        "states": [
             {
                 "state_id": str(uuid.uuid4()),
                 "url": "https://evil.example/login",
@@ -407,7 +409,7 @@ class TestHeuristicFallback:
         bundle = {
             "target_id": str(uuid.uuid4()),
             "num_states": 1,
-            "leaf_states": [{"form_fields": []}],
+            "states": [{"form_fields": []}],
         }
         verdict = _heuristic_fallback(bundle)
         assert verdict.classification == Classification.suspicious
@@ -419,7 +421,7 @@ class TestHeuristicFallback:
         bundle = {
             "target_id": str(uuid.uuid4()),
             "num_states": 3,
-            "leaf_states": [
+            "states": [
                 {"form_fields": [{"type": "email"}, {"type": "password"}]},
             ],
         }
@@ -548,6 +550,126 @@ class TestCredentialSelection:
         )
 
         assert log == [("default", {})]
+
+
+# ---------------------------------------------------------------------------
+# Tests — il corpo SDK gira su un worker thread, MAI sull'event loop
+# ---------------------------------------------------------------------------
+
+
+def _make_thread_aware_fake_client(idents, create_and_process):
+    """Fake AgentsClient che registra il thread OS su cui gira il corpo.
+
+    ``idents`` raccoglie l'ident del thread di ogni ``threads.create``;
+    ``create_and_process`` è iniettabile (es. una versione lenta) per i
+    test di responsiveness del loop.
+    """
+
+    def _create():
+        idents.append(threading.get_ident())
+        return SimpleNamespace(id=f"thread-w-{len(idents)}")
+
+    class _FakeClient:
+        def __init__(self, endpoint, credential):
+            self.threads = SimpleNamespace(
+                create=_create, delete=lambda tid: None,
+            )
+            self.messages = SimpleNamespace(
+                create=lambda **kw: None,
+                list=lambda thread_id: [
+                    SimpleNamespace(
+                        role=_FakeMessageRole.AGENT,
+                        content=[_FakeMessageTextContent(
+                            '{"classification":"suspicious","confidence":0.3}'
+                        )],
+                    )
+                ],
+            )
+            self.runs = SimpleNamespace(
+                create_and_process=create_and_process,
+            )
+
+    return _FakeClient
+
+
+class TestWorkerThreadIsolation:
+    """Il corpo SDK di Foundry (create_and_process bloccante) deve girare
+    su un thread worker: sul loop congelerebbe l'intero server API e il
+    timeout Trellix di 48s non potrebbe MAI scattare."""
+
+    async def test_foundry_body_runs_on_worker_thread(self, monkeypatch):
+        """``threads.create`` gira su un thread diverso da quello del test."""
+        idents: list[int] = []
+
+        saved, _ = _register_fake_azure_modules(
+            _make_thread_aware_fake_client(
+                idents,
+                create_and_process=lambda **kw: SimpleNamespace(
+                    status="completed"
+                ),
+            )
+        )
+        try:
+            monkeypatch.setattr(
+                settings,
+                "azure_foundry_endpoint",
+                "https://fake-foundry.openai.azure.com",
+            )
+            monkeypatch.setattr(
+                settings, "azure_foundry_agent_id", "fake-agent-id"
+            )
+
+            verdict = await classify(_sample_bundle())
+
+            assert verdict.produced_by == "foundry"
+            assert len(idents) == 1
+            assert idents[0] != threading.get_ident(), (
+                "Il corpo SDK è girato sull'event loop "
+                "(stesso thread del test)"
+            )
+        finally:
+            _unregister_fake_azure_modules(saved)
+
+    async def test_event_loop_stays_responsive_during_foundry_run(
+        self, monkeypatch
+    ):
+        """Regressione freeze: con un run di 0.3s il loop DEVE continuare
+        a schedulare task.  Se il corpo tornasse sync-on-loop, i tick
+        sarebbero ~0 e il test fallirebbe."""
+        import asyncio
+
+        def _slow_create_and_process(**kw):
+            time.sleep(0.3)
+            return SimpleNamespace(status="completed")
+
+        saved, _ = _register_fake_azure_modules(
+            _make_thread_aware_fake_client([], _slow_create_and_process)
+        )
+        try:
+            monkeypatch.setattr(
+                settings,
+                "azure_foundry_endpoint",
+                "https://fake-foundry.openai.azure.com",
+            )
+            monkeypatch.setattr(
+                settings, "azure_foundry_agent_id", "fake-agent-id"
+            )
+
+            classify_task = asyncio.create_task(classify(_sample_bundle()))
+
+            ticks = 0
+            while not classify_task.done():
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+            verdict = classify_task.result()
+            assert verdict.produced_by == "foundry"
+            assert ticks >= 10, (
+                f"Il loop ha girato solo {ticks} tick durante un run di "
+                "0.3s — event loop bloccato (regressione sync-on-loop)"
+            )
+        finally:
+            _unregister_fake_azure_modules(saved)
 
 
 # ---------------------------------------------------------------------------

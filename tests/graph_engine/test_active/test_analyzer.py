@@ -2,11 +2,30 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from graph_engine.active.analyzer import analyze
+from graph_engine.active.differential_fetch import PROFILES
+
+
+class _RecordingAsyncClient:
+    """Fake context manager al posto di ``httpx.AsyncClient`` — registra
+    i kwargs del costruttore così i test possono ispezionare il timeout
+    (ceiling del client condiviso)."""
+
+    created: list[dict] = []
+
+    def __init__(self, **kwargs):
+        type(self).created.append(kwargs)
+        self.client = MagicMock()
+
+    async def __aenter__(self):
+        return self.client
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 class TestAnalyzer:
@@ -62,6 +81,9 @@ class TestAnalyzer:
         assert "user_agent" in result["recommended_profile"]
         assert "headers" in result["recommended_profile"]
 
+        # Nessun cloaking → nessun profilo divergente per il secondo ramo
+        assert result["cloaking_profile"] is None
+
     async def test_one_module_failure_does_not_block_others(self):
         """Un fallimento (JARM) non impedisce agli altri di produrre risultati."""
         with patch(
@@ -116,6 +138,7 @@ class TestAnalyzer:
 
         assert result["evidence"] == []
         assert result["recommended_profile"]["user_agent"] is not None
+        assert result["cloaking_profile"] is None
 
     async def test_cloaking_detected_produces_evidence(self):
         """Cloaking rilevato → evidenza cloaking_detected."""
@@ -159,6 +182,51 @@ class TestAnalyzer:
         cloaking_ev = [e for e in result["evidence"] if e["key"] == "cloaking_detected"]
         assert len(cloaking_ev) == 1
         assert cloaking_ev[0]["value"]["divergent_profiles"]
+
+        # Il profilo divergente più ricco (bot_googlebot, 8000 bytes)
+        # diventa il cloaking_profile per il secondo ramo L4
+        assert result["cloaking_profile"] is not None
+        assert result["cloaking_profile"]["user_agent"] == (
+            PROFILES["bot_googlebot"]["user_agent"]
+        )
+
+    async def test_cloaking_profile_none_without_divergent_success(self):
+        """Profilo divergente fallito → cloaking_profile resta None."""
+        with patch(
+            "graph_engine.active.analyzer.trace_redirect_chain",
+            return_value={
+                "hops": [{"status_code": 200, "url": "https://example.com"}],
+                "final_url": "https://example.com",
+                "hop_count": 1,
+                "redirect_count": 0,
+                "truncated": False,
+            },
+        ), patch(
+            "graph_engine.active.analyzer.fetch_favicon_hash",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.compute_jarm",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.differential_fetch",
+            return_value={
+                "results": {
+                    "desktop_chrome": {
+                        "status_code": 200,
+                        "final_url": "https://example.com",
+                        "content_length": 5000,
+                        "body_sha256": "abc123",
+                    },
+                    "bot_googlebot": {
+                        "error": "Connection refused",
+                    },
+                },
+                "profiles_compared": 1,
+            },
+        ):
+            result = await analyze("https://example.com")
+
+        assert result["cloaking_profile"] is None
 
     async def test_excessive_redirects_produce_evidence(self):
         """>= 5 redirect → evidenza excessive_redirects."""
@@ -314,3 +382,61 @@ class TestAnalyzer:
 
         hop_ev = [e for e in result["evidence"] if e["key"] == "redirect_hop_count"]
         assert len(hop_ev) == 0
+
+    async def test_client_timeout_follows_timeout_s(self):
+        """Il ceiling del client HTTP condiviso segue ``timeout_s``:
+        ``analyze(url, timeout_s=5.0)`` costruisce il client con
+        timeout 5.0 (fast path), senza parametro resta il default 30.0."""
+        _RecordingAsyncClient.created = []
+        with patch(
+            "graph_engine.active.analyzer.httpx.AsyncClient",
+            _RecordingAsyncClient,
+        ), patch(
+            "graph_engine.active.analyzer.trace_redirect_chain",
+            return_value={
+                "hops": [],
+                "final_url": "https://example.com",
+                "hop_count": 0,
+                "redirect_count": 0,
+                "truncated": False,
+            },
+        ), patch(
+            "graph_engine.active.analyzer.fetch_favicon_hash",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.compute_jarm",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.differential_fetch",
+            return_value={"results": {}, "profiles_compared": 0},
+        ):
+            await analyze("https://example.com", timeout_s=5.0)
+
+        assert _RecordingAsyncClient.created == [{"timeout": 5.0}]
+
+        _RecordingAsyncClient.created = []
+        with patch(
+            "graph_engine.active.analyzer.httpx.AsyncClient",
+            _RecordingAsyncClient,
+        ), patch(
+            "graph_engine.active.analyzer.trace_redirect_chain",
+            return_value={
+                "hops": [],
+                "final_url": "https://example.com",
+                "hop_count": 0,
+                "redirect_count": 0,
+                "truncated": False,
+            },
+        ), patch(
+            "graph_engine.active.analyzer.fetch_favicon_hash",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.compute_jarm",
+            return_value=None,
+        ), patch(
+            "graph_engine.active.analyzer.differential_fetch",
+            return_value={"results": {}, "profiles_compared": 0},
+        ):
+            await analyze("https://example.com")
+
+        assert _RecordingAsyncClient.created == [{"timeout": 30.0}]

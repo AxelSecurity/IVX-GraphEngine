@@ -21,6 +21,7 @@ classificatore legge DOM snapshot da disco e strutture in memoria.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ from typing import Optional
 
 from playwright.async_api import async_playwright
 
+from graph_engine.api.browser_pool import BrowserPool
 from graph_engine.budget import Budget
 from graph_engine.models import (
     AnalysisTarget,
@@ -84,20 +86,19 @@ async def _run_classification(
     from graph_engine.classifier.evidence_bundle import build_evidence_bundle
     from graph_engine.classifier.prefilter import prefilter
 
-    # Leaf detection: stati senza transizioni OUTbound
-    from_state_ids = {str(t.from_state) for t in transitions}
-    leaf_states = [s for s in states if str(s.id) not in from_state_ids]
+    # Per-state content extraction: OGNI stato del grafo, non solo le
+    # foglie — una pagina di phishing con una transizione in uscita
+    # (es. un link legittimo verso il sito ufficiale) deve restare nel
+    # bundle per il classificatore.
+    form_fields_by_state: dict[str, list[dict]] = {}
+    visible_text_by_state: dict[str, str] = {}
+    titles_by_state: dict[str, str] = {}
 
-    # Raccogli testo visibile, titoli, form fields dai leaf states
-    leaf_form_fields: dict[str, list[dict]] = {}
-    leaf_visible_text: dict[str, str] = {}
-    leaf_titles: dict[str, str] = {}
-
-    for s in leaf_states:
+    for s in states:
         sid = str(s.id)
-        leaf_form_fields[sid] = []
-        leaf_visible_text[sid] = ""
-        leaf_titles[sid] = ""
+        form_fields_by_state[sid] = []
+        visible_text_by_state[sid] = ""
+        titles_by_state[sid] = ""
 
         if s.har_ref:
             dom_path = os.path.join(os.path.dirname(s.har_ref), "dom.html")
@@ -114,19 +115,19 @@ async def _run_classification(
                         re.DOTALL | re.IGNORECASE,
                     )
                     if title_match:
-                        leaf_titles[sid] = title_match.group(1).strip()
-                    leaf_visible_text[sid] = _extract_visible_text(html)
+                        titles_by_state[sid] = title_match.group(1).strip()
+                    visible_text_by_state[sid] = _extract_visible_text(html)
 
-    # Bundle
+    # ── Bundle ──────────────────────────────────────────────────────────
     bundle = await build_evidence_bundle(
         target_url=target.input_url,
         canonical_url=target.final_url,
         states=states,
         transitions=transitions,
         evidence=evidence,
-        leaf_form_fields=leaf_form_fields,
-        leaf_visible_text=leaf_visible_text,
-        leaf_titles=leaf_titles,
+        form_fields_by_state=form_fields_by_state,
+        visible_text_by_state=visible_text_by_state,
+        titles_by_state=titles_by_state,
         lexical_risk_score=lexical_risk_score,
         passive_risk_score=passive_risk_score,
     )
@@ -146,6 +147,70 @@ async def _run_classification(
 
 
 # ---------------------------------------------------------------------------
+# L4 — esecuzione con browser condiviso o effimero
+# ---------------------------------------------------------------------------
+
+
+async def _run_l4_with_browser(
+    browser,
+    *,
+    explorer_holder: list,
+    start_url: str,
+    budget_obj: Budget,
+    capture_artifacts: bool,
+    top_n_actions: int,
+    captcha_wait_s: int,
+    settle_max_wait_s: float,
+    page_timeout_ms: int,
+    profile: Optional[dict],
+    target_id,
+    cloaking_profile: Optional[dict],
+):
+    """Esegue L4 su *browser* (condiviso dal pool o effimero).
+
+    L'istanza ``StateGraphExplorer`` viene registrata in
+    ``explorer_holder`` PRIMA di ``run()``: se l'esplorazione esplode a
+    metà, il chiamante conserva il riferimento e può salvare gli stati
+    parziali (contenimento errori — vincolo del progetto).
+
+    ``StateGraphExplorer.run()`` crea e chiude un ``new_context()``
+    fresco per questa analisi: con il browser del pool, cookie e
+    storage non si mescolano mai tra richieste — solo il processo
+    Chromium sottostante è riusato.
+    """
+    from graph_engine.explorer import StateGraphExplorer
+
+    explorer = StateGraphExplorer(browser, page_timeout_ms=page_timeout_ms)
+    explorer_holder.append(explorer)
+    return await explorer.run(
+        start_url,
+        budget=budget_obj,
+        capture_artifacts=capture_artifacts,
+        top_n_actions=top_n_actions,
+        captcha_wait_s=captcha_wait_s,
+        settle_max_wait_s=settle_max_wait_s,
+        profile=profile,
+        target_id=target_id,
+        cloaking_profile=cloaking_profile,
+    )
+
+
+async def _run_l4_ephemeral(**explorer_kwargs):
+    """L4 con browser effimero: launch + close per singola analisi.
+
+    Usato quando il pool non è disponibile (chiamanti standalone, o
+    pool degradato dopo un crash non rilanciabile).  Il CLI non passa
+    di qui — mantiene il proprio browser single-shot come da sempre.
+    """
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            return await _run_l4_with_browser(browser, **explorer_kwargs)
+        finally:
+            await browser.close()
+
+
+# ---------------------------------------------------------------------------
 # Public API — il runner principale
 # ---------------------------------------------------------------------------
 
@@ -161,6 +226,9 @@ async def run_full_analysis(
     captcha_wait_s: int = 8,
     l2_timeout_s: Optional[float] = None,
     l3_timeout_s: Optional[float] = None,
+    settle_max_wait_s: float = 4.0,
+    page_timeout_ms: int = 30000,
+    browser_pool: Optional[BrowserPool] = None,
 ) -> str:
     """Esegue la pipeline completa L0→L5 e persiste tutto su SQLite.
 
@@ -179,13 +247,21 @@ async def run_full_analysis(
         capture_artifacts: Se ``True``, salva screenshot, DOM, HAR per
                            ogni stato.
         captcha_wait_s: Secondi di attesa per auto-risoluzione CAPTCHA
-                        (default: 8s; fast path Trellix: 4s).
+                        (default: 8s).
         l2_timeout_s: Timeout in secondi per le query OSINT L2
-                      (crt.sh, RDAP, DNS).  Se ``None``, ogni provider
-                      usa il proprio default.
+                      (ctlogs.dev, RDAP, DNS e reputation provider).  Se
+                      ``None``, ogni provider usa il proprio default.
         l3_timeout_s: Timeout in secondi per JARM (L3).  Se ``None``,
                       usa il default (10s).  Le altre sonde L3
                       mantengono i propri timeout interni.
+        settle_max_wait_s: Tetto massimo del settle post-navigazione di
+                           L4 (default: 4.0s).
+        page_timeout_ms: Timeout di navigazione Playwright in ms
+                         (default: 30000).
+        browser_pool: Pool del browser condiviso (app.state.browser_pool
+                      della route).  Se ``None``, L4 usa un browser
+                      effimero per singola analisi (comportamento
+                      storico — CLI e chiamanti standalone).
 
     Returns:
         ``str(target.id)`` — l'UUID dell'analisi persistita.
@@ -209,7 +285,10 @@ async def run_full_analysis(
     transitions: list[Transition] = []
     evidence: list[Evidence] = []
     verdict: Optional[Verdict] = None
-    explorer = None  # inizializzato prima del try per il controllo nell'except
+    # Riceve l'istanza explorer PRIMA di run() (vedi _run_l4_with_browser):
+    # resta raggiungibile nel ramo except anche se l'esplorazione esplode
+    # a metà, così gli stati parziali sopravvivono.
+    explorer_holder: list = []
 
     try:
         # ── L0 ingestion (sync, puro — refang/unwrap/canonicalize) ────────
@@ -225,43 +304,51 @@ async def run_full_analysis(
             ingested["nested_payloads"],
         )
 
-        # ── L2 passive OSINT (async, rete) ─────────────────────────────────
+        # ── L2 passive OSINT ∥ L3 active low-interaction (async, rete) ───
+        # Nessuno scambio dati tra i due strati → corrono in PARALLELO
+        # (gather, non sequenziali): il tempo L2+L3 si dimezza rispetto
+        # all'esecuzione sequenziale.
         from graph_engine.osint.analyzer import analyze as l2_analyze
-
-        l2_result = await l2_analyze(
-            ingested["canonical_url"],
-            timeout_s=l2_timeout_s,
-        )
-
-        # ── L3 active low-interaction (async, rete) ────────────────────────
         from graph_engine.active.analyzer import analyze as l3_analyze
 
-        l3_result = await l3_analyze(
-            ingested["canonical_url"],
-            timeout_s=l3_timeout_s,
+        l2_result, l3_result = await asyncio.gather(
+            l2_analyze(ingested["canonical_url"], timeout_s=l2_timeout_s),
+            l3_analyze(ingested["canonical_url"], timeout_s=l3_timeout_s),
         )
 
         budget_obj = budget or Budget()
 
         # ── L4 browser Playwright — SOLO qui ───────────────────────────────
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
-            try:
-                from graph_engine.explorer import StateGraphExplorer
+        # Browser CONDIVISO (pool dell'app, ~5-6s di risparmio per
+        # analisi) quando disponibile: explorer.run() crea un context
+        # fresco per questa analisi (isolamento cookie/storage) e lo
+        # chiude a fine run — il browser del pool NON viene chiuso qui.
+        # Senza pool (o con pool degradato dopo crash) → browser
+        # effimero, comportamento storico.
+        explorer_kwargs = dict(
+            explorer_holder=explorer_holder,
+            start_url=ingested["canonical_url"],
+            budget_obj=budget_obj,
+            capture_artifacts=capture_artifacts,
+            top_n_actions=top_n_actions,
+            captcha_wait_s=captcha_wait_s,
+            settle_max_wait_s=settle_max_wait_s,
+            page_timeout_ms=page_timeout_ms,
+            profile=l3_result["recommended_profile"],
+            target_id=analysis_target.id,
+            cloaking_profile=l3_result.get("cloaking_profile"),
+        )
+        shared_browser = (
+            await browser_pool.acquire() if browser_pool is not None else None
+        )
+        if shared_browser is not None:
+            explored = await _run_l4_with_browser(
+                shared_browser, **explorer_kwargs,
+            )
+        else:
+            explored = await _run_l4_ephemeral(**explorer_kwargs)
 
-                explorer = StateGraphExplorer(browser)
-                explored = await explorer.run(
-                    ingested["canonical_url"],
-                    budget=budget_obj,
-                    capture_artifacts=capture_artifacts,
-                    top_n_actions=top_n_actions,
-                    captcha_wait_s=captcha_wait_s,
-                    profile=l3_result["recommended_profile"],
-                    target_id=analysis_target.id,
-                )
-            finally:
-                await browser.close()
-
+        explorer = explorer_holder[0] if explorer_holder else None
         states = explorer.states
         transitions = explorer.transitions
         evidence = explorer.evidence
@@ -366,10 +453,12 @@ async def run_full_analysis(
         partial_transitions: list[Transition] = []
         partial_evidence: list[Evidence] = []
 
-        # Se l'esploratore esiste (l'errore è avvenuto durante o dopo L4),
-        # salviamo tutto ciò che è riuscito a produrre.  Se l'errore è
-        # avvenuto prima (L0/L1/L2/L3), salviamo liste vuote.
-        if explorer is not None:
+        # Se l'esploratore è stato creato (l'errore è avvenuto durante o
+        # dopo L4), salviamo tutto ciò che è riuscito a produrre — anche
+        # se run() stesso è esploso: l'holder viene popolato PRIMA di
+        # run().  Se l'errore è avvenuto prima (L0/L1/L2/L3), liste vuote.
+        if explorer_holder:
+            explorer = explorer_holder[0]
             partial_states = explorer.states
             partial_transitions = explorer.transitions
             partial_evidence = list(explorer.evidence)
