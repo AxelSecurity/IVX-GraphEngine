@@ -14,12 +14,15 @@ from typing import Optional
 
 import aiosqlite
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 
 from graph_engine.api.pipeline_runner import DEFAULT_ARTIFACT_ROOT, run_full_analysis
 from graph_engine.api.schemas import (
     AnalysisCreateRequest,
     AnalysisCreatedResponse,
     AnalysisGraphResponse,
+    AnalysisListEntry,
+    AnalysisListResponse,
     AnalysisSummaryResponse,
     ArtifactFile,
     ArtifactListing,
@@ -32,8 +35,10 @@ from graph_engine.api.schemas import (
 from graph_engine.budget import Budget
 from graph_engine.models import AnalysisTarget, TargetStatus
 from graph_engine.storage.repository import (
+    count_targets,
     get_history_for_url_hash,
     get_target_by_id,
+    list_targets,
     save_target,
 )
 from graph_engine.storage.schema import DEFAULT_DB_PATH, DDL, ensure_data_dir
@@ -41,6 +46,14 @@ from graph_engine.storage.schema import DEFAULT_DB_PATH, DDL, ensure_data_dir
 logger = logging.getLogger("graph_engine.api")
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
+
+# Whitelist dei soli file che ``StateGraphExplorer._save_artifacts`` scrive
+# per ogni stato — vedi get_artifact_file() più sotto.
+_ARTIFACT_MEDIA_TYPES = {
+    "screenshot.png": "image/png",
+    "dom.html": "text/html; charset=utf-8",
+    "snapshot.har": "application/json",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +167,46 @@ def build_router(
             id=str(target.id),
             status="queued",
             input_url=url,
+        )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # GET /analyses — elenco di tutte le sottomissioni (dashboard)
+    # ──────────────────────────────────────────────────────────────────────
+
+    @router.get("/analyses", response_model=AnalysisListResponse)
+    async def list_analyses(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+        status: Optional[str] = Query(default=None, description="Filtra per stato"),
+        classification: Optional[str] = Query(
+            default=None, description="Filtra per classificazione del verdetto"
+        ),
+        q: Optional[str] = Query(
+            default=None, description="Ricerca su input_url/final_url"
+        ),
+    ):
+        """Elenca le sottomissioni, più recenti prima — usato dalla dashboard
+        di monitoraggio. Paginato; filtrabile per stato, classificazione e
+        sottostringa dell'URL."""
+        rows = await list_targets(
+            limit=limit,
+            offset=offset,
+            status=status,
+            classification=classification,
+            search=q,
+            db_path=db_path,
+        )
+        total = await count_targets(
+            status=status,
+            classification=classification,
+            search=q,
+            db_path=db_path,
+        )
+        return AnalysisListResponse(
+            total=total,
+            limit=limit,
+            offset=offset,
+            items=[AnalysisListEntry(**r) for r in rows],
         )
 
     # ──────────────────────────────────────────────────────────────────────
@@ -285,6 +338,34 @@ def build_router(
             count=len(files),
             files=files,
         )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # GET /analyses/{target_id}/artifacts/{state_id}/{filename} — contenuto
+    # ──────────────────────────────────────────────────────────────────────
+
+    @router.get("/analyses/{target_id}/artifacts/{state_id}/{filename}")
+    async def get_artifact_file(target_id: str, state_id: str, filename: str):
+        """Serve il contenuto grezzo di un singolo artefatto (screenshot,
+        DOM, HAR) — usato dalla dashboard per mostrare gli screenshot.
+
+        ``filename`` è vincolato a un whitelist fisso (i tre soli file che
+        ``_save_artifacts`` scrive). Combinato col fatto che FastAPI non fa
+        passare '/' in un segmento di path senza il convertitore ``:path``,
+        questo esclude path traversal per costruzione — non serve
+        risolvere/validare il path manualmente.
+        """
+        media_type = _ARTIFACT_MEDIA_TYPES.get(filename)
+        if media_type is None:
+            raise HTTPException(status_code=404, detail="Artefatto non trovato")
+
+        if await get_target_by_id(target_id, db_path=db_path) is None:
+            raise HTTPException(status_code=404, detail="Analisi non trovata")
+
+        file_path = artifact_root / target_id / state_id / filename
+        if not file_path.is_file():
+            raise HTTPException(status_code=404, detail="Artefatto non trovato")
+
+        return FileResponse(file_path, media_type=media_type)
 
     # ──────────────────────────────────────────────────────────────────────
     # GET /health

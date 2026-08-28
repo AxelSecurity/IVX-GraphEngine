@@ -56,6 +56,14 @@ python -m graph_engine.cli <url> --history <url>   # solo storico, nessuna nuova
 uvicorn graph_engine.api.app:app --reload
 ```
 
+## Dashboard di monitoraggio
+
+Una dashboard web mostra tutte le sottomissioni effettuate e, cliccandoci
+sopra, tutti i dettagli estratti — grafo di esplorazione, stati con
+screenshot, evidenze per livello, verdetto. È servita dalla stessa app
+FastAPI dell'API (nessun servizio separato, nessuna porta aggiuntiva):
+con l'API già avviata, apri `http://localhost:8000/dashboard`.
+
 I dettagli di ogni livello, gli schemi dati e le decisioni tecniche sono
 documentati in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -63,7 +71,8 @@ documentati in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Il servizio gira in un container con `docker-compose.yml` — un solo
 servizio, coerentemente con la decisione presa all'inizio del progetto
-(single-node su SQLite, non orchestrato).
+(single-node su SQLite, non orchestrato). Lo stesso container serve sia
+l'API che la dashboard (`/dashboard`), sulla stessa porta.
 
 ```bash
 # 1. Copia la configurazione accanto a docker-compose.yml
