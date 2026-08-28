@@ -251,3 +251,118 @@ class TestRoutes:
         data = res.json()
         assert data["status"] == "ok"
         assert isinstance(data["running_jobs"], int)
+
+    # ------------------------------------------------------------------
+    # GET /analyses — elenco sottomissioni (dashboard)
+    # ------------------------------------------------------------------
+
+    async def test_list_analyses_paginated_and_filtered(self, app, client, tmp_path):
+        """GET /analyses: più recenti prima, filtri e paginazione."""
+        db = str(tmp_path / "test.db")
+
+        t1 = AnalysisTarget(
+            input_url="https://one.example.com",
+            status=TargetStatus.done,
+        )
+        v1 = Verdict(
+            target_id=t1.id, classification=Classification.benign, confidence=0.9,
+        )
+        t2 = AnalysisTarget(
+            input_url="https://two.example.com",
+            status=TargetStatus.error,
+        )
+        await save_target(t1, [], [], [], v1, db_path=db)
+        await save_target(t2, [], [], [], None, db_path=db)
+
+        from graph_engine.api.app import create_app
+
+        test_app = create_app(db_path=db)
+        async with AsyncClient(
+            transport=ASGITransport(app=test_app), base_url="http://test"
+        ) as c:
+            res = await c.get("/analyses")
+            assert res.status_code == 200
+            data = res.json()
+            assert data["total"] == 2
+            assert len(data["items"]) == 2
+
+            res2 = await c.get("/analyses?status=error")
+            assert res2.status_code == 200
+            data2 = res2.json()
+            assert data2["total"] == 1
+            assert data2["items"][0]["input_url"] == "https://two.example.com"
+
+            res3 = await c.get("/analyses?classification=benign")
+            assert res3.json()["total"] == 1
+
+            res4 = await c.get("/analyses?limit=1&offset=0")
+            assert len(res4.json()["items"]) == 1
+            assert res4.json()["limit"] == 1
+
+    # ------------------------------------------------------------------
+    # GET /analyses/{id}/artifacts/{state_id}/{filename} — contenuto
+    # ------------------------------------------------------------------
+
+    async def test_artifact_file_serves_content(self, tmp_path):
+        """Il contenuto di uno screenshot/DOM/HAR viene servito correttamente."""
+        target = AnalysisTarget(
+            input_url="https://shot.example.com", status=TargetStatus.done,
+        )
+        tid = str(target.id)
+        db = str(tmp_path / "test.db")
+        await save_target(target, [], [], [], None, db_path=db)
+
+        state_dir = tmp_path / "artifacts" / tid / "s1"
+        state_dir.mkdir(parents=True)
+        (state_dir / "screenshot.png").write_bytes(b"\x89PNG\r\n fake")
+        (state_dir / "dom.html").write_text("<html>hi</html>")
+
+        from graph_engine.api.app import create_app
+
+        test_app = create_app(db_path=db, artifact_root=tmp_path / "artifacts")
+        async with AsyncClient(
+            transport=ASGITransport(app=test_app), base_url="http://test"
+        ) as c:
+            res = await c.get(f"/analyses/{tid}/artifacts/s1/screenshot.png")
+            assert res.status_code == 200
+            assert res.headers["content-type"] == "image/png"
+            assert res.content == b"\x89PNG\r\n fake"
+
+            res2 = await c.get(f"/analyses/{tid}/artifacts/s1/dom.html")
+            assert res2.status_code == 200
+            assert "<html>hi</html>" in res2.text
+
+    async def test_artifact_file_rejects_unknown_filename(self, tmp_path):
+        """Un filename fuori whitelist → 404, mai un path arbitrario."""
+        target = AnalysisTarget(
+            input_url="https://shot.example.com", status=TargetStatus.done,
+        )
+        tid = str(target.id)
+        db = str(tmp_path / "test.db")
+        await save_target(target, [], [], [], None, db_path=db)
+
+        from graph_engine.api.app import create_app
+
+        test_app = create_app(db_path=db, artifact_root=tmp_path / "artifacts")
+        async with AsyncClient(
+            transport=ASGITransport(app=test_app), base_url="http://test"
+        ) as c:
+            res = await c.get(f"/analyses/{tid}/artifacts/s1/../../etc/passwd")
+            assert res.status_code == 404
+
+            res2 = await c.get(f"/analyses/{tid}/artifacts/s1/not-a-real-file.txt")
+            assert res2.status_code == 404
+
+    async def test_artifact_file_missing_target_or_file(self, tmp_path):
+        """Target inesistente o file non ancora scritto → 404."""
+        db = str(tmp_path / "test.db")
+        from graph_engine.api.app import create_app
+
+        test_app = create_app(db_path=db, artifact_root=tmp_path / "artifacts")
+        async with AsyncClient(
+            transport=ASGITransport(app=test_app), base_url="http://test"
+        ) as c:
+            res = await c.get(
+                "/analyses/00000000-0000-0000-0000-000000000000/artifacts/s1/screenshot.png"
+            )
+            assert res.status_code == 404

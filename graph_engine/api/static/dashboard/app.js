@@ -1,0 +1,595 @@
+"use strict";
+
+/**
+ * IVX GraphEngine — Dashboard
+ *
+ * Nessun framework, nessuna build: HTML/CSS/JS puri che consumano l'API
+ * REST già esposta da graph_engine.api (stesso container Docker del tool).
+ * Routing via hash: "#/" = elenco sottomissioni, "#/analyses/<id>" = dettaglio.
+ */
+
+const root = document.getElementById("view-root");
+
+const LAYER_ORDER = ["L0", "L1", "L2", "L3", "L4", "L5", "API"];
+
+const TRANSITION_LABELS = {
+  http_3xx: "3xx",
+  meta_refresh: "meta-refresh",
+  js_location: "js",
+  history_push: "history",
+  click: "click",
+  form_submit: "form",
+  new_tab: "new-tab",
+  gate_solved: "gate",
+  ws_message: "ws",
+};
+
+// ---------------------------------------------------------------- helpers
+
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body.detail || detail;
+    } catch (_) {
+      /* risposta non JSON — usa statusText */
+    }
+    const err = new Error(detail);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
+function escapeHtml(str) {
+  if (str === null || str === undefined) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function truncateMiddle(str, max) {
+  if (!str || str.length <= max) return str || "";
+  const half = Math.floor((max - 1) / 2);
+  return str.slice(0, half) + "…" + str.slice(str.length - half);
+}
+
+function formatDate(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleString("it-IT", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function debounce(fn, ms) {
+  let t = null;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+}
+
+function statusBadge(status) {
+  const s = status || "queued";
+  const label = { queued: "In coda", running: "In corso", done: "Completata", error: "Errore" }[s] || s;
+  return `<span class="badge status-${s}">${label}</span>`;
+}
+
+function classBadge(classification) {
+  if (!classification) return `<span class="badge cls-none">n/d</span>`;
+  const label = { benign: "Benigno", suspicious: "Sospetto", phishing: "Phishing" }[classification] || classification;
+  return `<span class="badge cls-${classification}">${label}</span>`;
+}
+
+function weightChipClass(w) {
+  const val = Number(w) || 0;
+  if (val <= 0) return "w-0";
+  if (val < 0.2) return "w-low";
+  if (val < 0.4) return "w-mid";
+  return "w-high";
+}
+
+function artifactUrl(targetId, stateId, filename) {
+  return `/analyses/${targetId}/artifacts/${stateId}/${filename}`;
+}
+
+// ------------------------------------------------------------------ router
+
+function currentRoute() {
+  const hash = window.location.hash.replace(/^#/, "") || "/";
+  const detailMatch = hash.match(/^\/analyses\/([^/]+)/);
+  if (detailMatch) return { name: "detail", id: detailMatch[1] };
+  return { name: "list" };
+}
+
+function navigate(hash) {
+  window.location.hash = hash;
+}
+
+window.addEventListener("hashchange", render);
+document.getElementById("refresh-btn").addEventListener("click", () => {
+  const btn = document.getElementById("refresh-btn");
+  btn.classList.add("spin");
+  setTimeout(() => btn.classList.remove("spin"), 700);
+  render();
+});
+
+// -------------------------------------------------------------- lightbox
+
+const lightbox = document.getElementById("lightbox");
+const lightboxImg = document.getElementById("lightbox-img");
+
+function openLightbox(src) {
+  lightboxImg.src = src;
+  lightbox.classList.remove("hidden");
+}
+function closeLightbox() {
+  lightbox.classList.add("hidden");
+  lightboxImg.src = "";
+}
+document.getElementById("lightbox-close").addEventListener("click", closeLightbox);
+lightbox.addEventListener("click", (e) => {
+  if (e.target === lightbox) closeLightbox();
+});
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeLightbox();
+});
+
+// -------------------------------------------------------------- health poll
+
+async function pollHealth() {
+  const dot = document.getElementById("health-dot");
+  const text = document.getElementById("health-text");
+  try {
+    const h = await fetchJSON("/health");
+    dot.className = "dot " + (h.running_jobs > 0 ? "busy" : "ok");
+    text.textContent = h.running_jobs > 0
+      ? `${h.running_jobs} analisi in corso`
+      : "operativo";
+  } catch (e) {
+    dot.className = "dot bad";
+    text.textContent = "non raggiungibile";
+  }
+}
+pollHealth();
+setInterval(pollHealth, 12000);
+
+// ----------------------------------------------------------------- render
+
+let listState = { limit: 20, offset: 0, status: "", classification: "", q: "" };
+let listPollTimer = null;
+let detailPollTimer = null;
+
+function stopPolling() {
+  if (listPollTimer) { clearInterval(listPollTimer); listPollTimer = null; }
+  if (detailPollTimer) { clearInterval(detailPollTimer); detailPollTimer = null; }
+}
+
+async function render() {
+  stopPolling();
+  const route = currentRoute();
+  if (route.name === "detail") {
+    await renderDetail(route.id);
+  } else {
+    await renderList();
+  }
+}
+
+// ------------------------------------------------------------- list view
+
+function listSkeleton() {
+  return `
+    <div class="page-head">
+      <div>
+        <div class="page-title">Sottomissioni</div>
+        <div class="page-hint">Tutte le analisi eseguite dal motore multilayer L0→L5</div>
+      </div>
+    </div>
+    <div class="sub-list">
+      ${Array.from({ length: 5 }).map(() => `<div class="skeleton"></div>`).join("")}
+    </div>`;
+}
+
+async function renderList() {
+  root.innerHTML = listSkeleton();
+  attachToolbarPlaceholder();
+
+  try {
+    await loadAndRenderListBody();
+  } catch (e) {
+    root.querySelector(".sub-list")?.remove();
+    root.insertAdjacentHTML(
+      "beforeend",
+      `<div class="error-state">Impossibile caricare le sottomissioni: ${escapeHtml(e.message)}</div>`
+    );
+    return;
+  }
+
+  // Auto-refresh leggero: solo se non si sta digitando nella ricerca
+  listPollTimer = setInterval(() => {
+    const searchFocused = document.activeElement?.id === "search-input";
+    if (!searchFocused) loadAndRenderListBody().catch(() => {});
+  }, 15000);
+}
+
+function attachToolbarPlaceholder() {
+  const head = root.querySelector(".page-head");
+  head.insertAdjacentHTML(
+    "afterend",
+    `
+    <div class="toolbar">
+      <div class="search-box">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="7"></circle><path d="m21 21-4.3-4.3"></path>
+        </svg>
+        <input type="text" id="search-input" placeholder="Cerca per URL…" value="${escapeHtml(listState.q)}" />
+      </div>
+      <select id="status-filter">
+        <option value="">Tutti gli stati</option>
+        <option value="queued">In coda</option>
+        <option value="running">In corso</option>
+        <option value="done">Completata</option>
+        <option value="error">Errore</option>
+      </select>
+      <select id="cls-filter">
+        <option value="">Tutte le classificazioni</option>
+        <option value="benign">Benigno</option>
+        <option value="suspicious">Sospetto</option>
+        <option value="phishing">Phishing</option>
+      </select>
+    </div>
+    <div class="sub-list" id="sub-list"></div>
+    <div class="pager" id="pager"></div>
+    `
+  );
+
+  document.getElementById("status-filter").value = listState.status;
+  document.getElementById("cls-filter").value = listState.classification;
+
+  const onSearch = debounce((val) => {
+    listState.q = val;
+    listState.offset = 0;
+    loadAndRenderListBody().catch(() => {});
+  }, 300);
+
+  document.getElementById("search-input").addEventListener("input", (e) => onSearch(e.target.value));
+  document.getElementById("status-filter").addEventListener("change", (e) => {
+    listState.status = e.target.value;
+    listState.offset = 0;
+    loadAndRenderListBody().catch(() => {});
+  });
+  document.getElementById("cls-filter").addEventListener("change", (e) => {
+    listState.classification = e.target.value;
+    listState.offset = 0;
+    loadAndRenderListBody().catch(() => {});
+  });
+}
+
+async function loadAndRenderListBody() {
+  const params = new URLSearchParams({
+    limit: listState.limit,
+    offset: listState.offset,
+  });
+  if (listState.status) params.set("status", listState.status);
+  if (listState.classification) params.set("classification", listState.classification);
+  if (listState.q) params.set("q", listState.q);
+
+  const data = await fetchJSON(`/analyses?${params.toString()}`);
+  const listEl = document.getElementById("sub-list");
+  const pagerEl = document.getElementById("pager");
+  if (!listEl) return; // la vista è cambiata nel frattempo
+
+  if (data.items.length === 0) {
+    listEl.innerHTML = `<div class="empty-state">Nessuna sottomissione trovata.</div>`;
+    pagerEl.innerHTML = "";
+    return;
+  }
+
+  listEl.innerHTML = data.items
+    .map((it) => {
+      const url = it.input_url || "";
+      return `
+      <div class="sub-row" data-id="${escapeHtml(it.id)}">
+        <div class="sub-url">
+          <span class="u" title="${escapeHtml(url)}">${escapeHtml(truncateMiddle(url, 70))}</span>
+          <span class="h">${escapeHtml(it.id)}</span>
+        </div>
+        ${statusBadge(it.status)}
+        ${classBadge(it.classification)}
+        <span class="sub-counts">${it.num_states} stati · ${it.num_transitions} archi</span>
+        <span class="sub-date">${formatDate(it.created_at)}</span>
+        <svg class="chev" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="m9 6 6 6-6 6"></path>
+        </svg>
+      </div>`;
+    })
+    .join("");
+
+  listEl.querySelectorAll(".sub-row").forEach((rowEl) => {
+    rowEl.addEventListener("click", () => navigate(`#/analyses/${rowEl.dataset.id}`));
+  });
+
+  const total = data.total;
+  const from = data.offset + 1;
+  const to = Math.min(data.offset + data.limit, total);
+  pagerEl.innerHTML = `
+    <button id="prev-page" ${data.offset === 0 ? "disabled" : ""}>← Precedenti</button>
+    <span>${total === 0 ? 0 : from}–${to} di ${total}</span>
+    <button id="next-page" ${to >= total ? "disabled" : ""}>Successivi →</button>
+  `;
+  document.getElementById("prev-page")?.addEventListener("click", () => {
+    listState.offset = Math.max(0, listState.offset - listState.limit);
+    loadAndRenderListBody().catch(() => {});
+  });
+  document.getElementById("next-page")?.addEventListener("click", () => {
+    listState.offset += listState.limit;
+    loadAndRenderListBody().catch(() => {});
+  });
+}
+
+// ----------------------------------------------------------- detail view
+
+async function renderDetail(id) {
+  root.innerHTML = `<button class="back-link" id="back-link">← Torna alle sottomissioni</button><div class="loading-state">Caricamento analisi…</div>`;
+  document.getElementById("back-link").addEventListener("click", () => navigate("#/"));
+
+  let graph, artifacts;
+  try {
+    [graph, artifacts] = await Promise.all([
+      fetchJSON(`/analyses/${id}/graph`),
+      fetchJSON(`/analyses/${id}/artifacts`).catch(() => ({ files: [] })),
+    ]);
+  } catch (e) {
+    root.querySelector(".loading-state").outerHTML =
+      `<div class="error-state">Impossibile caricare l'analisi (${escapeHtml(e.message)}).</div>`;
+    return;
+  }
+
+  root.querySelector(".loading-state").outerHTML = buildDetailHtml(id, graph, artifacts);
+  wireDetail(id, graph);
+
+  // Se l'analisi è ancora in corso, ricontrolla periodicamente
+  if (graph.target.status === "queued" || graph.target.status === "running") {
+    detailPollTimer = setInterval(async () => {
+      try {
+        const fresh = await fetchJSON(`/analyses/${id}/graph`);
+        if (fresh.target.status !== "queued" && fresh.target.status !== "running") {
+          clearInterval(detailPollTimer);
+        }
+        const freshArtifacts = await fetchJSON(`/analyses/${id}/artifacts`).catch(() => ({ files: [] }));
+        root.innerHTML = buildDetailHtml(id, fresh, freshArtifacts);
+        wireDetail(id, fresh);
+        document.getElementById("back-link").addEventListener("click", () => navigate("#/"));
+      } catch (_) {
+        /* riprova al prossimo tick */
+      }
+    }, 6000);
+  }
+}
+
+function buildDetailHtml(id, graph, artifacts) {
+  const t = graph.target;
+  const v = graph.verdict;
+  const states = graph.states || [];
+  const transitions = graph.transitions || [];
+  const evidence = graph.evidence || [];
+
+  const incomingKind = {};
+  transitions.forEach((tr) => { incomingKind[tr.to_state] = tr.kind; });
+
+  const fileSet = new Set((artifacts.files || []).map((f) => f.path));
+
+  return `
+    <button class="back-link" id="back-link">← Torna alle sottomissioni</button>
+
+    <div class="card detail-head">
+      <div class="detail-urls">
+        <span class="url-in">${escapeHtml(t.input_url)}</span>
+        ${t.final_url && t.final_url !== t.input_url ? `<span class="url-arrow">→</span><span class="url-final">${escapeHtml(t.final_url)}</span>` : ""}
+      </div>
+      <div class="detail-badges">
+        ${statusBadge(t.status)}
+        ${classBadge(v?.classification)}
+        ${v ? `
+          <div class="confidence-wrap">
+            <div class="confidence-track"><div class="confidence-fill" style="width:${Math.round((v.confidence || 0) * 100)}%"></div></div>
+            <span class="confidence-num">${Math.round((v.confidence || 0) * 100)}% confidenza</span>
+          </div>` : ""}
+        ${v?.brand ? `<span class="badge cls-none">brand: ${escapeHtml(v.brand)}</span>` : ""}
+        ${v?.kit_family ? `<span class="badge cls-none">kit: ${escapeHtml(v.kit_family)}</span>` : ""}
+      </div>
+      <div class="meta-row">
+        <span>ID: <b>${escapeHtml(t.id)}</b></span>
+        <span>Creata: <b>${formatDate(t.created_at)}</b></span>
+        <span>Verdetto da: <b>${escapeHtml(v?.produced_by || "—")}</b></span>
+        <span>Stati: <b>${states.length}</b></span>
+        <span>Transizioni: <b>${transitions.length}</b></span>
+      </div>
+      ${v?.rationale ? `<div class="rationale"><b>Motivazione:</b> ${escapeHtml(v.rationale)}</div>` : ""}
+    </div>
+
+    ${states.length > 0 ? `
+    <div class="section">
+      <div class="section-title">Grafo di esplorazione <span class="count-pill">${states.length} nodi · ${transitions.length} archi</span></div>
+      <div class="card graph-card">${buildGraphSvg(states, transitions)}</div>
+    </div>` : ""}
+
+    ${states.length > 0 ? `
+    <div class="section">
+      <div class="section-title">Stati catturati</div>
+      <div class="states-grid">
+        ${states.map((s) => buildStateCard(id, s, incomingKind[s.id], fileSet)).join("")}
+      </div>
+    </div>` : ""}
+
+    <div class="section">
+      <div class="section-title">Evidenze <span class="count-pill">${evidence.length}</span></div>
+      ${evidence.length === 0 ? `<div class="empty-state">Nessuna evidenza registrata.</div>` : buildEvidenceAccordion(evidence)}
+    </div>
+  `;
+}
+
+function buildStateCard(targetId, state, incomingKind, fileSet) {
+  const shotPath = `${state.id}/screenshot.png`;
+  const hasShot = fileSet.has(shotPath);
+  const shotUrl = artifactUrl(targetId, state.id, "screenshot.png");
+  const domPath = `${state.id}/dom.html`;
+  const harPath = `${state.id}/snapshot.har`;
+
+  return `
+    <div class="state-card" id="state-card-${escapeHtml(state.id)}">
+      <div class="state-thumb">
+        <span class="state-depth-pill">${incomingKind ? escapeHtml(TRANSITION_LABELS[incomingKind] || incomingKind) + " · " : ""}profondità ${state.depth}</span>
+        ${hasShot
+          ? `<img src="${shotUrl}" loading="lazy" alt="Screenshot dello stato" data-full="${shotUrl}" />`
+          : `<span class="no-shot">nessuno screenshot</span>`}
+      </div>
+      <div class="state-body">
+        <div class="state-url" title="${escapeHtml(state.url)}">${escapeHtml(truncateMiddle(state.url, 90))}</div>
+        <div class="state-hash">dom_hash ${escapeHtml((state.dom_hash || "").slice(0, 16))}…</div>
+        <div class="state-links">
+          ${fileSet.has(domPath) ? `<a href="${artifactUrl(targetId, state.id, "dom.html")}" target="_blank" rel="noopener">DOM</a>` : ""}
+          ${fileSet.has(harPath) ? `<a href="${artifactUrl(targetId, state.id, "snapshot.har")}" target="_blank" rel="noopener">HAR</a>` : ""}
+        </div>
+      </div>
+    </div>`;
+}
+
+function buildEvidenceAccordion(evidence) {
+  const groups = {};
+  evidence.forEach((e) => {
+    const layer = e.layer || "?";
+    (groups[layer] = groups[layer] || []).push(e);
+  });
+
+  const layers = Object.keys(groups).sort((a, b) => {
+    const ia = LAYER_ORDER.indexOf(a);
+    const ib = LAYER_ORDER.indexOf(b);
+    if (ia === -1 && ib === -1) return a.localeCompare(b);
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+
+  return layers
+    .map((layer) => {
+      const rows = groups[layer]
+        .map(
+          (e) => `
+        <tr>
+          <td class="key">${escapeHtml(e.key)}</td>
+          <td class="val">${escapeHtml(truncateMiddle(String(e.value), 300))}</td>
+          <td><span class="weight-chip ${weightChipClass(e.weight)}">${Number(e.weight).toFixed(2)}</span></td>
+          <td class="by">${escapeHtml(e.produced_by)}</td>
+        </tr>`
+        )
+        .join("");
+      return `
+      <details class="evidence-layer">
+        <summary>
+          <span><span class="layer-tag">${escapeHtml(layer)}</span>${groups[layer].length} evidenz${groups[layer].length === 1 ? "a" : "e"}</span>
+          <svg class="chev" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 6 6 6-6 6"></path></svg>
+        </summary>
+        <table class="evidence-table">
+          <thead><tr><th>Chiave</th><th>Valore</th><th>Peso</th><th>Prodotta da</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </details>`;
+    })
+    .join("");
+}
+
+// --------------------------------------------------------------- graph svg
+
+function buildGraphSvg(states, transitions) {
+  const byDepth = {};
+  states.forEach((s) => { (byDepth[s.depth] = byDepth[s.depth] || []).push(s); });
+  const depths = Object.keys(byDepth).map(Number).sort((a, b) => a - b);
+
+  const colX = 130;
+  const rowY = 70;
+  const marginX = 50;
+  const marginY = 40;
+  const pos = {};
+
+  let maxRows = 1;
+  depths.forEach((d) => {
+    const col = byDepth[d];
+    maxRows = Math.max(maxRows, col.length);
+    col.forEach((s, i) => {
+      pos[s.id] = {
+        x: marginX + d * colX,
+        y: marginY + i * rowY,
+      };
+    });
+  });
+
+  const width = marginX * 2 + Math.max(depths.length - 1, 0) * colX + 40;
+  const height = marginY * 2 + (maxRows - 1) * rowY + 40;
+
+  const outgoing = new Set(transitions.map((t) => t.from_state));
+
+  const edgesSvg = transitions
+    .map((t) => {
+      const a = pos[t.from_state];
+      const b = pos[t.to_state];
+      if (!a || !b) return "";
+      const midX = (a.x + b.x) / 2;
+      const midY = (a.y + b.y) / 2;
+      const label = TRANSITION_LABELS[t.kind] || t.kind;
+      // Curva morbida se i nodi sono su righe diverse nella stessa colonna
+      const path = `M ${a.x} ${a.y} C ${midX} ${a.y}, ${midX} ${b.y}, ${b.x} ${b.y}`;
+      return `<path class="graph-edge" d="${path}"><title>${escapeHtml(t.kind)}</title></path>
+              <text class="graph-edge-label" x="${midX}" y="${midY - 4}" text-anchor="middle">${escapeHtml(label)}</text>`;
+    })
+    .join("");
+
+  const nodesSvg = states
+    .map((s) => {
+      const p = pos[s.id];
+      if (!p) return "";
+      const isLeaf = !outgoing.has(s.id);
+      return `
+        <g class="graph-node${isLeaf ? " leaf" : ""}" data-id="${escapeHtml(s.id)}" transform="translate(${p.x},${p.y})">
+          <title>${escapeHtml(s.url)}</title>
+          <circle r="7"></circle>
+          <text x="12" y="4">${escapeHtml(truncateMiddle(s.url.replace(/^https?:\/\//, ""), 22))}</text>
+        </g>`;
+    })
+    .join("");
+
+  return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">${edgesSvg}${nodesSvg}</svg>`;
+}
+
+function wireDetail(targetId, graph) {
+  document.getElementById("back-link")?.addEventListener("click", () => navigate("#/"));
+
+  root.querySelectorAll(".state-thumb img").forEach((img) => {
+    img.addEventListener("click", () => openLightbox(img.dataset.full));
+  });
+
+  root.querySelectorAll(".graph-node").forEach((node) => {
+    node.addEventListener("click", () => {
+      const card = document.getElementById(`state-card-${node.dataset.id}`);
+      if (!card) return;
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      card.style.transition = "box-shadow 0.2s";
+      card.style.boxShadow = "0 0 0 2px var(--accent)";
+      setTimeout(() => { card.style.boxShadow = ""; }, 1200);
+    });
+  });
+}
+
+// ------------------------------------------------------------------ start
+
+render();

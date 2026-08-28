@@ -171,6 +171,37 @@ class HistoryResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Response — GET /analyses (listing di tutte le sottomissioni)
+# ---------------------------------------------------------------------------
+
+
+class AnalysisListEntry(BaseModel):
+    """Riga della lista sottomissioni — stesso formato di ``HistoryEntry``."""
+
+    id: str
+    input_url: str
+    final_url: Optional[str] = None
+    status: Optional[str] = None
+    created_at: Optional[datetime] = None
+    classification: Optional[str] = None
+    confidence: Optional[float] = None
+    brand: Optional[str] = None
+    kit_family: Optional[str] = None
+    rationale: Optional[str] = None
+    num_states: int = 0
+    num_transitions: int = 0
+
+
+class AnalysisListResponse(BaseModel):
+    """Risposta paginata di GET /analyses — usata dalla dashboard."""
+
+    total: int
+    limit: int
+    offset: int
+    items: list[AnalysisListEntry]
+
+
+# ---------------------------------------------------------------------------
 # Response — GET /health
 # ---------------------------------------------------------------------------
 

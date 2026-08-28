@@ -56,6 +56,27 @@ python -m graph_engine.cli <url> --history <url>   # solo storico, nessuna nuova
 uvicorn graph_engine.api.app:app --reload
 ```
 
+## Dashboard di monitoraggio
+
+Una dashboard web mostra tutte le sottomissioni effettuate e, cliccandoci
+sopra, tutti i dettagli estratti — grafo di esplorazione, stati con
+screenshot, evidenze per livello, verdetto. È servita dalla stessa app
+FastAPI dell'API (nessun servizio separato): con l'API già avviata,
+apri `http://localhost:8000/dashboard`.
+
+## Docker
+
+```bash
+docker compose up --build
+```
+
+Avvia in un solo container API + dashboard su `http://localhost:8000`
+(dashboard su `/dashboard`). I dati (`data/`: DB SQLite, screenshot/DOM/HAR,
+cache OSINT) sono montati come volume e sopravvivono ai riavvii. Per
+abilitare `--classify` (Foundry) o l'arricchimento Vision, copia
+`.env.example` in `.env`, valorizzalo e decommenta `env_file` in
+`docker-compose.yml`.
+
 I dettagli di ogni livello, gli schemi dati e le decisioni tecniche sono
 documentati in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 

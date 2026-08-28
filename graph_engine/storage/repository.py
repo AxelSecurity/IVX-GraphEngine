@@ -376,6 +376,107 @@ async def get_history_for_url_hash(
     return [dict(r) for r in rows]
 
 
+async def list_targets(
+    limit: int = 50,
+    offset: int = 0,
+    status: str | None = None,
+    classification: str | None = None,
+    search: str | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> list[dict]:
+    """Elenca le sottomissioni (analysis_target), più recenti prima.
+
+    Pensata per la dashboard: ogni riga è un summary compatto (stesso
+    formato di :func:`get_history_for_url_hash`, ma su TUTTE le
+    sottomissioni invece che su un singolo ``url_hash``). Filtri opzionali
+    e combinabili:
+
+    - ``status``: match esatto su ``analysis_target.status``.
+    - ``classification``: match esatto sul ``verdict.classification``.
+    - ``search``: sottostringa case-insensitive su ``input_url`` o
+      ``final_url``.
+    """
+    ensure_data_dir(db_path)
+
+    clauses: list[str] = []
+    params: list = []
+    if status is not None:
+        clauses.append("at.status = ?")
+        params.append(status)
+    if classification is not None:
+        clauses.append("v.classification = ?")
+        params.append(classification)
+    if search is not None:
+        clauses.append("(at.input_url LIKE ? OR at.final_url LIKE ?)")
+        like = f"%{search}%"
+        params.extend([like, like])
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await conn.executescript(DDL)
+        conn.row_factory = aiosqlite.Row
+
+        async with conn.execute(
+            f"""SELECT at.id, at.input_url, at.final_url, at.status,
+                       at.created_at,
+                       v.classification, v.confidence, v.brand, v.kit_family,
+                       v.rationale,
+                       (SELECT COUNT(*) FROM state WHERE target_id = at.id) AS num_states,
+                       (SELECT COUNT(*) FROM transition WHERE target_id = at.id) AS num_transitions
+                FROM analysis_target at
+                LEFT JOIN verdict v ON v.target_id = at.id
+                {where}
+                ORDER BY at.created_at DESC
+                LIMIT ? OFFSET ?""",
+            (*params, limit, offset),
+        ) as cur:
+            rows = await cur.fetchall()
+
+    return [dict(r) for r in rows]
+
+
+async def count_targets(
+    status: str | None = None,
+    classification: str | None = None,
+    search: str | None = None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> int:
+    """Conta le sottomissioni che soddisfano gli stessi filtri di :func:`list_targets`.
+
+    Usato dalla dashboard per la paginazione (``total``).
+    """
+    ensure_data_dir(db_path)
+
+    clauses: list[str] = []
+    params: list = []
+    if status is not None:
+        clauses.append("at.status = ?")
+        params.append(status)
+    if classification is not None:
+        clauses.append("v.classification = ?")
+        params.append(classification)
+    if search is not None:
+        clauses.append("(at.input_url LIKE ? OR at.final_url LIKE ?)")
+        like = f"%{search}%"
+        params.extend([like, like])
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await conn.executescript(DDL)
+
+        async with conn.execute(
+            f"""SELECT COUNT(*) FROM analysis_target at
+                LEFT JOIN verdict v ON v.target_id = at.id
+                {where}""",
+            params,
+        ) as cur:
+            row = await cur.fetchone()
+
+    return row[0] if row else 0
+
+
 async def get_latest_for_url_hash(
     url_hash: str,
     db_path: str = DEFAULT_DB_PATH,

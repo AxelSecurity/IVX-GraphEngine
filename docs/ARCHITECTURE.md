@@ -635,6 +635,7 @@ graph_engine/api/
     allowlist.py         — tabella allowlist/blacklist con matching eTLD+1
     trellix_verdict.py   — mapping binario + signature + response builder
     routes_trellix.py    — GET /trellix/analyze (wrapper sincrono Trellix)
+    static/dashboard/    — dashboard di monitoraggio (HTML/CSS/JS statici, montata su /dashboard)
 ```
 
 ### Test
@@ -810,6 +811,52 @@ I test del wrapper sono in `tests/graph_engine/test_trellix/`:
   `run_full_analysis`, timeout fire-and-continue (il task completa DOPO la
   risposta e il risultato è su SQLite), URL doppio-encodato
 - `test_auth.py` — token richiesto quando configurato, assente altrimenti
+
+## Dashboard di monitoraggio
+
+Frontend statico (HTML/CSS/JS puri, nessuna build, nessuna dipendenza
+esterna a runtime) sotto `graph_engine/api/static/dashboard/`, montato
+come `StaticFiles` da `graph_engine/api/app.py` su `/dashboard`. `GET /`
+fa redirect a `/dashboard/`. Consuma esclusivamente le API REST già
+esposte da `routes.py` — nessuna via d'accesso privilegiata al DB o al
+filesystem.
+
+### Nuovi endpoint a supporto della dashboard
+
+| Metodo | Path | Descrizione |
+|---|---|---|
+| `GET` | `/analyses` | Elenco paginato di tutte le sottomissioni (più recenti prima); filtri opzionali `status`, `classification`, `q` (sottostringa su `input_url`/`final_url`) |
+| `GET` | `/analyses/{id}/artifacts/{state_id}/{filename}` | Contenuto grezzo di un artefatto di stato (`screenshot.png`, `dom.html`, `snapshot.har`) — serve gli screenshot inline nella dashboard |
+
+`list_targets()` / `count_targets()` (`graph_engine/storage/repository.py`)
+implementano il listing filtrato+paginato; stesso formato riga di
+`get_history_for_url_hash()`, ma su tutte le sottomissioni invece che su
+un singolo `url_hash`.
+
+**Sicurezza del file serving**: `filename` in `get_artifact_file()` è
+vincolato a una whitelist fissa (`_ARTIFACT_MEDIA_TYPES` in `routes.py`) —
+i soli tre file che `StateGraphExplorer._save_artifacts()` scrive.
+Combinato con FastAPI, che non fa passare `/` in un segmento di path privo
+del convertitore `:path`, questo esclude path traversal per costruzione,
+senza bisogno di risolvere/validare manualmente il path risultante.
+
+### Viste
+
+- **Elenco sottomissioni** (`#/`): tabella con URL, stato, classificazione,
+  conteggio stati/transizioni, data; ricerca testuale (debounced) e filtri
+  per stato/classificazione; paginazione; auto-refresh leggero (15s,
+  sospeso mentre si digita nella ricerca).
+- **Dettaglio sottomissione** (`#/analyses/<id>`): verdetto (classificazione,
+  confidenza, brand, kit_family, motivazione), grafo di esplorazione
+  renderizzato come SVG (nodi posizionati per profondità, archi etichettati
+  col tipo di transizione, click su un nodo scrolla alla card corrispondente),
+  card per ogni stato con screenshot (click → lightbox a piena dimensione),
+  link a DOM/HAR grezzi, ed evidenze raggruppate per layer (L0..L5/API) in
+  pannelli espandibili con colore del peso. Se l'analisi è ancora
+  `queued`/`running`, la vista fa polling (6s) finché non si conclude.
+
+Nessuna autenticazione — stessa scelta architetturale dell'API REST
+(vedi § API HTTP, "Limitazioni"): pensata per uso interno.
 
 ## Configurazione
 

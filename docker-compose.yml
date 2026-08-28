@@ -1,0 +1,17 @@
+# Avvio: docker compose up --build
+# Tool + API + dashboard di monitoraggio sono lo stesso servizio, sulla
+# stessa porta: http://localhost:8000/dashboard
+#
+# Per abilitare --classify (Foundry) / arricchimento Vision / provider L2
+# extra: copia .env.example in .env, valorizzalo, e decommenta "env_file".
+
+services:
+  graph-engine:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    # env_file:
+    #   - .env
+    restart: unless-stopped

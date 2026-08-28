@@ -15,11 +15,18 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from graph_engine.api.pipeline_runner import DEFAULT_ARTIFACT_ROOT
 from graph_engine.api.routes import build_router
 from graph_engine.api.routes_trellix import build_trellix_router
 from graph_engine.storage.schema import DEFAULT_DB_PATH
+
+# Dashboard statica (HTML/CSS/JS puri, nessuna build): consuma le stesse
+# API REST sotto /analyses. Montata a parte da /dashboard, mai sulla radice
+# "/", cosi le route API restano indipendenti dall'ordine di registrazione.
+_DASHBOARD_DIR = Path(__file__).parent / "static" / "dashboard"
 
 
 def create_app(
@@ -42,6 +49,18 @@ def create_app(
     app.include_router(
         build_trellix_router(db_path=db_path)
     )
+
+    @app.get("/", include_in_schema=False)
+    async def _root():
+        return RedirectResponse(url="/dashboard/")
+
+    if _DASHBOARD_DIR.is_dir():
+        app.mount(
+            "/dashboard",
+            StaticFiles(directory=_DASHBOARD_DIR, html=True),
+            name="dashboard",
+        )
+
     return app
 
 
