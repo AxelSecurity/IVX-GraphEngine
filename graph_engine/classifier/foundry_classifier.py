@@ -81,17 +81,20 @@ async def classify(bundle: dict) -> Verdict:
             "heuristic verdict",
             exc,
         )
-        return _heuristic_fallback(bundle)
+        return _heuristic_fallback(bundle, reason="Foundry unavailable")
     except Exception as exc:
+        # Qui Foundry è RAGGIUNGIBILE ma il run è fallito (es.
+        # RunStatus.FAILED): rationale distinta dal caso "unavailable" —
+        # il servizio c'era, il verdetto del modello non è arrivato.
         logger.error("Foundry call failed: %s", exc, exc_info=True)
-        return _heuristic_fallback(bundle)
+        return _heuristic_fallback(bundle, reason="Foundry run failed")
 
     # Parse and validate the agent response
     try:
         data = json.loads(raw_json)
     except json.JSONDecodeError:
         logger.warning("Foundry returned invalid JSON — falling back")
-        return _heuristic_fallback(bundle)
+        return _heuristic_fallback(bundle, reason="Foundry returned invalid JSON")
 
     # Coerce classification string to enum
     classification_str = data.get("classification", "suspicious")
@@ -234,7 +237,15 @@ def _call_foundry_agent_sync(prompt: str) -> str:
         )
 
         if run.status not in ("completed", "requires_action"):
-            logger.warning("Foundry run ended with status: %s", run.status)
+            # last_error (es. content filter, modello non disponibile,
+            # rate limit) è l'unica traccia del PERCHÉ — senza questo
+            # log un FAILED resta muto (bug diagnosticato 2026-08-28).
+            last_error = getattr(run, "last_error", None)
+            logger.warning(
+                "Foundry run ended with status: %s (last_error=%s)",
+                run.status,
+                last_error,
+            )
             raise RuntimeError(f"Agent run failed: {run.status}")
 
         # Collect the agent's text response.  Current SDK returns an
@@ -287,17 +298,49 @@ def _call_foundry_agent_sync(prompt: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _heuristic_fallback(bundle: dict) -> Verdict:
+def _heuristic_fallback(bundle: dict, reason: str = "Foundry unavailable") -> Verdict:
     """Deterministic, conservative verdict for when the model is unreachable.
 
     This is intentionally pessimistic — it errs toward "suspicious" with
-    low confidence rather than guessing.
+    low confidence rather than guessing.  HOWEVER: strong deterministic
+    signals already collected in L1/L3 (cloaking, abuse-prone
+    infrastructure) must NOT be discarded as "insufficient signals" —
+    a failed model run does not erase what the probes measured.  The
+    rationale always states WHY the model verdict is missing
+    (``reason``: unavailable / run failed / invalid JSON).
     """
     flags = bundle.get("flags", {})
     graph_states = bundle.get("states", [])
     total_fields = sum(
         len(st.get("form_fields", [])) for st in graph_states
     )
+    evidence_summary = bundle.get("evidence_summary", {})
+
+    has_cloaking = evidence_summary.get("cloaking_detected", 0) > 0
+    has_abuse_prone = evidence_summary.get("abuse_prone_infra", 0) > 0
+
+    # Strong deterministic signals (L3 cloaking + L1 abuse-prone infra):
+    # these survive a failed model run — the probes measured them, the
+    # verdict just did not arrive.
+    if has_cloaking or has_abuse_prone:
+        signals: list[str] = []
+        if has_cloaking:
+            signals.append("cloaking detected (divergent profiles)")
+        if has_abuse_prone:
+            signals.append("abuse-prone infrastructure")
+        confidence = 0.6 if len(signals) == 2 else 0.4
+        return Verdict(
+            target_id=bundle.get("target_id", ""),
+            classification=Classification.suspicious,
+            confidence=confidence,
+            produced_by="heuristic_fallback",
+            rationale=(
+                f"Heuristic fallback ({reason}): strong deterministic "
+                f"signals — {', '.join(signals)}.  The model verdict "
+                "could not be produced; these measured signals stand on "
+                "their own and are not a sparse-data case."
+            ),
+        )
 
     # If nothing was collected (1 state, no fields, no errors), data is sparse
     if bundle.get("num_states", 0) <= 1 and total_fields == 0:
@@ -307,7 +350,7 @@ def _heuristic_fallback(bundle: dict) -> Verdict:
             confidence=0.1,
             produced_by="heuristic_fallback",
             rationale=(
-                "Heuristic fallback (Foundry unavailable): single state with "
+                f"Heuristic fallback ({reason}): single state with "
                 "no visible form fields — insufficient data for classification."
             ),
         )
@@ -320,7 +363,7 @@ def _heuristic_fallback(bundle: dict) -> Verdict:
             confidence=0.2,
             produced_by="heuristic_fallback",
             rationale=(
-                "Heuristic fallback (Foundry unavailable): multiple states with "
+                f"Heuristic fallback ({reason}): multiple states with "
                 f"form fields ({total_fields} total) detected — cannot exclude "
                 "phishing without model analysis."
             ),
@@ -332,7 +375,7 @@ def _heuristic_fallback(bundle: dict) -> Verdict:
         confidence=0.15,
         produced_by="heuristic_fallback",
         rationale=(
-            "Heuristic fallback (Foundry unavailable): insufficient signals "
+            f"Heuristic fallback ({reason}): insufficient signals "
             "for automated classification."
         ),
     )

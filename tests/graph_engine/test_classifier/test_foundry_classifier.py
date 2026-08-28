@@ -430,6 +430,49 @@ class TestHeuristicFallback:
         assert verdict.produced_by == "heuristic_fallback"
         assert verdict.confidence <= 0.3
 
+    def test_cloaking_and_abuse_prone_raise_confidence(self):
+        """Segnali forti L1/L3 (cloaking + infrastruttura abusata) NON
+        devono essere riportati come 'insufficient signals': la confidenza
+        sale a 0.6 anche se il verdetto del modello non è arrivato."""
+        bundle = {
+            "target_id": str(uuid.uuid4()),
+            "num_states": 8,
+            "states": [{"form_fields": []}],
+            "evidence_summary": {
+                "cloaking_detected": 1,
+                "abuse_prone_infra": 1,
+            },
+        }
+        verdict = _heuristic_fallback(bundle)
+        assert verdict.classification == Classification.suspicious
+        assert verdict.produced_by == "heuristic_fallback"
+        assert verdict.confidence == 0.6
+        assert "cloaking" in (verdict.rationale or "").lower()
+        assert "insufficient signals" not in (verdict.rationale or "")
+
+    def test_cloaking_only_confidence_04(self):
+        """Solo cloaking → 0.4 (segnale forte singolo)."""
+        bundle = {
+            "target_id": str(uuid.uuid4()),
+            "num_states": 8,
+            "states": [{"form_fields": []}],
+            "evidence_summary": {"cloaking_detected": 1},
+        }
+        verdict = _heuristic_fallback(bundle)
+        assert verdict.confidence == 0.4
+
+    def test_reason_reflected_in_rationale(self):
+        """La rationale deve dichiarare PERCHÉ il verdetto modello manca:
+        'Foundry run failed' ≠ 'Foundry unavailable'."""
+        bundle = {
+            "target_id": str(uuid.uuid4()),
+            "num_states": 1,
+            "states": [{"form_fields": []}],
+        }
+        verdict = _heuristic_fallback(bundle, reason="Foundry run failed")
+        assert "Foundry run failed" in (verdict.rationale or "")
+        assert "Foundry unavailable" not in (verdict.rationale or "")
+
 
 # ---------------------------------------------------------------------------
 # Tests — _call_foundry_agent raises when not configured
@@ -456,6 +499,62 @@ class TestFoundryNotConfigured:
         monkeypatch.setattr(settings, "azure_foundry_agent_id", None)
         with pytest.raises(_FoundryNotConfigured):
             await _call_foundry_agent("prompt")
+
+
+# ---------------------------------------------------------------------------
+# Tests — Foundry run FAILED (raggiungibile ma il run fallisce)
+# ---------------------------------------------------------------------------
+
+
+class TestFoundryRunFailed:
+    """Il run Foundry può fallire con Foundry RAGGIUNGIBILE (es.
+    RunStatus.FAILED): la rationale del fallback deve distinguere questo
+    caso da 'unavailable', e last_error deve finire nel log."""
+
+    @pytest.mark.asyncio
+    async def test_failed_run_falls_back_with_distinct_rationale(
+        self, monkeypatch, caplog
+    ):
+        """Run FAILED → fallback euristico con rationale 'Foundry run
+        failed' e last_error loggato (mai un FAILED muto)."""
+        monkeypatch.setattr(
+            settings,
+            "azure_foundry_endpoint",
+            "https://fake-foundry.openai.azure.com",
+        )
+        monkeypatch.setattr(settings, "azure_foundry_agent_id", "fake-agent-id")
+
+        class _FailingRuns:
+            def create_and_process(self, thread_id, agent_id, instructions):
+                return SimpleNamespace(
+                    status="failed",
+                    last_error="Mock content-filter rejection",
+                )
+
+        fake_agents = _FakeAgentsClient()
+        fake_agents.runs = _FailingRuns()
+
+        class _FakeClient:
+            def __init__(self, endpoint, credential):
+                self.threads = fake_agents.threads
+                self.messages = fake_agents.messages
+                self.runs = fake_agents.runs
+
+        saved, _ = _register_fake_azure_modules(_FakeClient)
+        try:
+            with caplog.at_level("WARNING", logger="graph_engine.classifier"):
+                verdict = await classify(_sample_bundle())
+        finally:
+            _unregister_fake_azure_modules(saved)
+
+        assert verdict.produced_by == "heuristic_fallback"
+        assert "Foundry run failed" in (verdict.rationale or "")
+        assert "Foundry unavailable" not in (verdict.rationale or "")
+        # Il motivo del FAILED deve essere loggato
+        assert any(
+            "last_error=Mock content-filter rejection" in rec.message
+            for rec in caplog.records
+        )
 
 
 # ---------------------------------------------------------------------------
