@@ -218,7 +218,7 @@ select { cursor: pointer; }
 
 .sub-row {
   display: grid;
-  grid-template-columns: 1.15fr 130px 150px 120px 150px 18px;
+  grid-template-columns: 32px 1.15fr 130px 150px 120px 150px 18px;
   align-items: center;
   gap: 14px;
   padding: 14px 18px;
@@ -229,6 +229,19 @@ select { cursor: pointer; }
   transition: background 0.15s, border-color 0.15s, transform 0.1s;
 }
 .sub-row:hover { background: var(--bg-card-hover); border-color: #313b52; transform: translateY(-1px); }
+.sub-row.selected {
+  background: var(--bg-card-hover);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-soft);
+}
+
+.row-check {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
 
 .sub-url {
   display: flex;
@@ -533,12 +546,150 @@ select { cursor: pointer; }
   font-size: 16px;
 }
 
+/* ------------------------------------------------------------- selection */
+
+.list-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+}
+
+.check-all-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.check-all-label input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.selection-count {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto; /* spinge il bottone Elimina a destra */
+}
+
+.btn-danger {
+  background: var(--phishing-soft);
+  border: 1px solid rgba(251, 88, 120, 0.45);
+  color: var(--phishing);
+  border-radius: var(--radius-sm);
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+.btn-danger:not(:disabled):hover { background: rgba(251, 88, 120, 0.24); border-color: var(--phishing); }
+.btn-danger:disabled { opacity: 0.4; cursor: default; }
+
+/* ------------------------------------------------------------ list notice */
+
+.list-notice {
+  margin-bottom: 14px;
+  padding: 11px 14px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  border: 1px solid;
+}
+.list-notice.success { color: var(--benign); background: var(--benign-soft); border-color: rgba(52, 211, 153, 0.35); }
+.list-notice.error { color: var(--phishing); background: var(--phishing-soft); border-color: rgba(251, 88, 120, 0.35); }
+
+/* ------------------------------------------------------------------ modal */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 7, 12, 0.72);
+  backdrop-filter: blur(4px);
+  display: grid;
+  place-items: center;
+  z-index: 90;
+  padding: 24px;
+}
+.modal-overlay.hidden { display: none; }
+
+.modal {
+  width: 100%;
+  max-width: 460px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  padding: 24px;
+}
+
+.modal-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--phishing);
+  margin-bottom: 14px;
+}
+
+.modal-body {
+  font-size: 13.5px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+.modal-body b { color: var(--text); }
+.modal-body .irreversible {
+  display: block;
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: var(--phishing-soft);
+  border: 1px solid rgba(251, 88, 120, 0.35);
+  border-radius: var(--radius-sm);
+  color: var(--phishing);
+  font-weight: 600;
+  font-size: 12.5px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.btn-ghost {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 9px 16px;
+  font-size: 13px;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.btn-ghost:hover { border-color: var(--accent); }
+
 /* ------------------------------------------------------------------ misc */
 
 .hidden { display: none !important; }
 
 @media (max-width: 760px) {
-  .sub-row { grid-template-columns: 1fr auto; grid-template-areas: "url chev" "meta meta"; row-gap: 8px; }
+  .sub-row { grid-template-columns: auto 1fr auto; grid-template-areas: "check url chev" "meta meta meta"; row-gap: 8px; }
+  .sub-row .row-check { grid-area: check; align-self: center; }
   .sub-row .sub-url { grid-area: url; }
   .chev { grid-area: chev; }
   .sub-row > .badge, .sub-row > .sub-counts, .sub-row > .sub-date { grid-area: meta; }

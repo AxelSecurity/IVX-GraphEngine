@@ -477,6 +477,62 @@ async def count_targets(
     return row[0] if row else 0
 
 
+async def delete_targets(
+    target_ids: list[str],
+    db_path: str = DEFAULT_DB_PATH,
+) -> dict:
+    """Elimina definitivamente uno o più target (``analysis_target``).
+
+    Unica transazione: PRIMA legge quali ID esistono davvero, poi elimina
+    solo quelli.  La cascata SQLite (``ON DELETE CASCADE``, attiva via
+    ``PRAGMA foreign_keys = ON``) ripulisce state, transition, evidence e
+    verdict associati.
+
+    Ritorna ``{"deleted_count": N, "not_found": [...]}`` — ``not_found``
+    contiene gli ID richiesti che non esistono (mai creati o già
+    eliminati).  Gli ID duplicati in input vengono contati una sola
+    volta.  Una lista vuota non tocca nulla e ritorna
+    ``{"deleted_count": 0, "not_found": []}`` (il rifiuto esplicito
+    della lista vuota è compito della route API).
+    """
+    ensure_data_dir(db_path)
+
+    # Dedup preservando l'ordine di richiesta
+    requested = list(dict.fromkeys(str(i) for i in target_ids))
+    if not requested:
+        return {"deleted_count": 0, "not_found": []}
+
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await conn.executescript(DDL)
+
+        await conn.execute("BEGIN")
+        try:
+            # PRIMA del delete: quali ID esistono davvero?
+            existing: set[str] = set()
+            for tid in requested:
+                async with conn.execute(
+                    "SELECT 1 FROM analysis_target WHERE id = ?", (tid,)
+                ) as cur:
+                    if await cur.fetchone() is not None:
+                        existing.add(tid)
+
+            if existing:
+                placeholders = ",".join("?" for _ in existing)
+                await conn.execute(
+                    f"DELETE FROM analysis_target WHERE id IN ({placeholders})",
+                    tuple(existing),
+                )
+
+            await conn.commit()
+        except Exception:
+            await conn.rollback()
+            raise
+
+    not_found = [tid for tid in requested if tid not in existing]
+    return {"deleted_count": len(existing), "not_found": not_found}
+
+
 async def get_latest_for_url_hash(
     url_hash: str,
     db_path: str = DEFAULT_DB_PATH,

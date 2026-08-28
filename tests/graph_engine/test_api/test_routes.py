@@ -366,3 +366,113 @@ class TestRoutes:
                 "/analyses/00000000-0000-0000-0000-000000000000/artifacts/s1/screenshot.png"
             )
             assert res.status_code == 404
+
+
+class TestDeleteAnalysesEndpoint:
+    """POST /analyses/delete — eliminazione definitiva dalla dashboard."""
+
+    # ------------------------------------------------------------------
+    # POST /analyses/delete
+    # ------------------------------------------------------------------
+
+    async def test_delete_success(self, app, client, tmp_path):
+        """Elimina un target: 200, deleted_count=1, il target sparisce, gli altri restano."""
+        db = str(tmp_path / "test.db")
+        t1 = AnalysisTarget(
+            input_url="https://del.example.com", status=TargetStatus.done,
+        )
+        t2 = AnalysisTarget(
+            input_url="https://keep.example.com", status=TargetStatus.done,
+        )
+        await save_target(t1, [], [], [], None, db_path=db)
+        await save_target(t2, [], [], [], None, db_path=db)
+
+        res = await client.post("/analyses/delete", json={"ids": [str(t1.id)]})
+
+        assert res.status_code == 200
+        assert res.json() == {"deleted_count": 1, "not_found": []}
+        # Il target eliminato non esiste più; l'altro sopravvive
+        assert (await client.get(f"/analyses/{t1.id}")).status_code == 404
+        assert (await client.get(f"/analyses/{t2.id}")).status_code == 200
+
+    async def test_delete_empty_list_returns_400(self, app, client, tmp_path):
+        """Lista vuota → 400 e nessuna eliminazione di massa."""
+        db = str(tmp_path / "test.db")
+        t1 = AnalysisTarget(
+            input_url="https://keep1.example.com", status=TargetStatus.done,
+        )
+        t2 = AnalysisTarget(
+            input_url="https://keep2.example.com", status=TargetStatus.done,
+        )
+        await save_target(t1, [], [], [], None, db_path=db)
+        await save_target(t2, [], [], [], None, db_path=db)
+
+        res = await client.post("/analyses/delete", json={"ids": []})
+
+        assert res.status_code == 400
+        # Nessun target è stato toccato
+        res2 = await client.get("/analyses")
+        assert res2.status_code == 200
+        assert res2.json()["total"] == 2
+
+    async def test_delete_mixed_ids(self, app, client, tmp_path):
+        """ID misti trovati/non-trovati: i validi vengono eliminati, il ghost in not_found."""
+        import uuid as _uuid
+
+        db = str(tmp_path / "test.db")
+        t1 = AnalysisTarget(
+            input_url="https://mix.example.com", status=TargetStatus.done,
+        )
+        await save_target(t1, [], [], [], None, db_path=db)
+        ghost = str(_uuid.uuid4())  # mai salvato
+
+        # Artefatti del ghost sul disco: NON devono essere toccati
+        # (pulizia solo per gli ID eliminati con successo)
+        ghost_dir = tmp_path / "artifacts" / ghost / "s1"
+        ghost_dir.mkdir(parents=True)
+        (ghost_dir / "screenshot.png").write_bytes(b"x")
+
+        res = await client.post(
+            "/analyses/delete", json={"ids": [ghost, str(t1.id)]}
+        )
+
+        assert res.status_code == 200
+        body = res.json()
+        assert body["deleted_count"] == 1
+        assert body["not_found"] == [ghost]
+        assert ghost_dir.exists()
+
+    async def test_delete_removes_artifact_dir(self, app, client, tmp_path):
+        """La cartella data/graph_artifacts/<id>/ sparisce dopo l'eliminazione riuscita."""
+        db = str(tmp_path / "test.db")
+        target = AnalysisTarget(
+            input_url="https://art.example.com", status=TargetStatus.done,
+        )
+        tid = str(target.id)
+        await save_target(target, [], [], [], None, db_path=db)
+
+        # La fixture app usa artifact_root = tmp_path / "artifacts"
+        state_dir = tmp_path / "artifacts" / tid / "s1"
+        state_dir.mkdir(parents=True)
+        (state_dir / "screenshot.png").write_bytes(b"fake png")
+
+        res = await client.post("/analyses/delete", json={"ids": [tid]})
+
+        assert res.status_code == 200
+        assert res.json() == {"deleted_count": 1, "not_found": []}
+        assert not (tmp_path / "artifacts" / tid).exists()
+
+    async def test_delete_missing_artifact_dir_not_an_error(self, app, client, tmp_path):
+        """Cartella artefatti assente (capture_artifacts=False) → 200, nessun errore."""
+        db = str(tmp_path / "test.db")
+        target = AnalysisTarget(
+            input_url="https://noart.example.com", status=TargetStatus.done,
+        )
+        tid = str(target.id)
+        await save_target(target, [], [], [], None, db_path=db)
+        # Nessuna cartella artefatti creata
+
+        res = await client.post("/analyses/delete", json={"ids": [tid]})
+
+        assert res.status_code == 200
+        assert res.json() == {"deleted_count": 1, "not_found": []}

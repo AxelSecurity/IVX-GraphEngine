@@ -16,8 +16,11 @@ import aiosqlite
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
+from graph_engine.api.artifact_cleanup import remove_artifact_dirs
 from graph_engine.api.pipeline_runner import DEFAULT_ARTIFACT_ROOT, run_full_analysis
 from graph_engine.api.schemas import (
+    AnalysesDeleteRequest,
+    AnalysesDeleteResponse,
     AnalysisCreateRequest,
     AnalysisCreatedResponse,
     AnalysisGraphResponse,
@@ -36,6 +39,7 @@ from graph_engine.budget import Budget
 from graph_engine.models import AnalysisTarget, TargetStatus
 from graph_engine.storage.repository import (
     count_targets,
+    delete_targets,
     get_history_for_url_hash,
     get_target_by_id,
     list_targets,
@@ -207,6 +211,46 @@ def build_router(
             limit=limit,
             offset=offset,
             items=[AnalysisListEntry(**r) for r in rows],
+        )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # POST /analyses/delete — eliminazione definitiva (dashboard)
+    # DEVE essere prima di /analyses/{target_id}: "delete" non va mai
+    # catturato come target_id da una route parametrizzata.
+    # ──────────────────────────────────────────────────────────────────────
+
+    @router.post(
+        "/analyses/delete",
+        response_model=AnalysesDeleteResponse,
+    )
+    async def delete_analyses(payload: AnalysesDeleteRequest):
+        """Elimina definitivamente una o più sottomissioni.
+
+        Prima cancella le righe da SQLite (transazione unica — la cascata
+        ripulisce state/transition/evidence/verdict), POI rimuove le
+        cartelle artefatto dei soli ID eliminati con successo.  L'ordine
+        è voluto: se la cancellazione DB fallisse, gli artefatti restano
+        intatti.  Una lista ``ids`` vuota → 400: nessuna eliminazione
+        silenziosa "di tutto per errore".
+        """
+        if not payload.ids:
+            raise HTTPException(
+                status_code=400,
+                detail="La lista 'ids' è vuota: nessuna eliminazione eseguita",
+            )
+
+        result = await delete_targets(payload.ids, db_path=db_path)
+
+        # Pulizia artefatti SOLO per gli ID eliminati con successo,
+        # DOPO il commit di SQLite (mai prima).
+        not_found = set(result["not_found"])
+        deleted_ids = [tid for tid in dict.fromkeys(payload.ids) if tid not in not_found]
+        if deleted_ids:
+            remove_artifact_dirs(deleted_ids, artifact_root)
+
+        return AnalysesDeleteResponse(
+            deleted_count=result["deleted_count"],
+            not_found=result["not_found"],
         )
 
     # ──────────────────────────────────────────────────────────────────────

@@ -142,7 +142,10 @@ lightbox.addEventListener("click", (e) => {
   if (e.target === lightbox) closeLightbox();
 });
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeLightbox();
+  if (e.key === "Escape") {
+    closeLightbox();
+    closeDeleteDialog();
+  }
 });
 
 // -------------------------------------------------------------- health poll
@@ -169,6 +172,12 @@ setInterval(pollHealth, 12000);
 let listState = { limit: 20, offset: 0, status: "", classification: "", q: "" };
 let listPollTimer = null;
 let detailPollTimer = null;
+
+// Selezione multipla: limitata alla PAGINA CORRENTE (mai a tutto il DB).
+// Gli id selezionati sopravvivono ai re-render della stessa pagina
+// (auto-refresh), ma vengono azzerati a ogni cambio pagina o filtro.
+const selection = new Set();
+let listNoticeTimer = null;
 
 function stopPolling() {
   if (listPollTimer) { clearInterval(listPollTimer); listPollTimer = null; }
@@ -224,6 +233,15 @@ async function renderList() {
         <option value="phishing">Phishing</option>
       </select>
     </div>
+    <div class="list-actions">
+      <label class="check-all-label">
+        <input type="checkbox" id="check-all" />
+        <span>seleziona tutti in questa pagina</span>
+      </label>
+      <span class="selection-count" id="selection-count">0 selezionate</span>
+      <button class="btn-danger" id="delete-btn" disabled>Elimina</button>
+    </div>
+    <div class="list-notice hidden" id="list-notice"></div>
     <div class="sub-list" id="sub-list">${listSkeletonRows()}</div>
     <div class="pager" id="pager"></div>
   `;
@@ -234,6 +252,7 @@ async function renderList() {
   const onSearch = debounce((val) => {
     listState.q = val;
     listState.offset = 0;
+    clearSelection(); // la selezione vale solo per la pagina mostrata
     loadAndRenderListBody().catch(() => {});
   }, 300);
 
@@ -241,13 +260,19 @@ async function renderList() {
   document.getElementById("status-filter").addEventListener("change", (e) => {
     listState.status = e.target.value;
     listState.offset = 0;
+    clearSelection();
     loadAndRenderListBody().catch(() => {});
   });
   document.getElementById("cls-filter").addEventListener("change", (e) => {
     listState.classification = e.target.value;
     listState.offset = 0;
+    clearSelection();
     loadAndRenderListBody().catch(() => {});
   });
+  document.getElementById("check-all").addEventListener("click", () => {
+    toggleAllOnPage();
+  });
+  document.getElementById("delete-btn").addEventListener("click", openDeleteDialog);
 
   try {
     await loadAndRenderListBody();
@@ -281,14 +306,18 @@ async function loadAndRenderListBody() {
   if (data.items.length === 0) {
     listEl.innerHTML = `<div class="empty-state">Nessuna sottomissione trovata.</div>`;
     pagerEl.innerHTML = "";
+    pruneSelection();
+    syncSelectionUi();
     return;
   }
 
   listEl.innerHTML = data.items
     .map((it) => {
       const url = it.input_url || "";
+      const checked = selection.has(it.id);
       return `
-      <div class="sub-row" data-id="${escapeHtml(it.id)}">
+      <div class="sub-row ${checked ? "selected" : ""}" data-id="${escapeHtml(it.id)}">
+        <input type="checkbox" class="row-check" data-id="${escapeHtml(it.id)}" ${checked ? "checked" : ""} aria-label="Seleziona questa sottomissione" />
         <div class="sub-url">
           <span class="u" title="${escapeHtml(url)}">${escapeHtml(truncateMiddle(url, 70))}</span>
           <span class="h">${escapeHtml(it.id)}</span>
@@ -304,9 +333,23 @@ async function loadAndRenderListBody() {
     })
     .join("");
 
-  listEl.querySelectorAll(".sub-row").forEach((rowEl) => {
-    rowEl.addEventListener("click", () => navigate(`#/analyses/${rowEl.dataset.id}`));
+  listEl.querySelectorAll(".row-check").forEach((cb) => {
+    cb.addEventListener("click", (e) => {
+      // La checkbox non deve mai navigare al dettaglio
+      e.stopPropagation();
+      setSelected(cb.dataset.id, cb.checked);
+    });
   });
+
+  listEl.querySelectorAll(".sub-row").forEach((rowEl) => {
+    rowEl.addEventListener("click", (e) => {
+      if (e.target.closest(".row-check")) return;
+      navigate(`#/analyses/${rowEl.dataset.id}`);
+    });
+  });
+
+  pruneSelection();
+  syncSelectionUi();
 
   const total = data.total;
   const from = data.offset + 1;
@@ -318,13 +361,193 @@ async function loadAndRenderListBody() {
   `;
   document.getElementById("prev-page")?.addEventListener("click", () => {
     listState.offset = Math.max(0, listState.offset - listState.limit);
+    clearSelection(); // nuova pagina → selezione azzerata
     loadAndRenderListBody().catch(() => {});
   });
   document.getElementById("next-page")?.addEventListener("click", () => {
     listState.offset += listState.limit;
+    clearSelection();
     loadAndRenderListBody().catch(() => {});
   });
 }
+
+// ------------------------------------------------ selezione & eliminazione
+
+function setSelected(id, checked) {
+  if (checked) selection.add(id);
+  else selection.delete(id);
+  syncSelectionUi();
+}
+
+function clearSelection() {
+  selection.clear();
+  syncSelectionUi();
+}
+
+function toggleAllOnPage() {
+  const rowChecks = [...document.querySelectorAll("#sub-list .row-check")];
+  const allChecked =
+    rowChecks.length > 0 && rowChecks.every((cb) => selection.has(cb.dataset.id));
+  rowChecks.forEach((cb) => {
+    if (allChecked) selection.delete(cb.dataset.id);
+    else selection.add(cb.dataset.id);
+    cb.checked = !allChecked;
+  });
+  syncSelectionUi();
+}
+
+/** Rimuove dalla selezione gli id non più visibili nella pagina corrente
+ *  (es. righe sparite dopo un refresh): la selezione resta SEMPRE
+ *  limitata a ciò che è mostrato. */
+function pruneSelection() {
+  const visible = new Set(
+    [...document.querySelectorAll("#sub-list .row-check")].map((cb) => cb.dataset.id)
+  );
+  [...selection].forEach((id) => {
+    if (!visible.has(id)) selection.delete(id);
+  });
+}
+
+/** Allinea contatore, checkbox "seleziona tutti" e bottone Elimina. */
+function syncSelectionUi() {
+  const countEl = document.getElementById("selection-count");
+  const checkAll = document.getElementById("check-all");
+  const deleteBtn = document.getElementById("delete-btn");
+  if (!countEl || !checkAll || !deleteBtn) return;
+
+  const rowChecks = [...document.querySelectorAll("#sub-list .row-check")];
+  const total = rowChecks.length;
+  const n = rowChecks.filter((cb) => selection.has(cb.dataset.id)).length;
+
+  countEl.textContent = n === 1 ? "1 selezionata" : `${n} selezionate`;
+  deleteBtn.disabled = n === 0;
+  deleteBtn.textContent =
+    n === 0 ? "Elimina" : `Elimina ${n === 1 ? "sottomissione" : "sottomissioni"}`;
+
+  checkAll.checked = total > 0 && n === total;
+  checkAll.indeterminate = n > 0 && n < total;
+  checkAll.disabled = total === 0;
+
+  rowChecks.forEach((cb) => {
+    const row = cb.closest(".sub-row");
+    if (row) row.classList.toggle("selected", selection.has(cb.dataset.id));
+  });
+}
+
+/** Banner di esito (successo/errore) nella vista elenco — si
+ *  auto-nasconde dopo 8s. */
+function showListNotice(type, text) {
+  const el = document.getElementById("list-notice");
+  if (!el) return;
+  el.className = `list-notice ${type}`;
+  el.textContent = text;
+  clearTimeout(listNoticeTimer);
+  listNoticeTimer = setTimeout(() => {
+    el.className = "list-notice hidden";
+    el.textContent = "";
+  }, 8000);
+}
+
+// ------------------------------------------------ dialogo eliminazione
+
+// Il dialogo vive FUORI da #view-root (document.body): sopravvive ai
+// re-render delle viste e viene riutilizzato per tutta la sessione.
+const deleteDialog = document.createElement("div");
+deleteDialog.className = "modal-overlay hidden";
+deleteDialog.innerHTML = `
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
+    <div class="modal-title" id="delete-dialog-title">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+      </svg>
+      Eliminazione definitiva
+    </div>
+    <div class="modal-body" id="delete-dialog-body"></div>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="delete-cancel">Annulla</button>
+      <button class="btn-danger" id="delete-confirm">Elimina definitivamente</button>
+    </div>
+  </div>`;
+document.body.appendChild(deleteDialog);
+
+let pendingDeleteIds = [];
+let deleteBusy = false;
+
+function openDeleteDialog() {
+  if (selection.size === 0) return;
+  pendingDeleteIds = [...selection];
+  const n = pendingDeleteIds.length;
+  document.getElementById("delete-dialog-body").innerHTML =
+    `Stai per eliminare definitivamente <b>${n} sottomission${n === 1 ? "e" : "i"}</b>.` +
+    `<span class="irreversible">⚠ Azione IRREVERSIBILE — le righe verranno rimosse dal database e i relativi artefatti cancellati dal disco. Non sarà possibile recuperarli.</span>`;
+  deleteDialog.classList.remove("hidden");
+  document.getElementById("delete-confirm").focus();
+}
+
+function closeDeleteDialog() {
+  if (deleteBusy) return; // durante la POST il dialogo non si chiude
+  deleteDialog.classList.add("hidden");
+}
+
+function forceCloseDeleteDialog() {
+  deleteDialog.classList.add("hidden");
+}
+
+document.getElementById("delete-cancel").addEventListener("click", closeDeleteDialog);
+deleteDialog.addEventListener("click", (e) => {
+  if (e.target === deleteDialog) closeDeleteDialog();
+});
+
+document.getElementById("delete-confirm").addEventListener("click", async () => {
+  if (deleteBusy || pendingDeleteIds.length === 0) return;
+  deleteBusy = true;
+  const confirmBtn = document.getElementById("delete-confirm");
+  confirmBtn.disabled = true;
+  confirmBtn.textContent = "Eliminazione…";
+
+  let deleted = false;
+  try {
+    const res = await fetch("/analyses/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: pendingDeleteIds }),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (_) { /* risposta non JSON */ }
+    if (!res.ok) {
+      const detail = (data && data.detail) || res.statusText;
+      throw new Error(detail);
+    }
+
+    deleted = true;
+    selection.clear();
+    forceCloseDeleteDialog();
+
+    let msg = `Eliminate ${data.deleted_count} sottomission${data.deleted_count === 1 ? "e" : "i"}.`;
+    if (data.not_found && data.not_found.length > 0) {
+      msg += ` Non trovate: ${data.not_found.length}.`;
+    }
+    showListNotice("success", msg);
+  } catch (e) {
+    forceCloseDeleteDialog();
+    showListNotice("error", `Eliminazione non riuscita: ${e.message}`);
+  } finally {
+    deleteBusy = false;
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = "Elimina definitivamente";
+  }
+
+  // Ricarica la lista; un eventuale errore di reload non deve
+  // sovrascrivere il messaggio d'errore della POST fallita
+  loadAndRenderListBody().catch(() => {
+    if (deleted) {
+      showListNotice(
+        "error",
+        "Eliminazione completata, ma la lista non si è aggiornata — ricarica la pagina."
+      );
+    }
+  });
+});
 
 // ----------------------------------------------------------- detail view
 

@@ -202,6 +202,33 @@ class AnalysisListResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Request/Response — POST /analyses/delete (eliminazione definitiva)
+# ---------------------------------------------------------------------------
+
+
+class AnalysesDeleteRequest(BaseModel):
+    """Body della POST /analyses/delete.
+
+    ``ids`` non ha ``min_length``: il rifiuto della lista vuota è
+    responsabilità della route (400 esplicito), non della validazione
+    (422) — la risposta deve essere chiara, non un errore di validazione.
+    """
+
+    ids: list[str] = Field(
+        max_length=200,
+        description="UUID delle sottomissioni da eliminare definitivamente",
+    )
+
+
+class AnalysesDeleteResponse(BaseModel):
+    """Risposta della POST /analyses/delete — stesso schema di
+    ``repository.delete_targets``."""
+
+    deleted_count: int
+    not_found: list[str]
+
+
+# ---------------------------------------------------------------------------
 # Response — GET /health
 # ---------------------------------------------------------------------------
 
