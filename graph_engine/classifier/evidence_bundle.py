@@ -24,6 +24,28 @@ from graph_engine.models import Evidence, State, Transition
 # Keep in sync with graph_engine.classifier.prefilter.
 _STRONG_EVIDENCE_KEYS = ("typosquat", "reputation_hit", "cloaking_detected")
 
+# ── Tetti di compressione del prompt L5 ─────────────────────────────────────
+# Il bundle dict resta FEDELE (tutti i dati — il prefilter ne dipende);
+# questi tetti si applicano SOLO alla serializzazione per il modello
+# (``bundle_to_prompt_text``), per non bruciare la quota TPM del
+# deployment Foundry (caso reale 2026-08-31: rate_limit_exceeded su
+# gpt-5-mini italynorth con bundle lunghi).  Soglie bilanciate: il
+# segnale utile (marchi, campi credenziali, redirect) resta visibile,
+# le intere pagine di testo no.
+_MAX_URL_CHARS = 300
+_MAX_VISIBLE_TEXT_CHARS = 1000
+_MAX_OCR_CHARS = 600
+_MAX_FORM_FIELDS = 25
+_MAX_FORM_LABEL_CHARS = 60
+_MAX_DETAILED_INTERMEDIATE_STATES = 12
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Taglia *text* a *limit* caratteri con marker di troncamento."""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + f" …[troncato: {len(text) - limit} caratteri]"
+
 
 def _coerce_evidence_value(value):
     """Coerce an ``Evidence.value`` (str) back to structured data when it
@@ -156,6 +178,7 @@ async def build_evidence_bundle(
         entry: dict = {
             "state_id": sid,
             "url": s.url,
+            "dom_hash": s.dom_hash,
             "depth": s.depth,
             "is_leaf": sid not in from_state_ids,
             "title": titles_by_state.get(sid, ""),
@@ -196,13 +219,22 @@ def bundle_to_prompt_text(bundle: dict) -> str:
     The output is deliberately *not* raw JSON — it is formatted as labeled
     sections so a language model can parse it reliably even if the JSON
     structure shifts between versions.
+
+    COMPRESSIONE (tetti in testa al modulo): il prompt applica limiti
+    conservativi a URL, testo visibile, OCR e form fields; gli stati con
+    lo stesso ``dom_hash`` vengono citati una sola volta e gli stati
+    intermedi oltre soglia diventano righe riassuntive.  Le FOGLIE sono
+    SEMPRE dettagliate (portano il payload finale).  Il bundle dict non
+    viene mai mutato — la compressione vive solo qui.
     """
     lines: list[str] = []
 
     lines.append("=== EXPLORATION SUMMARY ===")
-    lines.append(f"Input URL: {bundle['input_url']}")
+    lines.append(f"Input URL: {_truncate(bundle['input_url'], _MAX_URL_CHARS)}")
     if bundle.get("canonical_url"):
-        lines.append(f"Canonical URL: {bundle['canonical_url']}")
+        lines.append(
+            f"Canonical URL: {_truncate(bundle['canonical_url'], _MAX_URL_CHARS)}"
+        )
     lines.append(f"States visited: {bundle['num_states']}")
     lines.append(f"Transitions recorded: {bundle['num_transitions']}")
     lines.append(f"Max depth reached: {bundle['max_depth_reached']}")
@@ -228,26 +260,72 @@ def bundle_to_prompt_text(bundle: dict) -> str:
 
     lines.append("")
     lines.append("=== STATE DETAILS (every explored state) ===")
+    seen_dom_hash: dict[str, int] = {}
+    detailed_intermediate = 0
     for i, st in enumerate(bundle.get("states", []), start=1):
         if st.get("is_leaf"):
             terminus = "foglia — nessuna ulteriore azione"
         else:
             terminus = "proseguito con altre azioni"
+
+        # ── Dedup contenuto identico (stesso dom_hash già dettagliato) ──
+        dom_hash = st.get("dom_hash", "")
+        if dom_hash and dom_hash in seen_dom_hash:
+            lines.append(
+                f"--- State #{i} (contenuto identico a State "
+                f"#{seen_dom_hash[dom_hash]}: stesso dom_hash) ---"
+            )
+            lines.append(f"  Depth: {st['depth']} ({terminus})")
+            lines.append(f"  URL: {_truncate(st['url'], _MAX_URL_CHARS)}")
+            lines.append("")
+            continue
+
+        # ── Stati intermedi oltre soglia: riga riassuntiva ──────────────
+        # Le foglie NON rientrano nel tetto: sono sempre dettagliate.
+        if (
+            not st.get("is_leaf")
+            and detailed_intermediate >= _MAX_DETAILED_INTERMEDIATE_STATES
+        ):
+            fields = st.get("form_fields", [])
+            text = st.get("visible_text", "")
+            lines.append(
+                f"--- State #{i} (riassunto — stato intermedio oltre "
+                "il limite del prompt) ---"
+            )
+            lines.append(f"  Depth: {st['depth']} ({terminus})")
+            lines.append(f"  URL: {_truncate(st['url'], _MAX_URL_CHARS)}")
+            lines.append(f"  Form fields: {len(fields)}")
+            lines.append(f"  Visible text: {len(text)} caratteri")
+            lines.append("")
+            continue
+
+        if dom_hash:
+            seen_dom_hash[dom_hash] = i
+        if not st.get("is_leaf"):
+            detailed_intermediate += 1
+
         lines.append(f"--- State #{i} ---")
         lines.append(f"  Depth: {st['depth']} ({terminus})")
-        lines.append(f"  URL: {st['url']}")
+        lines.append(f"  URL: {_truncate(st['url'], _MAX_URL_CHARS)}")
         title = st.get("title", "")
         if title:
             lines.append(f"  Title: {title}")
         fields = st.get("form_fields", [])
         if fields:
+            shown = fields[:_MAX_FORM_FIELDS]
             lines.append(f"  Form fields detected ({len(fields)}):")
-            for f in fields:
+            for f in shown:
                 label = f.get("nearby_label_text", "")
+                label = _truncate(label, _MAX_FORM_LABEL_CHARS)
                 label_str = f'  → "{label}"' if label else ""
                 lines.append(
                     f"    {f['tag']}[type={f['type']}]"
                     f"  name_or_id={f['name_or_id']}{label_str}"
+                )
+            if len(fields) > _MAX_FORM_FIELDS:
+                lines.append(
+                    f"    …e altri {len(fields) - _MAX_FORM_FIELDS} "
+                    "campi omessi"
                 )
         else:
             lines.append("  Form fields: none")
@@ -255,19 +333,39 @@ def bundle_to_prompt_text(bundle: dict) -> str:
         if text:
             lines.append("  Testo visibile nel DOM (truncated):")
             # Indent the visible text for readability
+            budget = _MAX_VISIBLE_TEXT_CHARS
             for tline in text.split("\n"):
                 stripped = tline.strip()
-                if stripped:
-                    lines.append(f"    {stripped[:200]}")
+                if not stripped:
+                    continue
+                if budget <= 0:
+                    break
+                lines.append(f"    {stripped[:200][:budget]}")
+                budget -= min(len(stripped), 200)
+            if len(text) > _MAX_VISIBLE_TEXT_CHARS:
+                lines.append(
+                    f"    …[altri {len(text) - _MAX_VISIBLE_TEXT_CHARS} "
+                    "caratteri omessi]"
+                )
         ocr_text = st.get("ocr_text", "")
         if ocr_text:
             # Provenienza DIVERSA dal visible_text: OCR sullo screenshot
             # (cattura anche testo renderizzato via canvas/immagini).
             lines.append("  Testo rilevato via OCR nello screenshot:")
+            budget = _MAX_OCR_CHARS
             for tline in ocr_text.split("\n"):
                 stripped = tline.strip()
-                if stripped:
-                    lines.append(f"    {stripped[:200]}")
+                if not stripped:
+                    continue
+                if budget <= 0:
+                    break
+                lines.append(f"    {stripped[:200][:budget]}")
+                budget -= min(len(stripped), 200)
+            if len(ocr_text) > _MAX_OCR_CHARS:
+                lines.append(
+                    f"    …[altri {len(ocr_text) - _MAX_OCR_CHARS} "
+                    "caratteri omessi]"
+                )
         brands = st.get("brands", [])
         if brands:
             lines.append("  Brand rilevati nello screenshot:")

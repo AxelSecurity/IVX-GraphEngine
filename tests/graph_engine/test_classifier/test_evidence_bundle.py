@@ -9,6 +9,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from graph_engine.classifier.evidence_bundle import (
+    _MAX_DETAILED_INTERMEDIATE_STATES,
+    _MAX_FORM_FIELDS,
+    _MAX_FORM_LABEL_CHARS,
+    _MAX_OCR_CHARS,
+    _MAX_URL_CHARS,
+    _MAX_VISIBLE_TEXT_CHARS,
     build_evidence_bundle,
     bundle_to_prompt_text,
 )
@@ -738,3 +744,231 @@ class TestAllStatesIncludedInBundle:
         assert "foglia — nessuna ulteriore azione" in text
         assert "Password" in text
         assert "Accedi con il tuo conto pagoPA" in text
+
+
+class TestPromptCompression:
+    """Compressione del prompt L5: tetti su URL/testo/OCR/form, dedup su
+    ``dom_hash`` e riassunto degli stati intermedi oltre soglia.
+
+    Regola guida: le FOGLIE restano sempre dettagliate (portano il
+    payload finale) e il bundle dict NON viene mai mutato — il prefilter
+    dipende dal contenuto fedele."""
+
+    def _chain(self, n_intermedi: int) -> tuple[list[State], list[Transition]]:
+        """Catena di ``n_intermedi`` stati intermedi + 1 foglia finale."""
+        states = [
+            _state(f"hash{i:02d}", 0, url=f"https://example.com/inter{i:02d}")
+            for i in range(n_intermedi)
+        ]
+        leaf = _state("hash_leaf", 1, url="https://example.com/foglia")
+        states.append(leaf)
+        transitions = [
+            _transition(states[i].id, states[i + 1].id, TransitionKind.click)
+            for i in range(len(states) - 1)
+        ]
+        return states, transitions
+
+    async def test_long_visible_text_truncated_with_marker(self):
+        """Testo visibile oltre il budget → troncato, la parte finale
+        NON finisce nel prompt."""
+        s0 = _state("aaa", 0)
+        long_text = ("pagina molto lunga " * 120) + "FINALETESTOSEGRETO"
+        bundle = await build_evidence_bundle(
+            target_url="https://example.com",
+            canonical_url=None,
+            states=[s0],
+            transitions=[],
+            evidence=[],
+            form_fields_by_state={},
+            visible_text_by_state={str(s0.id): long_text},
+            titles_by_state={},
+        )
+
+        text = bundle_to_prompt_text(bundle)
+
+        assert "FINALETESTOSEGRETO" not in text
+        atteso = (
+            f"…[altri {len(long_text) - _MAX_VISIBLE_TEXT_CHARS} "
+            "caratteri omessi]"
+        )
+        assert atteso in text
+
+    async def test_long_url_truncated_with_marker(self):
+        """URL oltre il tetto → troncato sia nell'header sia nello stato."""
+        long_url = "https://example.com/" + "b" * 350 + "SEGRETOURL"
+        s0 = _state("aaa", 0, long_url)
+        bundle = await build_evidence_bundle(
+            target_url=long_url,
+            canonical_url=None,
+            states=[s0],
+            transitions=[],
+            evidence=[],
+            form_fields_by_state={},
+            visible_text_by_state={},
+            titles_by_state={},
+        )
+
+        text = bundle_to_prompt_text(bundle)
+
+        assert "SEGRETOURL" not in text
+        marker = f"…[troncato: {len(long_url) - _MAX_URL_CHARS} caratteri]"
+        # Compare due volte: Input URL nell'header + URL dello stato
+        assert text.count(marker) == 2
+
+    async def test_form_fields_over_cap_are_omitted(self):
+        """Oltre _MAX_FORM_FIELDS campi → mostrati i primi con marker di
+        conteggio; label lunghe troncate."""
+        label_lunga = "Etichetta " + "x" * 80
+        fields = [
+            {"tag": "input", "type": "text", "name_or_id": f"campo{i}",
+             "nearby_label_text": label_lunga}
+            for i in range(30)
+        ]
+        s0 = _state("aaa", 0)
+        bundle = await build_evidence_bundle(
+            target_url="https://example.com",
+            canonical_url=None,
+            states=[s0],
+            transitions=[],
+            evidence=[],
+            form_fields_by_state={str(s0.id): fields},
+            visible_text_by_state={},
+            titles_by_state={},
+        )
+
+        text = bundle_to_prompt_text(bundle)
+
+        assert "Form fields detected (30):" in text
+        assert f"…e altri {30 - _MAX_FORM_FIELDS} campi omessi" in text
+        assert "campo24" in text
+        assert "campo29" not in text
+        # label troncata al tetto
+        assert (
+            f"…[troncato: {len(label_lunga) - _MAX_FORM_LABEL_CHARS} "
+            "caratteri]" in text
+        )
+        assert "x" * 80 not in text
+
+    async def test_duplicate_dom_hash_cited_once(self):
+        """Stesso dom_hash già dettagliato → riga di rimando, contenuto
+        non ripetuto; la foglia con hash unico resta dettagliata."""
+        s0 = _state("uguale", 0, url="https://example.com/inter00")
+        s1 = _state("uguale", 1, url="https://example.com/inter01")
+        s2 = _state("hash_leaf", 2, url="https://example.com/foglia")
+        states = [s0, s1, s2]
+        transitions = [
+            _transition(s0.id, s1.id, TransitionKind.click),
+            _transition(s1.id, s2.id, TransitionKind.http_3xx),
+        ]
+        bundle = await build_evidence_bundle(
+            target_url="https://example.com",
+            canonical_url=None,
+            states=states,
+            transitions=transitions,
+            evidence=[],
+            form_fields_by_state={},
+            visible_text_by_state={
+                str(s1.id): "TESTO_DUPLICATO_INTERMEDIO",
+                str(s2.id): "TESTO_FOGLIA_COMPLETO",
+            },
+            titles_by_state={},
+        )
+
+        text = bundle_to_prompt_text(bundle)
+
+        assert "contenuto identico a State #1" in text
+        assert "TESTO_DUPLICATO_INTERMEDIO" not in text
+        # la foglia resta SEMPRE dettagliata
+        assert "TESTO_FOGLIA_COMPLETO" in text
+
+    async def test_intermediate_states_beyond_cap_are_summarized(self):
+        """Oltre _MAX_DETAILED_INTERMEDIATE_STATES intermedi dettagliati,
+        i successivi diventano righe riassuntive; le foglie MAI."""
+        n = _MAX_DETAILED_INTERMEDIATE_STATES + 1  # 13 intermedi
+        states, transitions = self._chain(n)
+        visible = {
+            str(states[i].id): f"TESTO_INTERMEDIO_{i:02d}"
+            for i in range(n)
+        }
+        visible[str(states[n].id)] = "TESTO_FOGLIA_COMPLETO"
+        bundle = await build_evidence_bundle(
+            target_url="https://example.com",
+            canonical_url=None,
+            states=states,
+            transitions=transitions,
+            evidence=[],
+            form_fields_by_state={},
+            visible_text_by_state=visible,
+            titles_by_state={},
+        )
+
+        text = bundle_to_prompt_text(bundle)
+
+        assert (
+            "riassunto — stato intermedio oltre il limite del prompt"
+            in text
+        )
+        # il 13° intermedio (index 12) è oltre il tetto → riassunto
+        assert "TESTO_INTERMEDIO_12" not in text
+        assert "TESTO_INTERMEDIO_11" in text
+        assert "TESTO_INTERMEDIO_00" in text
+        # la foglia resta dettagliata col suo testo completo
+        assert "TESTO_FOGLIA_COMPLETO" in text
+
+    async def test_long_ocr_text_truncated_with_marker(self):
+        """OCR oltre il budget → troncato col marker; la provenienza
+        OCR resta etichettata separatamente."""
+        s0 = State(
+            target_id=uuid.uuid4(),
+            url="https://example.com/canvas-login",
+            dom_hash="ocr",
+            depth=0,
+            screenshot_ref="/nonexistent/screenshot.png",
+        )
+        with patch(
+            "graph_engine.classifier.evidence_bundle.analyze_screenshot",
+            new_callable=AsyncMock,
+        ) as mock_vision:
+            mock_vision.return_value = {"ocr_text": "O" * 1200, "brands": []}
+            bundle = await build_evidence_bundle(
+                target_url="https://example.com",
+                canonical_url=None,
+                states=[s0],
+                transitions=[],
+                evidence=[],
+                form_fields_by_state={},
+                visible_text_by_state={},
+                titles_by_state={},
+            )
+
+        text = bundle_to_prompt_text(bundle)
+
+        assert "Testo rilevato via OCR nello screenshot:" in text
+        assert f"…[altri {1200 - _MAX_OCR_CHARS} caratteri omessi]" in text
+        assert "O" * 400 not in text
+
+    async def test_bundle_not_mutated_by_serialization(self):
+        """La serializzazione NON tocca il bundle dict: il prefilter
+        dipende dal contenuto fedele."""
+        import copy
+
+        s0 = _state("aaa", 0)
+        long_text = ("parola " * 300) + "CODA"
+        bundle = await build_evidence_bundle(
+            target_url="https://example.com",
+            canonical_url=None,
+            states=[s0],
+            transitions=[],
+            evidence=[],
+            form_fields_by_state={str(s0.id): [
+                {"tag": "input", "type": "password", "name_or_id": "pwd",
+                 "nearby_label_text": "Password"},
+            ]},
+            visible_text_by_state={str(s0.id): long_text},
+            titles_by_state={},
+        )
+        before = copy.deepcopy(bundle)
+
+        bundle_to_prompt_text(bundle)
+
+        assert bundle == before
