@@ -599,6 +599,68 @@ select { cursor: pointer; }
 .btn-danger:not(:disabled):hover { background: rgba(251, 88, 120, 0.24); border-color: var(--phishing); }
 .btn-danger:disabled { opacity: 0.4; cursor: default; }
 
+/* ----------------------------------------------------- trellix json box */
+
+.trellix-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.trellix-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.trellix-verdict {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.trellix-verdict.safe {
+  background: rgba(74, 222, 128, 0.12);
+  border-color: rgba(74, 222, 128, 0.3);
+  color: #4ade80;
+}
+.trellix-verdict.malicious {
+  background: rgba(251, 88, 120, 0.14);
+  border-color: rgba(251, 88, 120, 0.4);
+  color: var(--phishing);
+}
+.btn-copy {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius-sm);
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.btn-copy:hover { border-color: var(--accent); color: var(--text); }
+.trellix-json {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre;
+  max-height: 180px;
+  overflow: auto;
+}
+
 /* ------------------------------------------------------------ list notice */
 
 .list-notice {

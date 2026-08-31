@@ -476,3 +476,89 @@ class TestDeleteAnalysesEndpoint:
 
         assert res.status_code == 200
         assert res.json() == {"deleted_count": 1, "not_found": []}
+
+
+class TestGetAnalysisTrellixResponse:
+    """GET /analyses/{id}/trellix — il JSON restituito a Trellix IVX.
+
+    La dashboard usa questo endpoint per mostrare, nel dettaglio di ogni
+    analisi, la risposta esatta che Trellix ha ricevuto (o riceverebbe).
+    """
+
+    async def test_phishing_verdict_maps_to_malicious_block(self, app, client, tmp_path):
+        """Verdict phishing + brand → malicious/block con firma d'attacco."""
+        db = str(tmp_path / "test.db")
+        target = AnalysisTarget(
+            input_url="https://login-ms.example.com", status=TargetStatus.done,
+        )
+        verdict = Verdict(
+            target_id=target.id,
+            classification=Classification.phishing,
+            confidence=0.95,
+            produced_by="foundry",
+            brand="Microsoft",
+            rationale="Pagina di login falsa con logo Microsoft.",
+        )
+        await save_target(target, [], [], [], verdict, db_path=db)
+
+        res = await client.get(f"/analyses/{target.id}/trellix")
+
+        assert res.status_code == 200
+        body = res.json()
+        assert body["verdict"] == "malicious"
+        assert body["recommended_action"] == "block"
+        assert body["confidence"] >= 0.8
+        assert body["signature"] == "Phishing: Microsoft Impersonation"
+        assert body["reason"] == "Pagina di login falsa con logo Microsoft."
+
+    async def test_output_identical_to_trellix_route(self, app, client, tmp_path):
+        """Fedeltà: il JSON mostrato in dashboard DEVE essere identico a
+        quello costruito dalla route /trellix/analyze sugli stessi dati."""
+        from graph_engine.api.trellix_verdict import build_trellix_response
+        from graph_engine.storage.repository import get_target_by_id
+
+        db = str(tmp_path / "test.db")
+        target = AnalysisTarget(
+            input_url="https://susp.example.com", status=TargetStatus.done,
+        )
+        verdict = Verdict(
+            target_id=target.id,
+            classification=Classification.suspicious,
+            confidence=0.4,
+            produced_by="heuristic_fallback",
+            rationale=(
+                "Fallback euristico (run Foundry fallito): segnali "
+                "insufficienti per la classificazione automatica."
+            ),
+        )
+        await save_target(target, [], [], [], verdict, db_path=db)
+
+        res = await client.get(f"/analyses/{target.id}/trellix")
+        assert res.status_code == 200
+
+        data = await get_target_by_id(str(target.id), db_path=db)
+        assert res.json() == build_trellix_response(data)
+
+    async def test_running_target_shows_analysis_incomplete(self, app, client, tmp_path):
+        """Analisi in corso → il ramo Analysis-Incomplete (onesto, come
+        nella route Trellix reale)."""
+        db = str(tmp_path / "test.db")
+        target = AnalysisTarget(
+            input_url="https://run.example.com", status=TargetStatus.running,
+        )
+        await save_target(target, [], [], [], None, db_path=db)
+
+        res = await client.get(f"/analyses/{target.id}/trellix")
+
+        assert res.status_code == 200
+        body = res.json()
+        assert body["verdict"] == "safe"
+        assert body["recommended_action"] == "allow"
+        assert body["signature"] == "Analysis-Incomplete — Benign By Default"
+
+    async def test_unknown_target_returns_404(self, app, client):
+        """Target inesistente → 404, come le altre route di dettaglio."""
+        res = await client.get(
+            "/analyses/99999999-9999-4999-8999-999999999999/trellix"
+        )
+        assert res.status_code == 404

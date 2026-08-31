@@ -557,11 +557,12 @@ async function renderDetail(id) {
   root.innerHTML = `<button class="back-link" id="back-link">← Torna alle sottomissioni</button><div class="loading-state">Caricamento analisi…</div>`;
   document.getElementById("back-link").addEventListener("click", () => navigate("#/"));
 
-  let graph, artifacts;
+  let graph, artifacts, trellix;
   try {
-    [graph, artifacts] = await Promise.all([
+    [graph, artifacts, trellix] = await Promise.all([
       fetchJSON(`/analyses/${id}/graph`),
       fetchJSON(`/analyses/${id}/artifacts`).catch(() => ({ files: [] })),
+      fetchJSON(`/analyses/${id}/trellix`).catch(() => null),
     ]);
   } catch (e) {
     root.querySelector(".loading-state").outerHTML =
@@ -569,7 +570,7 @@ async function renderDetail(id) {
     return;
   }
 
-  root.innerHTML = buildDetailHtml(id, graph, artifacts);
+  root.innerHTML = buildDetailHtml(id, graph, artifacts, trellix);
   wireDetail(id, graph);
 
   // Se l'analisi è ancora in corso, ricontrolla periodicamente
@@ -581,7 +582,8 @@ async function renderDetail(id) {
           clearInterval(detailPollTimer);
         }
         const freshArtifacts = await fetchJSON(`/analyses/${id}/artifacts`).catch(() => ({ files: [] }));
-        root.innerHTML = buildDetailHtml(id, fresh, freshArtifacts);
+        const freshTrellix = await fetchJSON(`/analyses/${id}/trellix`).catch(() => null);
+        root.innerHTML = buildDetailHtml(id, fresh, freshArtifacts, freshTrellix);
         wireDetail(id, fresh);
       } catch (_) {
         /* riprova al prossimo tick */
@@ -590,7 +592,7 @@ async function renderDetail(id) {
   }
 }
 
-function buildDetailHtml(id, graph, artifacts) {
+function buildDetailHtml(id, graph, artifacts, trellix) {
   const t = graph.target;
   const v = graph.verdict;
   const states = graph.states || [];
@@ -630,6 +632,18 @@ function buildDetailHtml(id, graph, artifacts) {
       </div>
       ${v?.rationale ? `<div class="rationale"><b>Motivazione:</b> ${escapeHtml(v.rationale)}</div>` : ""}
     </div>
+
+    ${trellix ? `
+    <div class="section">
+      <div class="section-title">Risposta restituita a Trellix IVX</div>
+      <div class="card trellix-box">
+        <div class="trellix-head">
+          <span class="trellix-verdict trellix-${escapeHtml(trellix.verdict)}">${escapeHtml(trellix.verdict)}</span>
+          <button class="btn-copy" id="copy-trellix-btn" type="button">Copia JSON</button>
+        </div>
+        <pre class="trellix-json" id="trellix-json">${escapeHtml(JSON.stringify(trellix, null, 2))}</pre>
+      </div>
+    </div>` : ""}
 
     ${states.length > 0 ? `
     <div class="section">
@@ -786,6 +800,36 @@ function buildGraphSvg(states, transitions) {
 
 function wireDetail(targetId, graph) {
   document.getElementById("back-link")?.addEventListener("click", () => navigate("#/"));
+
+  const copyBtn = document.getElementById("copy-trellix-btn");
+  if (copyBtn) {
+    copyBtn.addEventListener("click", async () => {
+      const pre = document.getElementById("trellix-json");
+      if (!pre) return;
+      const text = pre.textContent;
+      let ok = false;
+      try {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      } catch (_) {
+        // Fallback per contesti senza Clipboard API
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          document.body.appendChild(ta);
+          ta.select();
+          ok = document.execCommand("copy");
+          ta.remove();
+        } catch (_) {
+          /* lascia il bottone invariato */
+        }
+      }
+      if (ok) {
+        copyBtn.textContent = "Copiato ✓";
+        setTimeout(() => { copyBtn.textContent = "Copia JSON"; }, 1500);
+      }
+    });
+  }
 
   root.querySelectorAll(".state-thumb img").forEach((img) => {
     img.addEventListener("click", () => openLightbox(img.dataset.full));

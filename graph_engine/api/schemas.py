@@ -229,6 +229,26 @@ class AnalysesDeleteResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Response — GET /analyses/{id}/trellix
+# ---------------------------------------------------------------------------
+
+
+class TrellixVerdictResponse(BaseModel):
+    """Il JSON che la route Trellix IVX restituisce per questa analisi.
+
+    Rigenerato on-demand da ``build_trellix_response`` (la stessa funzione
+    della route ``GET /trellix/analyze``): ciò che la dashboard mostra è
+    ciò che Trellix ha ricevuto o riceverebbe in questo momento.
+    """
+
+    verdict: str  # "safe" | "malicious"
+    confidence: float
+    signature: str
+    recommended_action: str  # "allow" | "block"
+    reason: str
+
+
+# ---------------------------------------------------------------------------
 # Response — GET /health
 # ---------------------------------------------------------------------------
 

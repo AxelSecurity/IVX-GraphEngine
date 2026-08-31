@@ -33,8 +33,10 @@ from graph_engine.api.schemas import (
     HistoryEntry,
     HistoryResponse,
     TargetSummary,
+    TrellixVerdictResponse,
     VerdictSummary,
 )
+from graph_engine.api.trellix_verdict import build_trellix_response
 from graph_engine.budget import Budget
 from graph_engine.models import AnalysisTarget, TargetStatus
 from graph_engine.storage.repository import (
@@ -349,6 +351,28 @@ def build_router(
             ],
             verdict=_to_verdict_summary(data.get("verdict")),
         )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # GET /analyses/{target_id}/trellix — JSON restituito a Trellix IVX
+    # ──────────────────────────────────────────────────────────────────────
+
+    @router.get(
+        "/analyses/{target_id}/trellix",
+        response_model=TrellixVerdictResponse,
+    )
+    async def get_analysis_trellix_response(target_id: str):
+        """Il JSON che la route Trellix IVX restituisce per questa analisi.
+
+        Rigenerato con la STESSA funzione (``build_trellix_response``)
+        usata da ``GET /trellix/analyze``: la dashboard mostra esattamente
+        ciò che Trellix ha ricevuto o riceverebbe in questo momento —
+        per un'analisi ancora in corso include il ramo Analysis-Incomplete.
+        """
+        data = await get_target_by_id(target_id, db_path=db_path)
+        if data is None:
+            raise HTTPException(status_code=404, detail="Analisi non trovata")
+
+        return build_trellix_response(data)
 
     # ──────────────────────────────────────────────────────────────────────
     # GET /analyses/{target_id}/artifacts — listing ricorsivo
