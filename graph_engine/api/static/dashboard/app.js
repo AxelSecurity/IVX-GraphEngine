@@ -22,6 +22,7 @@ const TRANSITION_LABELS = {
   new_tab: "new-tab",
   gate_solved: "gate",
   ws_message: "ws",
+  cloaking_probe: "cloaking",
 };
 
 // ---------------------------------------------------------------- helpers
@@ -737,47 +738,161 @@ function buildEvidenceAccordion(evidence) {
 }
 
 // --------------------------------------------------------------- graph svg
+//
+// Layout a colonne per profondità (layer by depth) con:
+//  - colonne larghe quanto il testo più lungo → mai sovrapposte,
+//  - ordinamento barycenter (sweep avanti/indietro) per ridurre gli
+//    incroci degli archi,
+//  - archi verticali (stessa colonna, es. cloaking_probe tra i due
+//    root) deviati lateralmente per non attraversare i nodi,
+//  - etichette degli archi scaglionate quando più archi convergono
+//    sullo stesso punto medio.
+
+const GRAPH = {
+  nodeR: 7,
+  labelDx: 12, // offset del testo dal centro del nodo
+  colGap: 90, // spazio libero tra il testo e la colonna successiva
+  rowGap: 56, // distanza verticale tra i nodi di una colonna
+  margin: 30,
+  charW: 6.4, // larghezza media di un carattere mono 10px
+  maxLabelChars: 24,
+  bend: 45, // deviazione laterale degli archi verticali
+};
+
+function truncateHost(url) {
+  return truncateMiddle(String(url || "").replace(/^https?:\/\//, ""), GRAPH.maxLabelChars);
+}
+
+function orderColumns(byDepth, depths, transitions) {
+  // Barycenter sweep: ordina ogni colonna per la posizione media dei
+  // vicini nella colonna adiacente; 4 passate (avanti/indietro)
+  // stabilizzano anche grafi con molti archi incrociati.  I nodi senza
+  // vicini restano al proprio posto (sort stabile).
+  const adj = new Map();
+  const add = (a, b) => {
+    if (!adj.has(a)) adj.set(a, []);
+    adj.get(a).push(b);
+  };
+  transitions.forEach((t) => {
+    add(t.from_state, t.to_state);
+    add(t.to_state, t.from_state);
+  });
+
+  for (let pass = 0; pass < 4; pass++) {
+    const dir = pass % 2 === 0 ? 1 : -1;
+    const sweep = dir === 1
+      ? depths.map((_, i) => i)
+      : depths.map((_, i) => depths.length - 1 - i);
+    for (const ci of sweep) {
+      const nd = depths[ci + dir];
+      if (nd === undefined) continue;
+      const neighborIdx = new Map(byDepth[nd].map((s, i) => [s.id, i]));
+      const col = byDepth[depths[ci]];
+      const avg = col.map((s, i) => {
+        const ns = (adj.get(s.id) || [])
+          .map((n) => neighborIdx.get(n))
+          .filter((x) => x !== undefined);
+        return ns.length ? ns.reduce((a, b) => a + b, 0) / ns.length : i;
+      });
+      byDepth[depths[ci]] = col
+        .map((s, i) => ({ s, avg: avg[i], i }))
+        .sort((a, b) => a.avg - b.avg || a.i - b.i)
+        .map((o) => o.s);
+    }
+  }
+}
 
 function buildGraphSvg(states, transitions) {
   const byDepth = {};
-  states.forEach((s) => { (byDepth[s.depth] = byDepth[s.depth] || []).push(s); });
+  states.forEach((s) => {
+    (byDepth[s.depth] = byDepth[s.depth] || []).push(s);
+  });
   const depths = Object.keys(byDepth).map(Number).sort((a, b) => a - b);
+  if (!depths.length) return "";
 
-  const colX = 130;
-  const rowY = 70;
-  const marginX = 50;
-  const marginY = 40;
+  orderColumns(byDepth, depths, transitions);
+
+  // Larghezza per colonna: il testo più lungo + spazio per la colonna
+  // successiva.  Le coordinate X partono dal margine e accumulano.
+  const colW = depths.map((d) => (
+    Math.max(...byDepth[d].map((s) => truncateHost(s.url).length), 8) * GRAPH.charW + GRAPH.colGap
+  ));
+  const colX = [GRAPH.margin];
+  depths.forEach((_, i) => {
+    if (i > 0) colX.push(colX[i - 1] + colW[i - 1]);
+  });
+
   const pos = {};
-
-  let maxRows = 1;
-  depths.forEach((d) => {
-    const col = byDepth[d];
-    maxRows = Math.max(maxRows, col.length);
-    col.forEach((s, i) => {
+  depths.forEach((d, ci) => {
+    byDepth[d].forEach((s, ri) => {
       pos[s.id] = {
-        x: marginX + d * colX,
-        y: marginY + i * rowY,
+        x: colX[ci] + GRAPH.labelDx,
+        y: GRAPH.margin + ri * GRAPH.rowGap,
+        col: ci,
       };
     });
   });
 
-  const width = marginX * 2 + Math.max(depths.length - 1, 0) * colX + 40;
-  const height = marginY * 2 + (maxRows - 1) * rowY + 40;
+  const maxRows = Math.max(...depths.map((d) => byDepth[d].length), 1);
+  const width = colX[depths.length - 1] + colW[depths.length - 1];
+  const height = GRAPH.margin * 2 + (maxRows - 1) * GRAPH.rowGap + GRAPH.nodeR + 4;
 
   const outgoing = new Set(transitions.map((t) => t.from_state));
+
+  // Slot per le etichette: archi con lo stesso punto medio vengono
+  // scaglionati in verticale invece di sovrapporsi.
+  const labelSlots = new Map();
+  const slotFor = (x, y) => {
+    const key = `${Math.round(x / 12)}:${Math.round(y / 12)}`;
+    const n = labelSlots.get(key) || 0;
+    labelSlots.set(key, n + 1);
+    return n;
+  };
+
+  // Coppie di colonne DENSE (oltre _DENSE_PAIR_THRESHOLD archi):
+  // etichetta SOLO un arco per tipo — ripetere "3xx" decine di volte
+  // non aggiunge informazione, solo rumore.  Il <title> resta su ogni
+  // arco (visibile al passaggio del mouse).  Il caso reale
+  // dell'explorer (~1 arco per nodo) resta sempre completo.
+  const _DENSE_PAIR_THRESHOLD = 4;
+  const pairTotals = new Map();
+  transitions.forEach((t) => {
+    const a = pos[t.from_state];
+    const b = pos[t.to_state];
+    if (!a || !b || Math.abs(a.x - b.x) < 1) return;
+    const key = `${a.col}-${b.col}`;
+    pairTotals.set(key, (pairTotals.get(key) || 0) + 1);
+  });
+  const labeledKinds = new Set();
 
   const edgesSvg = transitions
     .map((t) => {
       const a = pos[t.from_state];
       const b = pos[t.to_state];
       if (!a || !b) return "";
+      const label = TRANSITION_LABELS[t.kind] || t.kind;
+      if (Math.abs(a.x - b.x) < 1) {
+        // Arco verticale (stessa colonna): curva deviata a destra, label
+        // sul lato — attraversare la colonna renderebbe il grafo
+        // illeggibile (caso reale: cloaking_probe tra i due root).
+        const midY = (a.y + b.y) / 2;
+        const path = `M ${a.x} ${a.y} C ${a.x + GRAPH.bend} ${a.y}, ${b.x + GRAPH.bend} ${b.y}, ${b.x} ${b.y}`;
+        return `<path class="graph-edge" d="${path}"><title>${escapeHtml(t.kind)}</title></path>
+                <text class="graph-edge-label" x="${a.x + GRAPH.bend + 6}" y="${midY + 3}">${escapeHtml(label)}</text>`;
+      }
       const midX = (a.x + b.x) / 2;
       const midY = (a.y + b.y) / 2;
-      const label = TRANSITION_LABELS[t.kind] || t.kind;
-      // Curva morbida se i nodi sono su righe diverse nella stessa colonna
+      const pairKey = `${a.col}-${b.col}`;
+      const dense = (pairTotals.get(pairKey) || 0) > _DENSE_PAIR_THRESHOLD;
+      const kindKey = `${pairKey}:${label}`;
+      const off = slotFor(midX, midY) * 10;
       const path = `M ${a.x} ${a.y} C ${midX} ${a.y}, ${midX} ${b.y}, ${b.x} ${b.y}`;
-      return `<path class="graph-edge" d="${path}"><title>${escapeHtml(t.kind)}</title></path>
-              <text class="graph-edge-label" x="${midX}" y="${midY - 4}" text-anchor="middle">${escapeHtml(label)}</text>`;
+      let labelSvg = "";
+      if (!dense || !labeledKinds.has(kindKey)) {
+        labeledKinds.add(kindKey);
+        labelSvg = `<text class="graph-edge-label" x="${midX}" y="${midY - 4 - off}" text-anchor="middle">${escapeHtml(label)}</text>`;
+      }
+      return `<path class="graph-edge" d="${path}"><title>${escapeHtml(t.kind)}</title></path>${labelSvg}`;
     })
     .join("");
 
@@ -789,8 +904,8 @@ function buildGraphSvg(states, transitions) {
       return `
         <g class="graph-node${isLeaf ? " leaf" : ""}" data-id="${escapeHtml(s.id)}" transform="translate(${p.x},${p.y})">
           <title>${escapeHtml(s.url)}</title>
-          <circle r="7"></circle>
-          <text x="12" y="4">${escapeHtml(truncateMiddle(s.url.replace(/^https?:\/\//, ""), 22))}</text>
+          <circle r="${GRAPH.nodeR}"></circle>
+          <text x="${GRAPH.nodeR + 5}" y="4">${escapeHtml(truncateHost(s.url))}</text>
         </g>`;
     })
     .join("");

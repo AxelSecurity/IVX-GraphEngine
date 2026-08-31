@@ -414,7 +414,17 @@ select { cursor: pointer; }
 .graph-node text { fill: var(--text-dim); font-size: 10px; font-family: var(--font-mono); }
 .graph-node:hover circle { fill: var(--accent-soft); cursor: pointer; }
 .graph-edge { stroke: var(--border); stroke-width: 1.6; fill: none; }
-.graph-edge-label { fill: var(--text-faint); font-size: 9px; font-family: var(--font-mono); }
+/* Contorno del colore della card: le etichette restano leggibili anche
+   quando l'arco passa sotto (paint-order disegna lo stroke per primo). */
+.graph-edge-label {
+  fill: var(--text-faint);
+  font-size: 9px;
+  font-family: var(--font-mono);
+  paint-order: stroke;
+  stroke: var(--bg-card);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
 
 /* ------------------------------------------------------------- state cards */
 
