@@ -81,20 +81,20 @@ async def classify(bundle: dict) -> Verdict:
             "heuristic verdict",
             exc,
         )
-        return _heuristic_fallback(bundle, reason="Foundry unavailable")
+        return _heuristic_fallback(bundle, reason="Foundry non disponibile")
     except Exception as exc:
         # Qui Foundry è RAGGIUNGIBILE ma il run è fallito (es.
         # RunStatus.FAILED): rationale distinta dal caso "unavailable" —
         # il servizio c'era, il verdetto del modello non è arrivato.
         logger.error("Foundry call failed: %s", exc, exc_info=True)
-        return _heuristic_fallback(bundle, reason="Foundry run failed")
+        return _heuristic_fallback(bundle, reason="run Foundry fallito")
 
     # Parse and validate the agent response
     try:
         data = json.loads(raw_json)
     except json.JSONDecodeError:
         logger.warning("Foundry returned invalid JSON — falling back")
-        return _heuristic_fallback(bundle, reason="Foundry returned invalid JSON")
+        return _heuristic_fallback(bundle, reason="risposta JSON non valida")
 
     # Coerce classification string to enum
     classification_str = data.get("classification", "suspicious")
@@ -298,7 +298,7 @@ def _call_foundry_agent_sync(prompt: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _heuristic_fallback(bundle: dict, reason: str = "Foundry unavailable") -> Verdict:
+def _heuristic_fallback(bundle: dict, reason: str = "Foundry non disponibile") -> Verdict:
     """Deterministic, conservative verdict for when the model is unreachable.
 
     This is intentionally pessimistic — it errs toward "suspicious" with
@@ -306,8 +306,9 @@ def _heuristic_fallback(bundle: dict, reason: str = "Foundry unavailable") -> Ve
     signals already collected in L1/L3 (cloaking, abuse-prone
     infrastructure) must NOT be discarded as "insufficient signals" —
     a failed model run does not erase what the probes measured.  The
-    rationale always states WHY the model verdict is missing
-    (``reason``: unavailable / run failed / invalid JSON).
+    rationale is written in ITALIAN (dashboard-facing text) and always
+    states WHY the model verdict is missing (``reason``: "Foundry non
+    disponibile" / "run Foundry fallito" / "risposta JSON non valida").
     """
     flags = bundle.get("flags", {})
     graph_states = bundle.get("states", [])
@@ -325,9 +326,9 @@ def _heuristic_fallback(bundle: dict, reason: str = "Foundry unavailable") -> Ve
     if has_cloaking or has_abuse_prone:
         signals: list[str] = []
         if has_cloaking:
-            signals.append("cloaking detected (divergent profiles)")
+            signals.append("cloaking rilevato (profili divergenti)")
         if has_abuse_prone:
-            signals.append("abuse-prone infrastructure")
+            signals.append("infrastruttura soggetta ad abuso")
         confidence = 0.6 if len(signals) == 2 else 0.4
         return Verdict(
             target_id=bundle.get("target_id", ""),
@@ -335,10 +336,10 @@ def _heuristic_fallback(bundle: dict, reason: str = "Foundry unavailable") -> Ve
             confidence=confidence,
             produced_by="heuristic_fallback",
             rationale=(
-                f"Heuristic fallback ({reason}): strong deterministic "
-                f"signals — {', '.join(signals)}.  The model verdict "
-                "could not be produced; these measured signals stand on "
-                "their own and are not a sparse-data case."
+                f"Fallback euristico ({reason}): segnali deterministici "
+                f"forti — {', '.join(signals)}.  Il verdetto del modello "
+                "non è stato prodotto; questi segnali misurati valgono "
+                "di per sé e non sono un caso di dati insufficienti."
             ),
         )
 
@@ -350,8 +351,9 @@ def _heuristic_fallback(bundle: dict, reason: str = "Foundry unavailable") -> Ve
             confidence=0.1,
             produced_by="heuristic_fallback",
             rationale=(
-                f"Heuristic fallback ({reason}): single state with "
-                "no visible form fields — insufficient data for classification."
+                f"Fallback euristico ({reason}): stato singolo senza "
+                "campi form visibili — dati insufficienti per la "
+                "classificazione."
             ),
         )
 
@@ -363,9 +365,10 @@ def _heuristic_fallback(bundle: dict, reason: str = "Foundry unavailable") -> Ve
             confidence=0.2,
             produced_by="heuristic_fallback",
             rationale=(
-                f"Heuristic fallback ({reason}): multiple states with "
-                f"form fields ({total_fields} total) detected — cannot exclude "
-                "phishing without model analysis."
+                f"Fallback euristico ({reason}): più stati con campi "
+                f"form ({total_fields} in totale) rilevati — non è "
+                "possibile escludere il phishing senza l'analisi del "
+                "modello."
             ),
         )
 
@@ -375,8 +378,8 @@ def _heuristic_fallback(bundle: dict, reason: str = "Foundry unavailable") -> Ve
         confidence=0.15,
         produced_by="heuristic_fallback",
         rationale=(
-            f"Heuristic fallback ({reason}): insufficient signals "
-            "for automated classification."
+            f"Fallback euristico ({reason}): segnali insufficienti "
+            "per la classificazione automatica."
         ),
     )
 

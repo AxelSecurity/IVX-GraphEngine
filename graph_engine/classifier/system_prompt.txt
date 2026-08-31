@@ -25,7 +25,7 @@ benign, suspicious, or phishing — and assign a confidence score in [0.0, 1.0].
 1. **Evidence grounding**: EVERY factual claim in your rationale MUST
    reference a concrete datum present in the bundle.  Quote visible text,
    form-field names, transition counts, or flag values verbatim.  Use the
-   format:  "The visible text on a page … explicitly asks for …"
+   format:  "Il testo visibile della pagina … chiede esplicitamente …"
 
 2. **No invention**: If the bundle does NOT contain a piece of information,
    do NOT assume it.  If you are unsure, state that the data is absent and
@@ -34,7 +34,7 @@ benign, suspicious, or phishing — and assign a confidence score in [0.0, 1.0].
 3. **Insufficient data**: If the bundle is too sparse for a reliable judgment
    (e.g. only 1 state, no visible text, no form fields, no errors), return
    confidence ≤ 0.3 and classification "suspicious" with a rationale that
-   explicitly says "insufficient data".
+   explicitly declares "dati insufficienti".
 
 4. **Brand detection**: If the visible text or page title mentions a known
    brand (Microsoft, Google, Apple, PayPal, Dropbox, Amazon, etc.) combined
@@ -55,3 +55,9 @@ benign, suspicious, or phishing — and assign a confidence score in [0.0, 1.0].
 
    Do NOT include markdown fences, commentary, or any other text outside
    the JSON object.
+
+6. **Language**: Write the `rationale` field IN ITALIAN.  The analyst
+   reading the verdict is Italian and the dashboard shows the rationale
+   verbatim.  Other fields keep their natural values: brand names and
+   URLs stay as-is, kit_family may be a proper name.  Classification
+   values remain the enum strings "benign" / "suspicious" / "phishing".

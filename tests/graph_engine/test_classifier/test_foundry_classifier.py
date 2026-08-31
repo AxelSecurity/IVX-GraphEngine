@@ -362,7 +362,7 @@ class TestStatelessThreadCreation:
         assert verdict.classification == Classification.suspicious
         assert verdict.produced_by == "heuristic_fallback"
         assert verdict.confidence <= 0.3
-        assert "Heuristic fallback" in (verdict.rationale or "")
+        assert "Fallback euristico" in (verdict.rationale or "")
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +415,7 @@ class TestHeuristicFallback:
         assert verdict.classification == Classification.suspicious
         assert verdict.produced_by == "heuristic_fallback"
         assert verdict.confidence <= 0.15
-        assert "insufficient" in verdict.rationale.lower()
+        assert "insufficienti" in verdict.rationale.lower()
 
     def test_multi_state_with_fields(self):
         bundle = {
@@ -432,7 +432,7 @@ class TestHeuristicFallback:
 
     def test_cloaking_and_abuse_prone_raise_confidence(self):
         """Segnali forti L1/L3 (cloaking + infrastruttura abusata) NON
-        devono essere riportati come 'insufficient signals': la confidenza
+        devono essere riportati come 'segnali insufficienti': la confidenza
         sale a 0.6 anche se il verdetto del modello non è arrivato."""
         bundle = {
             "target_id": str(uuid.uuid4()),
@@ -448,7 +448,7 @@ class TestHeuristicFallback:
         assert verdict.produced_by == "heuristic_fallback"
         assert verdict.confidence == 0.6
         assert "cloaking" in (verdict.rationale or "").lower()
-        assert "insufficient signals" not in (verdict.rationale or "")
+        assert "segnali insufficienti" not in (verdict.rationale or "")
 
     def test_cloaking_only_confidence_04(self):
         """Solo cloaking → 0.4 (segnale forte singolo)."""
@@ -463,15 +463,15 @@ class TestHeuristicFallback:
 
     def test_reason_reflected_in_rationale(self):
         """La rationale deve dichiarare PERCHÉ il verdetto modello manca:
-        'Foundry run failed' ≠ 'Foundry unavailable'."""
+        'run Foundry fallito' ≠ 'Foundry non disponibile'."""
         bundle = {
             "target_id": str(uuid.uuid4()),
             "num_states": 1,
             "states": [{"form_fields": []}],
         }
-        verdict = _heuristic_fallback(bundle, reason="Foundry run failed")
-        assert "Foundry run failed" in (verdict.rationale or "")
-        assert "Foundry unavailable" not in (verdict.rationale or "")
+        verdict = _heuristic_fallback(bundle, reason="run Foundry fallito")
+        assert "run Foundry fallito" in (verdict.rationale or "")
+        assert "Foundry non disponibile" not in (verdict.rationale or "")
 
 
 # ---------------------------------------------------------------------------
@@ -515,8 +515,8 @@ class TestFoundryRunFailed:
     async def test_failed_run_falls_back_with_distinct_rationale(
         self, monkeypatch, caplog
     ):
-        """Run FAILED → fallback euristico con rationale 'Foundry run
-        failed' e last_error loggato (mai un FAILED muto)."""
+        """Run FAILED → fallback euristico con rationale 'run Foundry
+        fallito' e last_error loggato (mai un FAILED muto)."""
         monkeypatch.setattr(
             settings,
             "azure_foundry_endpoint",
@@ -548,8 +548,8 @@ class TestFoundryRunFailed:
             _unregister_fake_azure_modules(saved)
 
         assert verdict.produced_by == "heuristic_fallback"
-        assert "Foundry run failed" in (verdict.rationale or "")
-        assert "Foundry unavailable" not in (verdict.rationale or "")
+        assert "run Foundry fallito" in (verdict.rationale or "")
+        assert "Foundry non disponibile" not in (verdict.rationale or "")
         # Il motivo del FAILED deve essere loggato
         assert any(
             "last_error=Mock content-filter rejection" in rec.message
