@@ -217,6 +217,92 @@ class TestBuildTrellixResponse:
         assert resp["recommended_action"] == "block"
 
 
+class TestSuspiciousBlockThreshold:
+    """Blocco dei sospetti forti: suspicious con confidenza ≥ 0.6
+    (segnali deterministici misurati) → malicious/block.  Sotto soglia
+    resta il comportamento storico (safe/allow, confidenza cappata)."""
+
+    def test_strong_suspicious_maps_to_malicious_block(self):
+        """suspicious 0.6 → malicious/block con firma dedicata."""
+        from graph_engine.models import AnalysisTarget, TargetStatus
+
+        target = AnalysisTarget(
+            input_url="https://ledger-com-login.pages.dev/",
+            status=TargetStatus.done,
+        )
+        verdict = _verdict(
+            classification=Classification.suspicious,
+            confidence=0.6,
+        )
+        resp = build_trellix_response(
+            {"target": target, "verdict": verdict, "evidence": []},
+        )
+        assert resp["verdict"] == "malicious"
+        assert resp["recommended_action"] == "block"
+        assert resp["confidence"] >= 0.8
+        assert resp["signature"] == "Suspicious Site Blocked"
+
+    def test_weak_suspicious_stays_safe_allow(self):
+        """Dubbio debole (0.15, 0.4, 0.59) → safe/allow come da policy."""
+        from graph_engine.models import AnalysisTarget, TargetStatus
+
+        target = AnalysisTarget(
+            input_url="https://doubt.example/",
+            status=TargetStatus.done,
+        )
+        for conf in (0.15, 0.4, 0.59):
+            verdict = _verdict(
+                classification=Classification.suspicious,
+                confidence=conf,
+            )
+            resp = build_trellix_response(
+                {"target": target, "verdict": verdict, "evidence": []},
+            )
+            assert resp["verdict"] == "safe", f"conf={conf}"
+            assert resp["recommended_action"] == "allow", f"conf={conf}"
+            assert resp["confidence"] <= 0.5, f"conf={conf}"
+            assert (
+                resp["signature"] == "Suspicious Site (Low Confidence)"
+            ), f"conf={conf}"
+
+    def test_strong_suspicious_with_brand_keeps_impersonation(self):
+        """Blocco da soglia + brand → vince la firma d'attacco specifica."""
+        from graph_engine.models import AnalysisTarget, TargetStatus
+
+        target = AnalysisTarget(
+            input_url="https://ledger-com-login.pages.dev/",
+            status=TargetStatus.done,
+        )
+        verdict = _verdict(
+            classification=Classification.suspicious,
+            confidence=0.6,
+            brand="Ledger",
+        )
+        resp = build_trellix_response(
+            {"target": target, "verdict": verdict, "evidence": []},
+        )
+        assert resp["verdict"] == "malicious"
+        assert resp["signature"] == "Phishing: Ledger Impersonation"
+
+    def test_boundary_just_below_threshold_allows(self):
+        """0.5999 resta sotto soglia: il confine è ≥ 0.6."""
+        from graph_engine.models import AnalysisTarget, TargetStatus
+
+        target = AnalysisTarget(
+            input_url="https://border.example/",
+            status=TargetStatus.done,
+        )
+        verdict = _verdict(
+            classification=Classification.suspicious,
+            confidence=0.5999,
+        )
+        resp = build_trellix_response(
+            {"target": target, "verdict": verdict, "evidence": []},
+        )
+        assert resp["verdict"] == "safe"
+        assert resp["recommended_action"] == "allow"
+
+
 class TestEntryResponse:
     """Test di entry_response per allowlist/blacklist hit."""
 

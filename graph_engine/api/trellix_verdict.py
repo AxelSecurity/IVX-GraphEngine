@@ -26,11 +26,23 @@ from graph_engine.models import Classification
 # In dubbio (suspicious) → safe: meglio un falso negativo che bloccare
 # un sito legittimo.  La confidenza bassa e il rationale nel "reason"
 # rendono trasparente l'incertezza.
+#
+# ECCEZIONE (2026-08-31): i suspicious con confidenza ≥
+# ``_SUSPICIOUS_BLOCK_THRESHOLD`` (segnali deterministici FORTI e
+# misurati — es. cloaking rilevato + infrastruttura abuse-prone, o TLS
+# failure su hosting condiviso) vengono promossi a "malicious" in
+# ``build_trellix_response``: mandare safe/allow su un quasi certo
+# phishing è più costoso del raro falso positivo su un caso misurato.
 VERDICT_MAP: dict = {
     Classification.benign: "safe",
     Classification.suspicious: "safe",
     Classification.phishing: "malicious",
 }
+
+# Soglia di promozione suspicious → malicious: confidenza ≥ soglia =
+# segnali forti misurati, non dubbio debole.  Sotto soglia resta il
+# comportamento storico (safe/allow, confidenza cappata a 0.5).
+_SUSPICIOUS_BLOCK_THRESHOLD = 0.6
 
 # ---------------------------------------------------------------------------
 # Firme testuali
@@ -41,6 +53,7 @@ _SIG_GATE = "Suspicious Gate Bypass Detected"
 _SIG_CREDENTIAL = "Credential Harvesting Detected"
 _SIG_INCOMPLETE = "Analysis-Incomplete — Benign By Default"
 _SIG_FAILED = "Analysis-Failed"
+_SIG_SUSPICIOUS_BLOCK = "Suspicious Site Blocked"
 _SIG_GENERIC = {
     "phishing": "Phishing Page Detected",
     "benign": "No Threats Detected",
@@ -163,6 +176,11 @@ def build_signature(
         key = classification
     else:
         key = "suspicious"
+    if mapped == "malicious" and key == "suspicious":
+        # Blocco da soglia (segnali forti) senza firma d'attacco
+        # specifica: la firma "Low Confidence" sarebbe contraddittoria
+        # su un verdetto malicious.
+        return _SIG_SUSPICIOUS_BLOCK
     return _SIG_GENERIC.get(key, "Unclassified")
 
 
@@ -266,6 +284,19 @@ def build_trellix_response(data: dict | None) -> dict:
         if classification is not None
         else "safe"
     )
+
+    # ── Blocco dei sospetti forti ──────────────────────────────────────
+    # Un suspicious con confidenza alta è il prodotto di segnali
+    # deterministici MISURATI (cloaking, infrastruttura abuse-prone):
+    # promuoverlo a malicious evita di mandare safe/allow su un quasi
+    # certo phishing.  Sotto soglia resta il dubbio debole → allow.
+    if (
+        mapped == "safe"
+        and isinstance(classification, Classification)
+        and classification == Classification.suspicious
+        and confidence >= _SUSPICIOUS_BLOCK_THRESHOLD
+    ):
+        mapped = "malicious"
 
     if mapped == "malicious":
         confidence = round(max(0.8, confidence), 2)
