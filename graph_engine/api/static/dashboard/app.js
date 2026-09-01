@@ -227,7 +227,6 @@ function showLogin(message) {
   root.innerHTML = `
     <div class="login-card">
       <div class="login-title">Accedi alla dashboard</div>
-      <div class="login-hint">Le API e la UI richiedono autenticazione — inserisci le credenziali</div>
       <form id="login-form" class="login-form">
         <input type="text" id="login-username" placeholder="Username" autocomplete="username" required />
         <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" required />

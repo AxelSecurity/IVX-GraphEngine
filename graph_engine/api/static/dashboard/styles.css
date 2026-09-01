@@ -990,12 +990,6 @@ select { cursor: pointer; }
   margin-bottom: 6px;
 }
 
-.login-hint {
-  font-size: 13px;
-  color: var(--text-dim);
-  margin-bottom: 22px;
-}
-
 .login-form {
   display: flex;
   flex-direction: column;
