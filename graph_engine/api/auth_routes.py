@@ -25,6 +25,8 @@ from graph_engine.api.schemas import (
     UserCreateRequest,
     UserCreateResponse,
     UserDeleteResponse,
+    UserUpdateRequest,
+    UserUpdateResponse,
     UsersListResponse,
 )
 from graph_engine.storage.schema import DEFAULT_DB_PATH
@@ -106,7 +108,11 @@ def build_auth_router(
         users = await auth.list_users(db_path)
         return UsersListResponse(
             users=[
-                {"username": u["username"], "role": u["role"]}
+                {
+                    "username": u["username"],
+                    "role": u["role"],
+                    "created_at": u["created_at"],
+                }
                 for u in users
             ]
         )
@@ -129,9 +135,64 @@ def build_auth_router(
 
     @router.delete("/users/{username}", response_model=UserDeleteResponse)
     async def delete_user(username: str, request: Request):
-        """Cancella un utente (e le sue sessioni) — solo admin."""
-        _require_admin(request)
+        """Cancella un utente (e le sue sessioni) — solo admin.
+
+        Protezioni (2026-09-01, pagina Gestione utenti): un admin non può
+        cancellare il proprio account né eliminare l'ultimo admin rimasto
+        (altrimenti la gestione utenti resterebbe senza accesso).
+        """
+        me = _require_admin(request)
+        if username == me["username"]:
+            raise HTTPException(
+                status_code=409, detail="Non puoi eliminare il tuo account"
+            )
+        await _ensure_not_last_admin(db_path, username)
         removed = await auth.delete_user(db_path, username)
         return UserDeleteResponse(removed=removed)
 
+    # ── PATCH /auth/users/{username} (solo admin) ─────────────────────
+
+    @router.patch("/users/{username}", response_model=UserUpdateResponse)
+    async def update_user(username: str, payload: UserUpdateRequest, request: Request):
+        """Cambia password e/o ruolo di un utente — solo admin.
+
+        Se la password dell'utente corrente viene cambiata, la sua
+        sessione viene revocata (come le altre): dovrà rifare il login.
+        L'ultimo admin non può essere degradato a operator.
+        """
+        _require_admin(request)
+        if payload.role == "operator":
+            await _ensure_not_last_admin(db_path, username)
+        try:
+            updated = await auth.update_user(
+                db_path,
+                username,
+                password=payload.password,
+                role=payload.role,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Utente non trovato")
+        return UserUpdateResponse(username=username, role=updated["role"])
+
     return router
+
+
+async def _ensure_not_last_admin(db_path: str, username: str) -> None:
+    """409 se ``username`` è l'ultimo admin rimasto.
+
+    Impedisce di eliminare o degradare l'unico amministratore: senza
+    admin nessuno potrebbe più gestire gli utenti (e il bootstrap non
+    ne crea di nuovi a tabella non vuota).
+    """
+    users = await auth.list_users(db_path)
+    target = next((u for u in users if u["username"] == username), None)
+    if target is None or target["role"] != "admin":
+        return
+    admin_count = sum(1 for u in users if u["role"] == "admin")
+    if admin_count <= 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Impossibile: è l'ultimo amministratore rimasto",
+        )

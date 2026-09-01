@@ -331,6 +331,7 @@ class AuthUserResponse(BaseModel):
 
     username: str
     role: str  # "admin" | "operator"
+    created_at: Optional[str] = None  # presente solo nella lista (GET /auth/users)
 
 
 class LoginResponse(AuthUserResponse):
@@ -370,3 +371,21 @@ class UserDeleteResponse(BaseModel):
 
     ok: bool = True
     removed: bool
+
+
+class UserUpdateRequest(BaseModel):
+    """Body della PATCH /auth/users/{username} (solo admin).
+
+    Entrambi i campi sono opzionali: si cambia solo ciò che viene
+    valorizzato.  Cambiare la password revoca le sessioni attive
+    dell'utente (anche le proprie).
+    """
+
+    password: Optional[str] = Field(default=None, min_length=8, max_length=256)
+    role: Optional[str] = None  # "admin" | "operator"
+
+
+class UserUpdateResponse(AuthUserResponse):
+    """Risposta della PATCH /auth/users/{username} — ruolo allo stato finale."""
+
+    ok: bool = True

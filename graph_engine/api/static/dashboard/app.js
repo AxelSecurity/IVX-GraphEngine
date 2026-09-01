@@ -123,6 +123,7 @@ function currentRoute() {
   const detailMatch = hash.match(/^\/analyses\/([^/]+)/);
   if (detailMatch) return { name: "detail", id: detailMatch[1] };
   if (hash === "/lists") return { name: "lists" };
+  if (hash === "/users") return { name: "users" };
   return { name: "list" };
 }
 
@@ -196,9 +197,13 @@ function setUser(me) {
   }
   const logoutBtn = document.getElementById("logout-btn");
   const listsLink = document.getElementById("lists-link");
+  const usersLink = document.getElementById("users-link");
   const refreshBtn = document.getElementById("refresh-btn");
   if (logoutBtn) logoutBtn.hidden = false;
   if (listsLink) listsLink.hidden = false;
+  // La gestione utenti è SOLO admin: l'operatore non vede il link
+  // (e il server risponde 403 se la vista viene forzata via hash)
+  if (usersLink) usersLink.hidden = me.role !== "admin";
   if (refreshBtn) refreshBtn.hidden = false;
 }
 
@@ -207,10 +212,12 @@ function clearUserUi() {
   const userEl = document.getElementById("auth-user");
   const logoutBtn = document.getElementById("logout-btn");
   const listsLink = document.getElementById("lists-link");
+  const usersLink = document.getElementById("users-link");
   const refreshBtn = document.getElementById("refresh-btn");
   if (userEl) userEl.hidden = true;
   if (logoutBtn) logoutBtn.hidden = true;
   if (listsLink) listsLink.hidden = true;
+  if (usersLink) usersLink.hidden = true;
   if (refreshBtn) refreshBtn.hidden = true;
 }
 
@@ -301,6 +308,8 @@ async function render() {
     await renderDetail(route.id);
   } else if (route.name === "lists") {
     await renderLists();
+  } else if (route.name === "users") {
+    await renderUsers();
   } else {
     await renderList();
   }
@@ -919,6 +928,256 @@ async function renderLists() {
     document.getElementById("domain-rows").innerHTML =
       document.getElementById("url-rows").innerHTML =
         `<div class="error-state">Impossibile caricare le liste: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// ------------------------------------------------------------ users view
+// Gestione degli utenti della dashboard — vista #/users, SOLO admin.
+// L'operatore non vede il link in topbar; se forza l'hash, la vista
+// mostra un errore (e il server risponde 403 a ogni chiamata).
+
+function roleBadge(role) {
+  return role === "admin"
+    ? `<span class="badge role-admin">admin</span>`
+    : `<span class="badge role-operator">operator</span>`;
+}
+
+function showUsersNotice(kind, message) {
+  const el = document.getElementById("users-notice");
+  if (!el) return;
+  el.className = `list-notice ${kind}`; // "success" | "error"
+  el.textContent = message;
+}
+
+function userRowsHtml(users) {
+  if (!users.length) {
+    return `<div class="empty-state">Nessun utente — crea il primo.</div>`;
+  }
+  return users
+    .map((u) => {
+      const isMe = u.username === currentUser.username;
+      return `
+      <div class="list-row user-row">
+        <div class="list-row-main">
+          <span class="u">${escapeHtml(u.username)}${isMe ? ` <span class="h">(tu)</span>` : ""}</span>
+          <span class="h">creato il ${formatDate(u.created_at)}</span>
+        </div>
+        ${roleBadge(u.role)}
+        <select class="user-role" data-username="${escapeHtml(u.username)}"
+                aria-label="Ruolo di ${escapeHtml(u.username)}">
+          <option value="operator" ${u.role === "operator" ? "selected" : ""}>operator</option>
+          <option value="admin" ${u.role === "admin" ? "selected" : ""}>admin</option>
+        </select>
+        <button class="user-pass-btn" data-username="${escapeHtml(u.username)}" type="button">Password…</button>
+        <button class="list-remove" data-username="${escapeHtml(u.username)}" type="button"
+                title="${isMe ? "Non puoi eliminare il tuo account" : "Elimina utente"}"
+                aria-label="Elimina utente" ${isMe ? "disabled" : ""}>✕</button>
+        <div class="user-pass-form hidden">
+          <input type="password" class="user-pass-input" placeholder="Nuova password (min 8)"
+                 autocomplete="new-password" />
+          <button class="user-pass-ok" type="button">Salva</button>
+          <button class="user-pass-cancel" type="button">Annulla</button>
+        </div>
+      </div>`;
+    })
+    .join("");
+}
+
+async function loadUsersBody() {
+  const data = await fetchJSON("/auth/users");
+  const rowsEl = document.getElementById("user-rows");
+  const countEl = document.getElementById("user-count");
+  if (!rowsEl) return; // la vista è cambiata nel frattempo
+  countEl.textContent = String(data.users.length);
+  rowsEl.innerHTML = userRowsHtml(data.users);
+
+  // ── Cambio ruolo (PATCH) ────────────────────────────────────────────
+  rowsEl.querySelectorAll(".user-role").forEach((sel) => {
+    sel.addEventListener("change", async () => {
+      const username = sel.dataset.username;
+      const newRole = sel.value;
+      // Degradare se stessi revoca la propria sessione → logout forzato
+      if (username === currentUser.username && newRole !== "admin") {
+        const ok = window.confirm(
+          "Cambiando il TUO ruolo a operator perderai l'accesso alla gestione " +
+            "utenti e dovrai accedere di nuovo. Continuare?"
+        );
+        if (!ok) {
+          sel.value = "admin";
+          return;
+        }
+      }
+      try {
+        await fetchJSON(`/auth/users/${encodeURIComponent(username)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: newRole }),
+        });
+        showUsersNotice(
+          "success",
+          username === currentUser.username && newRole !== "admin"
+            ? `Ruolo aggiornato — ora sei operator: devi accedere di nuovo.`
+            : `Ruolo di ${username} aggiornato: ${newRole}.`
+        );
+      } catch (err) {
+        showUsersNotice("error", `Aggiornamento non riuscito: ${err.message}`);
+        return;
+      }
+      // Il reload può fallire con 401 se ci si è degradati da soli:
+      // l'interceptor mostra il login, che è il comportamento giusto.
+      await loadUsersBody().catch(() => {});
+    });
+  });
+
+  // ── Nuova password (PATCH) — form inline per riga ───────────────────
+  rowsEl.querySelectorAll(".user-pass-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const row = btn.closest(".list-row");
+      const form = row.querySelector(".user-pass-form");
+      const wasHidden = form.classList.contains("hidden");
+      // Chiude gli eventuali altri form aperti prima di aprirne uno nuovo
+      rowsEl.querySelectorAll(".user-pass-form").forEach((f) => {
+        f.classList.add("hidden");
+        f.querySelector(".user-pass-input").value = "";
+      });
+      if (wasHidden) {
+        form.classList.remove("hidden");
+        form.querySelector(".user-pass-input").focus();
+      }
+    });
+  });
+  rowsEl.querySelectorAll(".user-pass-ok").forEach((okBtn) => {
+    okBtn.addEventListener("click", async () => {
+      const row = okBtn.closest(".list-row");
+      const username = row.querySelector(".user-role").dataset.username;
+      const input = row.querySelector(".user-pass-input");
+      const password = input.value;
+      if (password.length < 8) {
+        showUsersNotice("error", "La password deve avere almeno 8 caratteri.");
+        return;
+      }
+      try {
+        await fetchJSON(`/auth/users/${encodeURIComponent(username)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password }),
+        });
+        showUsersNotice(
+          "success",
+          `Password di ${username} aggiornata.` +
+            (username === currentUser.username ? " Dovrai accedere di nuovo." : "")
+        );
+      } catch (err) {
+        showUsersNotice("error", `Aggiornamento non riuscito: ${err.message}`);
+        return;
+      }
+      await loadUsersBody().catch(() => {});
+    });
+  });
+  rowsEl.querySelectorAll(".user-pass-cancel").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const row = btn.closest(".list-row");
+      row.querySelector(".user-pass-form").classList.add("hidden");
+      row.querySelector(".user-pass-input").value = "";
+    });
+  });
+
+  // ── Eliminazione (DELETE) ───────────────────────────────────────────
+  rowsEl.querySelectorAll(".list-remove").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const username = btn.dataset.username;
+      if (!window.confirm(`Eliminare l'utente "${username}"? L'azione è irreversibile.`)) {
+        return;
+      }
+      try {
+        await fetchJSON(`/auth/users/${encodeURIComponent(username)}`, {
+          method: "DELETE",
+        });
+        showUsersNotice("success", `Utente eliminato: ${username}`);
+      } catch (err) {
+        showUsersNotice("error", `Eliminazione non riuscita: ${err.message}`);
+        return;
+      }
+      await loadUsersBody().catch(() => {});
+    });
+  });
+}
+
+async function renderUsers() {
+  if (!currentUser || currentUser.role !== "admin") {
+    root.innerHTML = `<div class="error-state">Richiede ruolo admin.</div>`;
+    return;
+  }
+  root.innerHTML = `
+    <div class="page-head">
+      <div>
+        <div class="page-title">Gestione utenti</div>
+        <div class="page-hint">Chi può accedere alla dashboard: ruoli admin/operator, password con hash PBKDF2 in SQLite</div>
+      </div>
+    </div>
+    <button class="back-link" id="back-link">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M19 12H5m6-6-6 6 6 6"></path>
+      </svg>
+      Torna alle sottomissioni
+    </button>
+
+    <div class="card lists-form-card">
+      <form id="user-add-form" class="lists-form">
+        <input type="text" id="add-username" placeholder="Username" autocomplete="off" spellcheck="false" />
+        <input type="password" id="add-password" placeholder="Password (min 8 caratteri)" autocomplete="new-password" />
+        <select id="add-role" aria-label="Ruolo del nuovo utente">
+          <option value="operator">operator</option>
+          <option value="admin">admin</option>
+        </select>
+        <button type="submit" id="add-user-btn">Crea utente</button>
+      </form>
+      <div class="list-notice hidden" id="users-notice"></div>
+    </div>
+
+    <div class="card list-card">
+      <div class="list-card-head">Utenti <span class="count-pill" id="user-count">…</span></div>
+      <div class="list-hint">La sessione vive in un cookie HttpOnly di 12h; cambiare password o ruolo revoca le sessioni attive dell'utente</div>
+      <div id="user-rows"><div class="skeleton"></div></div>
+    </div>
+  `;
+
+  document.getElementById("back-link").addEventListener("click", () => navigate("#/"));
+
+  document.getElementById("user-add-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const username = document.getElementById("add-username").value.trim();
+    const password = document.getElementById("add-password").value;
+    const role = document.getElementById("add-role").value;
+    if (!username) {
+      showUsersNotice("error", "Inserisci uno username.");
+      return;
+    }
+    if (password.length < 8) {
+      showUsersNotice("error", "La password deve avere almeno 8 caratteri.");
+      return;
+    }
+    try {
+      await fetchJSON("/auth/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password, role }),
+      });
+      showUsersNotice("success", `Utente creato: ${username} (${role}).`);
+      document.getElementById("add-username").value = "";
+      document.getElementById("add-password").value = "";
+    } catch (err) {
+      showUsersNotice("error", `Creazione fallita: ${err.message}`);
+      return;
+    }
+    await loadUsersBody().catch(() => {});
+  });
+
+  try {
+    await loadUsersBody();
+  } catch (e) {
+    document.getElementById("user-rows").innerHTML =
+      `<div class="error-state">Impossibile caricare gli utenti: ${escapeHtml(e.message)}</div>`;
   }
 }
 

@@ -324,6 +324,62 @@ async def set_password(db_path: str, username: str, password: str) -> bool:
     return updated
 
 
+async def update_user(
+    db_path: str,
+    username: str,
+    password: Optional[str] = None,
+    role: Optional[str] = None,
+) -> Optional[dict]:
+    """Aggiorna password e/o ruolo di un utente; revoca le sessioni se
+    qualcosa è cambiato (il ruolo nella sessione in memoria diventerebbe
+    stantio).
+
+    Returns:
+        ``{"username", "role"}`` con lo stato finale, ``None`` se
+        l'utente non esiste.
+
+    Raises:
+        ValueError: ruolo non valido o password vuota.
+    """
+    if role is not None and role not in ("admin", "operator"):
+        raise ValueError(f"role deve essere 'admin' o 'operator', non '{role}'")
+    if password is not None and not password:
+        raise ValueError("password vuota")
+
+    await _ensure_table(db_path)
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute("PRAGMA foreign_keys = ON")
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT username, role FROM users WHERE username = ?", (username,)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        final_role = role if role is not None else row["role"]
+        if password is not None:
+            await conn.execute(
+                "UPDATE users SET password_hash = ? WHERE username = ?",
+                (hash_password(password), username),
+            )
+        if role is not None and role != row["role"]:
+            await conn.execute(
+                "UPDATE users SET role = ? WHERE username = ?",
+                (role, username),
+            )
+        await conn.commit()
+
+    if password is not None or (role is not None and role != row["role"]):
+        revoke_user_sessions(username)
+        logger.info(
+            "Utente aggiornato: %s (role=%s%s)",
+            username,
+            final_role,
+            ", password cambiata" if password is not None else "",
+        )
+    return {"username": username, "role": final_role}
+
+
 async def ensure_bootstrap_admin(db_path: str) -> None:
     """Crea l'amministratore iniziale se la tabella utenti è vuota.
 

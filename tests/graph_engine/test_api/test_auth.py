@@ -11,9 +11,12 @@ già autenticata come admin, la seconda non ha cookie di sessione.
 
 from __future__ import annotations
 
+import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from graph_engine.api import auth as auth_mod
+from graph_engine.api import auth_routes
 from graph_engine.config import settings
 
 
@@ -164,7 +167,7 @@ class TestUserManagement:
             json={"username": "oper", "password": "password-oper", "role": "operator"},
         )
         token = auth_mod.create_session("oper", "operator")
-        # Sessione operator: GET/POST/DELETE /auth/users → 403
+        # Sessione operator: GET/POST/PATCH/DELETE /auth/users → 403
         async with AsyncClient(
             transport=ASGITransport(app=app),
             base_url="http://test",
@@ -178,6 +181,12 @@ class TestUserManagement:
                 )
             ).status_code == 403
             assert (
+                await op_client.patch(
+                    "/auth/users/admin",
+                    json={"role": "operator"},
+                )
+            ).status_code == 403
+            assert (
                 await op_client.request("DELETE", "/auth/users/admin")
             ).status_code == 403
 
@@ -188,6 +197,136 @@ class TestUserManagement:
             cookies={"session": token},
         ) as op_client:
             assert (await op_client.get("/analyses")).status_code == 200
+
+    async def test_users_list_includes_created_at(self, client):
+        res = await client.get("/auth/users")
+        users = res.json()["users"]
+        assert all("created_at" in u and u["created_at"] for u in users)
+
+
+class TestUserUpdate:
+    """PATCH /auth/users/{username} — cambio password e ruolo (2026-09-01)."""
+
+    async def _create(self, client, username, password, role):
+        res = await client.post(
+            "/auth/users",
+            json={"username": username, "password": password, "role": role},
+        )
+        assert res.status_code == 201
+
+    async def test_update_password(self, client, anon_client):
+        await self._create(client, "oper", "password-vecchia", "operator")
+        res = await client.patch(
+            "/auth/users/oper", json={"password": "password-nuova"}
+        )
+        assert res.status_code == 200
+
+        # Vecchia password rifiutata, nuova accettata
+        old = await anon_client.post(
+            "/auth/login",
+            json={"username": "oper", "password": "password-vecchia"},
+        )
+        assert old.status_code == 401
+        new = await anon_client.post(
+            "/auth/login",
+            json={"username": "oper", "password": "password-nuova"},
+        )
+        assert new.status_code == 200
+
+    async def test_update_role_promotes_operator(self, client, anon_client):
+        await self._create(client, "oper", "password-oper", "operator")
+        res = await client.patch(
+            "/auth/users/oper", json={"role": "admin"}
+        )
+        assert res.status_code == 200
+        assert res.json()["role"] == "admin"
+
+        # Il nuovo admin può gestire gli utenti dopo il login
+        login = await anon_client.post(
+            "/auth/login",
+            json={"username": "oper", "password": "password-oper"},
+        )
+        assert login.status_code == 200
+        assert login.json()["role"] == "admin"
+
+    async def test_update_password_and_role_together(self, client):
+        await self._create(client, "oper", "password-oper", "operator")
+        res = await client.patch(
+            "/auth/users/oper",
+            json={"password": "password-doppia", "role": "admin"},
+        )
+        assert res.status_code == 200
+        assert res.json()["role"] == "admin"
+
+    async def test_update_own_password_revokes_current_session(self, client):
+        res = await client.patch(
+            "/auth/users/admin", json={"password": "password-nuova-admin"}
+        )
+        assert res.status_code == 200
+        # La sessione corrente è stata revocata → 401 al prossimo uso
+        assert (await client.get("/auth/me")).status_code == 401
+
+    async def test_update_own_role_revokes_current_session(self, client):
+        # Serve un secondo admin: l'ultimo non può degradarsi
+        await self._create(client, "capo", "password-capo", "admin")
+        res = await client.patch(
+            "/auth/users/admin", json={"role": "operator"}
+        )
+        assert res.status_code == 200
+        assert (await client.get("/auth/me")).status_code == 401
+
+    async def test_cannot_demote_last_admin(self, client):
+        """Unico admin → PATCH role operator è rifiutata (409)."""
+        res = await client.patch(
+            "/auth/users/admin", json={"role": "operator"}
+        )
+        assert res.status_code == 409
+        assert "ultimo amministratore" in res.json()["detail"]
+
+    async def test_ensure_not_last_admin_rejects_sole_admin(self, app):
+        """Guardia difensiva: l'eliminazione dell'unico admin è bloccata.
+
+        Via route il caso non è raggiungibile per il DELETE (chi elimina
+        è a sua volta admin → il target non sarebbe mai "l'ultimo", e il
+        self-delete è già vietato a monte), ma la route la invoca
+        comunque come difesa in profondità: la si testa direttamente.
+        """
+        await auth_mod.ensure_bootstrap_admin(app.state.db_path)
+        with pytest.raises(HTTPException) as exc_info:
+            await auth_routes._ensure_not_last_admin(app.state.db_path, "admin")
+        assert exc_info.value.status_code == 409
+        assert "ultimo amministratore" in exc_info.value.detail
+
+    async def test_cannot_delete_self_even_with_other_admins(self, client):
+        """Con più admin, eliminare il PROPRIO account resta vietato."""
+        await self._create(client, "capo", "password-capo", "admin")
+        res = await client.request("DELETE", "/auth/users/admin")
+        assert res.status_code == 409
+        assert "tuo account" in res.json()["detail"]
+
+    async def test_delete_other_admin_allowed(self, client):
+        await self._create(client, "capo", "password-capo", "admin")
+        res = await client.request("DELETE", "/auth/users/capo")
+        assert res.status_code == 200
+        assert res.json()["removed"] is True
+
+    async def test_update_unknown_user_returns_404(self, client):
+        res = await client.patch(
+            "/auth/users/inesistente", json={"password": "password-x-123"}
+        )
+        assert res.status_code == 404
+
+    async def test_update_short_password_returns_422(self, client):
+        res = await client.patch(
+            "/auth/users/admin", json={"password": "corta"}
+        )
+        assert res.status_code == 422
+
+    async def test_update_invalid_role_returns_409(self, client):
+        res = await client.patch(
+            "/auth/users/admin", json={"role": "superuser"}
+        )
+        assert res.status_code == 409
 
 
 class TestPasswordHashing:

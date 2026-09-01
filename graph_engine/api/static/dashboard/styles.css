@@ -948,6 +948,79 @@ select { cursor: pointer; }
 }
 .list-remove:hover { color: var(--phishing); border-color: rgba(251, 88, 120, 0.45); background: var(--phishing-soft); }
 
+/* ------------------------------------------------------------ users view */
+
+.user-row { flex-wrap: wrap; }
+
+.badge.role-admin { color: var(--accent); background: var(--accent-soft); }
+.badge.role-operator { color: var(--neutral); background: var(--neutral-soft); }
+
+.user-role {
+  flex: 0 0 auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: var(--font);
+  cursor: pointer;
+}
+
+.user-pass-btn {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius-sm);
+  padding: 5px 10px;
+  font-size: 12px;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.user-pass-btn:hover { color: var(--accent); border-color: rgba(124, 156, 255, 0.45); background: var(--accent-soft); }
+
+.user-pass-form {
+  flex: 1 1 100%;
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+.user-pass-input {
+  flex: 1 1 220px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: var(--font);
+}
+.user-pass-ok {
+  background: var(--benign-soft);
+  border: 1px solid rgba(52, 211, 153, 0.45);
+  color: var(--benign);
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+}
+.user-pass-cancel {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-family: var(--font);
+  cursor: pointer;
+}
+
+.list-remove:disabled { opacity: 0.35; cursor: not-allowed; }
+
 /* ------------------------------------------------------------------ misc */
 
 .hidden { display: none !important; }
