@@ -60,9 +60,11 @@ uvicorn graph_engine.api.app:app --reload
 
 Una dashboard web mostra tutte le sottomissioni effettuate e, cliccandoci
 sopra, tutti i dettagli estratti — grafo di esplorazione, stati con
-screenshot, evidenze per livello, verdetto. È servita dalla stessa app
-FastAPI dell'API (nessun servizio separato, nessuna porta aggiuntiva):
-con l'API già avviata, apri `http://localhost:8000/dashboard`.
+screenshot, evidenze per livello, verdetto. In cima alla vista c'è anche
+il form per **sottomettere nuovi URL** (classificazione L5 e budget
+opzionali), con le stesse regole della POST `/analyses`. È servita dalla
+stessa app FastAPI dell'API (nessun servizio separato, nessuna porta
+aggiuntiva): con l'API già avviata, apri `http://localhost:8000/dashboard`.
 
 Dalla voce **"Liste forzate"** si gestiscono whitelist/blacklist per
 **domini** (match sul dominio registrabile, eTLD+1) e per **URL** (match

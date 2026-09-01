@@ -216,6 +216,36 @@ async function renderList() {
         <div class="page-hint">Tutte le analisi eseguite dal motore multilayer L0→L5</div>
       </div>
     </div>
+    <div class="card submit-card">
+      <form id="submit-form" class="submit-form">
+        <div class="submit-row">
+          <input type="text" id="submit-url" placeholder="https://… — incolla qui l'URL da analizzare"
+                 autocomplete="off" spellcheck="false" />
+          <button type="submit" id="submit-btn">Analizza</button>
+        </div>
+        <div class="submit-opts">
+          <label class="submit-check">
+            <input type="checkbox" id="submit-classify" checked />
+            Classificazione L5 (Foundry)
+          </label>
+          <details class="submit-advanced">
+            <summary>Budget di esplorazione</summary>
+            <div class="submit-budget">
+              <label>Profondità max
+                <input type="number" id="submit-depth" min="1" max="20" placeholder="6" />
+              </label>
+              <label>Nodi max
+                <input type="number" id="submit-nodes" min="1" max="200" placeholder="40" />
+              </label>
+              <label>Timeout (s)
+                <input type="number" id="submit-timeout" min="10" max="3600" placeholder="180" />
+              </label>
+            </div>
+          </details>
+        </div>
+      </form>
+      <div class="list-notice hidden" id="submit-notice"></div>
+    </div>
     <div class="toolbar">
       <div class="search-box">
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
@@ -277,6 +307,60 @@ async function renderList() {
     toggleAllOnPage();
   });
   document.getElementById("delete-btn").addEventListener("click", openDeleteDialog);
+
+  // ── Form di sottomissione ─────────────────────────────────────────────
+  // POST /analyses con gli stessi campi della CLI/API; se l'URL è in una
+  // lista forzata la risposta arriva già "done" (bypass) e il messaggio
+  // lo dichiara — altrimenti "queued" e il poll della lista la segue.
+  document.getElementById("submit-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const url = document.getElementById("submit-url").value.trim();
+    if (!url) {
+      showSubmitNotice("error", "Inserisci un URL da analizzare.");
+      return;
+    }
+    const btn = document.getElementById("submit-btn");
+    btn.disabled = true;
+    try {
+      const payload = {
+        url,
+        classify: document.getElementById("submit-classify").checked,
+      };
+      const depth = document.getElementById("submit-depth").value;
+      const nodes = document.getElementById("submit-nodes").value;
+      const timeout = document.getElementById("submit-timeout").value;
+      if (depth || nodes || timeout) {
+        payload.budget = {};
+        if (depth) payload.budget.max_depth = Number(depth);
+        if (nodes) payload.budget.max_nodes = Number(nodes);
+        if (timeout) payload.budget.timeout_s = Number(timeout);
+      }
+      const res = await fetchJSON("/analyses", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (res.status === "done") {
+        showSubmitNotice(
+          "success",
+          `Lista forzata: verdetto immediato senza analisi. ` +
+            `<a href="#/analyses/${res.id}">Apri il dettaglio</a>`
+        );
+      } else {
+        showSubmitNotice(
+          "success",
+          `Analisi avviata. ` +
+            `<a href="#/analyses/${res.id}">Segui il dettaglio</a>`
+        );
+      }
+      document.getElementById("submit-url").value = "";
+    } catch (err) {
+      showSubmitNotice("error", `Sottomissione fallita: ${escapeHtml(err.message)}`);
+    } finally {
+      btn.disabled = false;
+    }
+    loadAndRenderListBody().catch(() => {});
+  });
 
   try {
     await loadAndRenderListBody();
@@ -596,6 +680,16 @@ function showListsNotice(kind, message) {
   if (!el) return;
   el.className = `list-notice ${kind}`; // "success" | "error"
   el.textContent = message;
+}
+
+function showSubmitNotice(kind, message) {
+  // Come showListsNotice ma con innerHTML (il messaggio di successo
+  // contiene il link al dettaglio; l'unico dato dinamico è l'id UUID
+  // restituito dal server, non input dell'utente).
+  const el = document.getElementById("submit-notice");
+  if (!el) return;
+  el.className = `list-notice ${kind}`;
+  el.innerHTML = message;
 }
 
 async function loadListsBody() {
