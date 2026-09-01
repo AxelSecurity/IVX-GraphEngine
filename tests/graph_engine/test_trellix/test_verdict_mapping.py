@@ -319,3 +319,32 @@ class TestEntryResponse:
         assert resp["confidence"] == 1.0
         assert resp["recommended_action"] == "block"
         assert "Known phish" in resp["reason"]
+
+    def test_whitelist_url_entry_signature(self):
+        """Hit su lista URL: firma e reason dichiarano il livello URL."""
+        resp = entry_response({
+            "list_type": "whitelist",
+            "note": None,
+            "matched": "url",
+            "match_key": "https://site.it/trusted",
+        })
+        assert resp["verdict"] == "safe"
+        assert resp["signature"] == "Whitelist-Override: URL explicitly trusted"
+        assert resp["reason"] == "URL in whitelist — analisi bypassata."
+
+    def test_blacklist_url_entry_signature(self):
+        resp = entry_response({
+            "list_type": "blacklist",
+            "note": None,
+            "matched": "url",
+            "match_key": "https://site.it/evil",
+        })
+        assert resp["verdict"] == "malicious"
+        assert resp["signature"] == "Blacklist-Override: URL explicitly blocked"
+        assert resp["reason"] == "URL in blacklist — analisi bypassata."
+
+    def test_domain_entry_signature_unchanged(self):
+        """Senza 'matched' (entry dominio) le firme storiche restano invariate."""
+        resp = entry_response({"list_type": "whitelist", "note": None})
+        assert resp["signature"] == "Whitelist-Override: Domain explicitly trusted"
+        assert resp["reason"] == "Dominio in whitelist — analisi bypassata."

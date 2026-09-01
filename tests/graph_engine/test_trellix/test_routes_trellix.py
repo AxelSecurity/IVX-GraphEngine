@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from graph_engine.api.allowlist import add_entry
+from graph_engine.api.allowlist import add_entry, add_url_entry
 from graph_engine.models import (
     AnalysisTarget,
     Classification,
@@ -71,6 +71,61 @@ class TestRoutesTrellix:
         assert body["verdict"] == "malicious"
         assert body["confidence"] == 1.0
         assert not called, "run_full_analysis was called despite blacklist hit"
+
+    async def test_url_whitelist_bypasses_analysis(self, app, client, tmp_path, monkeypatch):
+        """Hit sulla lista URL (query ignorata) → safe immediato con firma URL."""
+        db = str(tmp_path / "test.db")
+        await add_url_entry("https://example.com/trusted", "whitelist", db_path=db)
+
+        called = False
+
+        async def _fake_pipeline(*args, **kwargs):
+            nonlocal called
+            called = True
+            return "should-not-be-called"
+
+        monkeypatch.setattr(
+            "graph_engine.api.routes_trellix.run_full_analysis",
+            _fake_pipeline,
+        )
+
+        res = await client.get(
+            "/trellix/analyze?url=https://example.com/trusted?sid=abc"
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["verdict"] == "safe"
+        assert body["confidence"] == 1.0
+        assert body["signature"] == "Whitelist-Override: URL explicitly trusted"
+        assert not called, "run_full_analysis was called despite URL whitelist hit"
+
+    async def test_url_blacklist_wins_over_domain_whitelist(
+        self, app, client, tmp_path, monkeypatch,
+    ):
+        """Dominio in whitelist ma URL specifica in blacklist → vince la URL
+        (più specifica): verdetto malicious immediato."""
+        db = str(tmp_path / "test.db")
+        await add_entry("example.com", "whitelist", db_path=db)
+        await add_url_entry("https://example.com/evil", "blacklist", db_path=db)
+
+        called = False
+
+        async def _fake_pipeline(*args, **kwargs):
+            nonlocal called
+            called = True
+            return "should-not-be-called"
+
+        monkeypatch.setattr(
+            "graph_engine.api.routes_trellix.run_full_analysis",
+            _fake_pipeline,
+        )
+
+        res = await client.get("/trellix/analyze?url=https://example.com/evil")
+        assert res.status_code == 200
+        body = res.json()
+        assert body["verdict"] == "malicious"
+        assert body["signature"] == "Blacklist-Override: URL explicitly blocked"
+        assert not called, "run_full_analysis was called despite URL blacklist hit"
 
     # ------------------------------------------------------------------
     # Cache hit (analisi recente) → risposta immediata

@@ -26,11 +26,10 @@ import asyncio
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from graph_engine.api.allowlist import check_domain
+from graph_engine.api.allowlist import check_url_and_domain
 from graph_engine.api.pipeline_runner import run_full_analysis
 from graph_engine.api.trellix_verdict import build_trellix_response, entry_response
 from graph_engine.config import settings
@@ -106,16 +105,14 @@ def build_trellix_router(
         if len(target_url) > 2048:
             raise HTTPException(status_code=422, detail="URL troppo lungo (max 2048)")
 
-        # ── 2. Allowlist check ─────────────────────────────────────────
-        hostname = urlparse(target_url).hostname
-        if hostname:
-            entry = await check_domain(hostname, db_path=db_path)
-            if entry is not None:
-                logger.info(
-                    "Trellix allowlist hit: %s → %s",
-                    hostname, entry["list_type"],
-                )
-                return entry_response(entry)
+        # ── 2. Allowlist check (URL prima, poi dominio) ────────────────
+        entry = await check_url_and_domain(target_url, db_path=db_path)
+        if entry is not None:
+            logger.info(
+                "Trellix allowlist hit: %s (%s) → %s",
+                entry["match_key"], entry["matched"], entry["list_type"],
+            )
+            return entry_response(entry)
 
         # ── 3. Cache check (24h TTL) ───────────────────────────────────
         from graph_engine.ingestion.pipeline import ingest

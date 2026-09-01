@@ -87,6 +87,14 @@ Tutti modelli Pydantic v2 con `from __future__ import annotations`:
    - Per il resto `None`: L1/L2/L3 con segnale reale NON vengono mai intercettati come "dati insufficienti".
 2. **`classify()`** → Foundry Agent (Azure AI Projects SDK) — solo se il prefilter restituisce None
 
+### Whitelist/Blacklist forzate (2026-09-01)
+
+Gestite in `api/allowlist.py` (due tabelle SQLite: `allowlist_blacklist` per i DOMINI, `allowlist_blacklist_url` per le URL), esposte via `GET/POST/DELETE /lists` e gestite dalla dashboard nella vista `#/lists` ("Liste forzate" nella topbar). Decisioni utente (2026-09-01):
+
+- **Match dominio** sul dominio registrabile (eTLD+1); **match URL** sulla URL normalizzata L0 SENZA query/frammento (scheme+host+path), solo http/https.
+- **Priorità: vince il match più specifico — URL > dominio** (`check_url_and_domain`).
+- **Bypass ovunque**: la route Trellix risponde subito con `entry_response` (firma `Whitelist/Blacklist-Override: URL|Domain explicitly …`, confidence 1.0); il POST /analyses NON accoda la pipeline — crea il target già `done` con verdetto forzato (`produced_by="prefilter"`, classification benign|phishing, rationale trasparente).
+
 ## Vincoli NON NEGOZIABILI
 
 Questi vincoli non devono mai essere violati. Se una modifica li contraddice, va bloccata.

@@ -16,6 +16,14 @@ import aiosqlite
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
+from graph_engine.api.allowlist import (
+    add_entry,
+    add_url_entry,
+    check_url_and_domain,
+    list_entries,
+    remove_entry,
+    remove_url_entry,
+)
 from graph_engine.api.artifact_cleanup import remove_artifact_dirs
 from graph_engine.api.pipeline_runner import DEFAULT_ARTIFACT_ROOT, run_full_analysis
 from graph_engine.api.schemas import (
@@ -32,13 +40,18 @@ from graph_engine.api.schemas import (
     HealthResponse,
     HistoryEntry,
     HistoryResponse,
+    ListAddRequest,
+    ListAddResponse,
+    ListRemoveRequest,
+    ListRemoveResponse,
+    ListsResponse,
     TargetSummary,
     TrellixVerdictResponse,
     VerdictSummary,
 )
 from graph_engine.api.trellix_verdict import build_trellix_response
 from graph_engine.budget import Budget
-from graph_engine.models import AnalysisTarget, TargetStatus
+from graph_engine.models import AnalysisTarget, Classification, TargetStatus, Verdict
 from graph_engine.storage.repository import (
     count_targets,
     delete_targets,
@@ -136,8 +149,56 @@ def build_router(
         Il target viene creato e salvato come ``queued`` **prima** di
         lanciare ``asyncio.create_task`` — un GET immediato sull'id
         restituito non darà mai 404.
+
+        Bypass whitelist/blacklist: se la URL (o il suo dominio
+        registrabile) è in una lista forzata, la pipeline NON parte —
+        il target nasce direttamente ``done`` col verdetto forzato
+        (``produced_by="prefilter"``, confidenza 1.0, rationale
+        trasparente).  Vince il match più specifico (URL > dominio).
         """
         url = payload.url.strip()
+
+        # ── Bypass allowlist/blacklist (URL prima, poi dominio) ─────────
+        entry = await check_url_and_domain(url, db_path=db_path)
+        if entry is not None:
+            from graph_engine.ingestion.pipeline import ingest
+
+            ingested = ingest(url)
+            target = AnalysisTarget(
+                input_url=url,
+                canonical_url=ingested["canonical_url"],
+                url_hash=ingested["url_hash"],
+                status=TargetStatus.done,
+            )
+            classification = (
+                Classification.phishing
+                if entry["list_type"] == "blacklist"
+                else Classification.benign
+            )
+            livello = "URL" if entry["matched"] == "url" else "dominio"
+            verdict = Verdict(
+                target_id=target.id,
+                classification=classification,
+                confidence=1.0,
+                produced_by="prefilter",
+                rationale=(
+                    f"Forzato dalla {entry['list_type']} ({livello} "
+                    f"{entry['match_key']}) — analisi bypassata."
+                ),
+            )
+            await save_target(target, [], [], [], verdict, db_path=db_path)
+            logger.info(
+                "Analysis %s bypassed by %s (%s): %s",
+                target.id,
+                entry["list_type"],
+                entry["matched"],
+                entry["match_key"],
+            )
+            return AnalysisCreatedResponse(
+                id=str(target.id),
+                status="done",
+                input_url=url,
+            )
 
         # Crea e salva il target come "queued" — AWAITED prima del task
         target = AnalysisTarget(input_url=url)
@@ -434,6 +495,76 @@ def build_router(
             raise HTTPException(status_code=404, detail="Artefatto non trovato")
 
         return FileResponse(file_path, media_type=media_type)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # GET/POST/DELETE /lists — whitelist/blacklist (domini e URL)
+    # ──────────────────────────────────────────────────────────────────────
+
+    @router.get("/lists", response_model=ListsResponse)
+    async def get_lists():
+        """Elenca le due liste forzate (domini e URL), ordinate per valore."""
+        return await list_entries(db_path=db_path)
+
+    @router.post(
+        "/lists",
+        status_code=201,
+        response_model=ListAddResponse,
+    )
+    async def add_list_entry(payload: ListAddRequest):
+        """Aggiunge (o sovrascrive) una entry in una lista forzata.
+
+        Il valore viene normalizzato prima del salvataggio (dominio
+        registrabile, o URL senza query/frammento): la risposta riporta
+        il valore effettivamente salvato.
+        """
+        if payload.kind not in ("domain", "url"):
+            raise HTTPException(
+                status_code=422,
+                detail="'kind' deve essere 'domain' o 'url'",
+            )
+        try:
+            if payload.kind == "domain":
+                normalized = await add_entry(
+                    payload.value,
+                    payload.list_type,
+                    note=payload.note,
+                    added_by="dashboard",
+                    db_path=db_path,
+                )
+            else:
+                normalized = await add_url_entry(
+                    payload.value,
+                    payload.list_type,
+                    note=payload.note,
+                    added_by="dashboard",
+                    db_path=db_path,
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        return ListAddResponse(
+            kind=payload.kind,
+            value=normalized,
+            list_type=payload.list_type,
+        )
+
+    @router.delete("/lists", response_model=ListRemoveResponse)
+    async def remove_list_entry(payload: ListRemoveRequest):
+        """Rimuove una entry da una lista forzata."""
+        if payload.kind not in ("domain", "url"):
+            raise HTTPException(
+                status_code=422,
+                detail="'kind' deve essere 'domain' o 'url'",
+            )
+        try:
+            if payload.kind == "domain":
+                removed = await remove_entry(payload.value, db_path=db_path)
+            else:
+                removed = await remove_url_entry(payload.value, db_path=db_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        return ListRemoveResponse(removed=removed)
 
     # ──────────────────────────────────────────────────────────────────────
     # GET /health

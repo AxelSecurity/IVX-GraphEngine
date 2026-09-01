@@ -64,6 +64,12 @@ screenshot, evidenze per livello, verdetto. È servita dalla stessa app
 FastAPI dell'API (nessun servizio separato, nessuna porta aggiuntiva):
 con l'API già avviata, apri `http://localhost:8000/dashboard`.
 
+Dalla voce **"Liste forzate"** si gestiscono whitelist/blacklist per
+**domini** (match sul dominio registrabile, eTLD+1) e per **URL** (match
+sulla URL normalizzata senza query/frammento). Un hit forza subito il
+verdetto e salta l'analisi — sia nella dashboard che nella risposta a
+Trellix; in caso di conflitto vince il match più specifico (URL > dominio).
+
 I dettagli di ogni livello, gli schemi dati e le decisioni tecniche sono
 documentati in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 

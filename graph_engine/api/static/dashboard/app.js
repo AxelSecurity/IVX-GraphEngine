@@ -27,8 +27,8 @@ const TRANSITION_LABELS = {
 
 // ---------------------------------------------------------------- helpers
 
-async function fetchJSON(url) {
-  const res = await fetch(url);
+async function fetchJSON(url, options = {}) {
+  const res = await fetch(url, options);
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -110,6 +110,7 @@ function currentRoute() {
   const hash = window.location.hash.replace(/^#/, "") || "/";
   const detailMatch = hash.match(/^\/analyses\/([^/]+)/);
   if (detailMatch) return { name: "detail", id: detailMatch[1] };
+  if (hash === "/lists") return { name: "lists" };
   return { name: "list" };
 }
 
@@ -190,6 +191,8 @@ async function render() {
   const route = currentRoute();
   if (route.name === "detail") {
     await renderDetail(route.id);
+  } else if (route.name === "lists") {
+    await renderLists();
   } else {
     await renderList();
   }
@@ -549,6 +552,173 @@ document.getElementById("delete-confirm").addEventListener("click", async () => 
     }
   });
 });
+
+// ------------------------------------------------------------ lists view
+// Whitelist/blacklist forzate (domini e URL) — vista #/lists.
+// Il match avviene sul dominio registrabile o sulla URL normalizzata
+// senza query/frammento; la URL (più specifica) vince sul dominio.
+
+function listBadge(listType) {
+  return listType === "whitelist"
+    ? `<span class="badge cls-benign">Whitelist</span>`
+    : `<span class="badge cls-phishing">Blacklist</span>`;
+}
+
+function listRowsHtml(entries, kind) {
+  if (!entries.length) {
+    return `<div class="empty-state">Nessun ${kind === "domain" ? "dominio" : "URL"} in lista.</div>`;
+  }
+  return entries
+    .map((en) => {
+      const meta = [
+        en.note ? escapeHtml(en.note) : null,
+        en.added_by ? `da ${escapeHtml(en.added_by)}` : null,
+        en.added_at ? formatDate(en.added_at) : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      return `
+      <div class="list-row">
+        <div class="list-row-main">
+          <span class="u" title="${escapeHtml(en.value)}">${escapeHtml(truncateMiddle(en.value, 90))}</span>
+          ${meta ? `<span class="h">${meta}</span>` : ""}
+        </div>
+        ${listBadge(en.list_type)}
+        <button class="list-remove" data-kind="${escapeHtml(kind)}" data-value="${escapeHtml(en.value)}"
+                title="Rimuovi dalla lista" aria-label="Rimuovi dalla lista">✕</button>
+      </div>`;
+    })
+    .join("");
+}
+
+function showListsNotice(kind, message) {
+  const el = document.getElementById("lists-notice");
+  if (!el) return;
+  el.className = `list-notice ${kind}`; // "success" | "error"
+  el.textContent = message;
+}
+
+async function loadListsBody() {
+  const data = await fetchJSON("/lists");
+  const domEl = document.getElementById("domain-rows");
+  const urlEl = document.getElementById("url-rows");
+  const domCount = document.getElementById("domain-count");
+  const urlCount = document.getElementById("url-count");
+  if (!domEl || !urlEl) return; // la vista è cambiata nel frattempo
+  domCount.textContent = String(data.domains.length);
+  urlCount.textContent = String(data.urls.length);
+  domEl.innerHTML = listRowsHtml(data.domains, "domain");
+  urlEl.innerHTML = listRowsHtml(data.urls, "url");
+  document.querySelectorAll(".list-remove").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const value = btn.dataset.value;
+      const kind = btn.dataset.kind;
+      if (!window.confirm(`Rimuovere "${value}" dalla ${kind === "url" ? "lista URL" : "lista domini"}?`)) {
+        return;
+      }
+      try {
+        await fetchJSON("/lists", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kind, value }),
+        });
+        showListsNotice("success", `Rimosso: ${value}`);
+      } catch (err) {
+        showListsNotice("error", `Rimozione fallita: ${err.message}`);
+        return;
+      }
+      await loadListsBody().catch(() => {});
+    });
+  });
+}
+
+async function renderLists() {
+  root.innerHTML = `
+    <div class="page-head">
+      <div>
+        <div class="page-title">Whitelist / Blacklist</div>
+        <div class="page-hint">Forza la reputazione di un dominio o di una URL: l'analisi viene bypassata e Trellix riceve il verdetto forzato</div>
+      </div>
+    </div>
+    <button class="back-link" id="back-link">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M19 12H5m6-6-6 6 6 6"></path>
+      </svg>
+      Torna alle sottomissioni
+    </button>
+
+    <div class="card lists-form-card">
+      <form id="lists-add-form" class="lists-form">
+        <select id="add-kind" aria-label="Tipo di voce">
+          <option value="url">URL</option>
+          <option value="domain">Dominio</option>
+        </select>
+        <input type="text" id="add-value" placeholder="https://sito.it/pagina oppure sito.it"
+               autocomplete="off" spellcheck="false" />
+        <select id="add-list-type" aria-label="Lista">
+          <option value="whitelist">Whitelist</option>
+          <option value="blacklist">Blacklist</option>
+        </select>
+        <input type="text" id="add-note" placeholder="Nota (facoltativa)" autocomplete="off" />
+        <button type="submit" id="add-btn">Aggiungi</button>
+      </form>
+      <div class="list-notice hidden" id="lists-notice"></div>
+    </div>
+
+    <div class="lists-grid">
+      <div class="card list-card">
+        <div class="list-card-head">Domini <span class="count-pill" id="domain-count">…</span></div>
+        <div class="list-hint">Match sul dominio registrabile (eTLD+1): "login.sito.it" è coperto da "sito.it"</div>
+        <div id="domain-rows"><div class="skeleton"></div></div>
+      </div>
+      <div class="card list-card">
+        <div class="list-card-head">URL <span class="count-pill" id="url-count">…</span></div>
+        <div class="list-hint">Match sulla URL normalizzata senza query/frammento — più specifica, vince sul dominio</div>
+        <div id="url-rows"><div class="skeleton"></div></div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById("back-link").addEventListener("click", () => navigate("#/"));
+
+  document.getElementById("lists-add-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const kind = document.getElementById("add-kind").value;
+    const value = document.getElementById("add-value").value.trim();
+    const listType = document.getElementById("add-list-type").value;
+    const note = document.getElementById("add-note").value.trim() || null;
+    if (!value) {
+      showListsNotice("error", "Inserisci un dominio o una URL.");
+      return;
+    }
+    try {
+      const res = await fetchJSON("/lists", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, value, list_type: listType, note }),
+      });
+      showListsNotice(
+        "success",
+        `Aggiunto: ${res.value} → ${res.list_type === "whitelist" ? "whitelist" : "blacklist"}` +
+          (res.value !== value ? " (normalizzato)" : "")
+      );
+      document.getElementById("add-value").value = "";
+      document.getElementById("add-note").value = "";
+    } catch (err) {
+      showListsNotice("error", `Aggiunta fallita: ${err.message}`);
+      return;
+    }
+    await loadListsBody().catch(() => {});
+  });
+
+  try {
+    await loadListsBody();
+  } catch (e) {
+    document.getElementById("domain-rows").innerHTML =
+      document.getElementById("url-rows").innerHTML =
+        `<div class="error-state">Impossibile caricare le liste: ${escapeHtml(e.message)}</div>`;
+  }
+}
 
 // ----------------------------------------------------------- detail view
 

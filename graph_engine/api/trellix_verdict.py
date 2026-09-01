@@ -333,28 +333,35 @@ def entry_response(entry: dict) -> dict:
     """Costruisce una risposta Trellix immediata da un hit allowlist/blacklist.
 
     Args:
-        entry: Dizionario restituito da ``allowlist.check_domain()``,
-               con chiavi ``list_type`` e ``note``.
+        entry: Dizionario restituito da ``allowlist.check_domain()`` /
+               ``check_url_and_domain()``, con chiavi ``list_type``,
+               ``note`` e (opzionale) ``matched`` (``"url"`` | ``"domain"``).
+               Senza ``matched`` il livello si assume "domain" — le
+               firme storiche restano invariate.
 
     Returns:
         Dict Trellix pronto per essere restituito come JSON.
     """
     list_type = entry["list_type"]
     note = entry.get("note")
+    # Livello del match ("url" | "domain"): le firme restano in inglese
+    # (contratto con Trellix), il reason di default in italiano.
+    level = "URL" if entry.get("matched") == "url" else "Domain"
+    level_it = "URL" if level == "URL" else "Dominio"
 
     if list_type == "whitelist":
         return {
             "verdict": "safe",
             "confidence": 1.0,
-            "signature": "Whitelist-Override: Domain explicitly trusted",
+            "signature": f"Whitelist-Override: {level} explicitly trusted",
             "recommended_action": "allow",
-            "reason": note or "Dominio in whitelist — analisi bypassata.",
+            "reason": note or f"{level_it} in whitelist — analisi bypassata.",
         }
     else:
         return {
             "verdict": "malicious",
             "confidence": 1.0,
-            "signature": "Blacklist-Override: Domain explicitly blocked",
+            "signature": f"Blacklist-Override: {level} explicitly blocked",
             "recommended_action": "block",
-            "reason": note or "Dominio in blacklist — analisi bypassata.",
+            "reason": note or f"{level_it} in blacklist — analisi bypassata.",
         }

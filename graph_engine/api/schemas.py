@@ -258,3 +258,57 @@ class HealthResponse(BaseModel):
 
     status: str  # "ok"
     running_jobs: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Request/Response — GET/POST/DELETE /lists (whitelist/blacklist)
+# ---------------------------------------------------------------------------
+
+
+class ListEntry(BaseModel):
+    """Una riga di una lista forzata (dominio o URL normalizzato)."""
+
+    value: str
+    list_type: str  # "whitelist" | "blacklist"
+    note: Optional[str] = None
+    added_by: Optional[str] = None
+    added_at: str
+
+
+class ListsResponse(BaseModel):
+    """GET /lists — le due liste, ordinate per valore."""
+
+    domains: list[ListEntry]
+    urls: list[ListEntry]
+
+
+class ListAddRequest(BaseModel):
+    """Body della POST /lists."""
+
+    kind: str = Field(description='"domain" o "url"')
+    value: str = Field(min_length=1, max_length=2048)
+    list_type: str = Field(description='"whitelist" o "blacklist"')
+    note: Optional[str] = None
+
+
+class ListAddResponse(BaseModel):
+    """Risposta della POST /lists — riporta il valore normalizzato salvato."""
+
+    ok: bool = True
+    kind: str
+    value: str  # valore normalizzato
+    list_type: str
+
+
+class ListRemoveRequest(BaseModel):
+    """Body della DELETE /lists."""
+
+    kind: str
+    value: str
+
+
+class ListRemoveResponse(BaseModel):
+    """Risposta della DELETE /lists."""
+
+    ok: bool = True
+    removed: bool

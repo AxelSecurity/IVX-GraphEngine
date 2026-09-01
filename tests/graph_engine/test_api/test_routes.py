@@ -7,6 +7,7 @@ import asyncio
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from graph_engine.api.allowlist import add_entry, add_url_entry
 from graph_engine.models import (
     AnalysisTarget,
     Classification,
@@ -562,3 +563,173 @@ class TestGetAnalysisTrellixResponse:
             "/analyses/99999999-9999-4999-8999-999999999999/trellix"
         )
         assert res.status_code == 404
+
+
+class TestListsRoutes:
+    """GET/POST/DELETE /lists — whitelist/blacklist per domini e URL."""
+
+    async def test_lists_empty(self, app, client):
+        """Nessuna entry → due liste vuote."""
+        res = await client.get("/lists")
+        assert res.status_code == 200
+        assert res.json() == {"domains": [], "urls": []}
+
+    async def test_add_domain_entry_normalized(self, app, client, tmp_path):
+        """POST /lists (domain) → 201 con dominio registrabile normalizzato."""
+        res = await client.post(
+            "/lists",
+            json={
+                "kind": "domain",
+                "value": "login.Site.IT",
+                "list_type": "whitelist",
+                "note": "Operatore verificato",
+            },
+        )
+        assert res.status_code == 201
+        body = res.json()
+        assert body["ok"] is True
+        assert body["value"] == "site.it"
+        assert body["list_type"] == "whitelist"
+
+        res2 = await client.get("/lists")
+        domains = res2.json()["domains"]
+        assert len(domains) == 1
+        assert domains[0]["value"] == "site.it"
+        assert domains[0]["note"] == "Operatore verificato"
+        assert domains[0]["added_by"] == "dashboard"
+
+    async def test_add_url_entry_normalized(self, app, client):
+        """POST /lists (url) → 201 con URL senza query/frammento."""
+        res = await client.post(
+            "/lists",
+            json={
+                "kind": "url",
+                "value": "https://site.it/login?sid=abc#top",
+                "list_type": "blacklist",
+            },
+        )
+        assert res.status_code == 201
+        body = res.json()
+        assert body["value"] == "https://site.it/login"
+        assert body["list_type"] == "blacklist"
+
+        res2 = await client.get("/lists")
+        urls = res2.json()["urls"]
+        assert len(urls) == 1
+        assert urls[0]["value"] == "https://site.it/login"
+
+    async def test_add_invalid_kind_422(self, app, client):
+        res = await client.post(
+            "/lists",
+            json={"kind": "ip", "value": "1.2.3.4", "list_type": "blacklist"},
+        )
+        assert res.status_code == 422
+
+    async def test_add_invalid_list_type_422(self, app, client):
+        res = await client.post(
+            "/lists",
+            json={"kind": "domain", "value": "site.it", "list_type": "gray"},
+        )
+        assert res.status_code == 422
+
+    async def test_add_invalid_url_scheme_422(self, app, client):
+        res = await client.post(
+            "/lists",
+            json={"kind": "url", "value": "ftp://site.it/x", "list_type": "whitelist"},
+        )
+        assert res.status_code == 422
+
+    async def test_remove_entry(self, app, client, tmp_path):
+        """DELETE /lists rimuove; la seconda rimozione → removed=false."""
+        db = str(tmp_path / "test.db")
+        await add_url_entry("https://site.it/login", "whitelist", db_path=db)
+
+        # httpx .delete() non accetta il kwarg "json" — si usa .request()
+        res = await client.request(
+            "DELETE",
+            "/lists",
+            json={"kind": "url", "value": "https://site.it/login?x=1"},
+        )
+        assert res.status_code == 200
+        assert res.json() == {"ok": True, "removed": True}
+
+        res2 = await client.request(
+            "DELETE",
+            "/lists",
+            json={"kind": "url", "value": "https://site.it/login"},
+        )
+        assert res2.json()["removed"] is False
+
+
+class TestAnalysisBypass:
+    """Bypass whitelist/blacklist nel POST /analyses (decisione 2026-09-01:
+    verdetto forzato subito, pipeline MAI avviata)."""
+
+    async def test_whitelist_url_creates_done_benign_target(
+        self, app, client, tmp_path, monkeypatch,
+    ):
+        db = str(tmp_path / "test.db")
+        await add_url_entry("https://example.com/trusted", "whitelist", db_path=db)
+
+        called = False
+
+        async def _fake_pipeline(*args, **kwargs):
+            nonlocal called
+            called = True
+
+        monkeypatch.setattr("graph_engine.api.routes.run_full_analysis", _fake_pipeline)
+
+        res = await client.post(
+            "/analyses",
+            json={"url": "https://example.com/trusted?sid=1", "classify": True},
+        )
+        assert res.status_code == 202
+        body = res.json()
+        assert body["status"] == "done"
+
+        res2 = await client.get(f"/analyses/{body['id']}")
+        data = res2.json()
+        assert data["target"]["status"] == "done"
+        assert data["verdict"]["classification"] == "benign"
+        assert data["verdict"]["confidence"] == 1.0
+        assert data["verdict"]["produced_by"] == "prefilter"
+        assert "whitelist" in data["verdict"]["rationale"]
+        assert not called, "run_full_analysis avviata nonostante il bypass"
+
+    async def test_blacklist_domain_creates_done_phishing_target(
+        self, app, client, tmp_path, monkeypatch,
+    ):
+        db = str(tmp_path / "test.db")
+        await add_entry("evil.com", "blacklist", db_path=db)
+
+        called = False
+
+        async def _fake_pipeline(*args, **kwargs):
+            nonlocal called
+            called = True
+
+        monkeypatch.setattr("graph_engine.api.routes.run_full_analysis", _fake_pipeline)
+
+        res = await client.post(
+            "/analyses",
+            json={"url": "https://login.evil.com/phish"},
+        )
+        body = res.json()
+        assert body["status"] == "done"
+
+        res2 = await client.get(f"/analyses/{body['id']}")
+        data = res2.json()
+        assert data["verdict"]["classification"] == "phishing"
+        assert data["verdict"]["confidence"] == 1.0
+        assert data["verdict"]["produced_by"] == "prefilter"
+        assert "blacklist" in data["verdict"]["rationale"]
+        assert not called, "run_full_analysis avviata nonostante il bypass"
+
+    async def test_no_bypass_without_entry(self, client, fake_pipeline):
+        """Nessuna entry in lista → flusso normale (queued, pipeline parte)."""
+        res = await client.post(
+            "/analyses",
+            json={"url": "https://example.com/page", "classify": False},
+        )
+        assert res.status_code == 202
+        assert res.json()["status"] == "queued"
