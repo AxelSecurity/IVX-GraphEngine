@@ -20,7 +20,10 @@ services:
       # La "risorsa preziosa": DB SQLite (graph_engine.db), artefatti di
       # esplorazione (graph_artifacts/) e cache OSINT (osint_cache/).
       # Sopravvive al riavvio e alla ricreazione del container.
-      - ./data:/app/data
+      # I permessi della directory vengono sistemati dall'entrypoint al
+      # primo avvio (nessun chown manuale sull'host); il flag :z
+      # ri-etichetta il bind per SELinux (no-op su Ubuntu/macOS).
+      - ./data:/app/data:z
     restart: unless-stopped
     healthcheck:
       # curl è installato nel Dockerfile apposta per questo check

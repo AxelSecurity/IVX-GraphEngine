@@ -43,12 +43,22 @@ COPY graph_engine ./graph_engine
 
 # --- Utente non-root ---------------------------------------------------------
 # Il server non gira mai come root: l'utente ha un UID fisso e possiede
-# sia il codice sia i browser (sola lettura a runtime).
+# sia il codice sia i browser (sola lettura a runtime).  /app/data è
+# creato qui con i permessi giusti: al primo deploy il bind mount può
+# non esistere e venire creato dal demone come root — l'entrypoint lo
+# sistema a runtime (vedi entrypoint.sh).
 RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/data \
     && chown -R appuser:appuser /ms-playwright /app
-USER appuser
+# Niente USER: l'entrypoint parte come root SOLO per il chown della
+# directory dati e poi cede i privilegi a 10001 (setpriv) prima di
+# eseguire uvicorn.
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod 0755 /entrypoint.sh
 
 EXPOSE 8000
+
+ENTRYPOINT ["/entrypoint.sh"]
 
 # UN solo worker: SQLite ha un solo scrittore — più processi
 # significherebbe connessioni separate in contesa di scrittura.  Per più

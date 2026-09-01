@@ -141,12 +141,12 @@ Note operative:
 - **Persistenza**: tutto ciò che è prezioso (DB SQLite `graph_engine.db`,
   artefatti di esplorazione, cache OSINT) vive in `./data`, montato come
   volume in `/app/data` — sopravvive a riavvii e ricreazioni del container
-- **Permessi di `./data` al primo deploy**: il container gira come utente
-  non-root con UID fisso 10001; se `./data` non esiste, Docker la crea
-  come root e il server fallisce all'avvio con
-  `sqlite3.OperationalError: unable to open database file`. Prima del
-  primo `up` su una macchina nuova:
-  `mkdir -p data && sudo chown -R 10001:10001 data`
+- **Permessi di `./data` al primo deploy**: automatici — l'entrypoint del
+  container parte come root solo per sistemare la directory dati (UID
+  10001) e poi cede i privilegi prima di eseguire uvicorn. Se `./data`
+  non esiste e viene creata come root dal demone Docker, il primo avvio
+  la corregge da solo (il flag `:z` sul volume copre anche SELinux).
+  Nessun chown manuale sull'host
 - **Utente non-root**: il server non gira mai come root nel container
 - **Un solo worker uvicorn**: SQLite ha un solo scrittore; per più
   throughput la strada è l'async dentro il singolo processo
