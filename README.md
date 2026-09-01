@@ -86,9 +86,9 @@ Al primo avvio viene creato l'admin bootstrap: credenziali da
 log** (`docker compose logs`). Gli utenti si gestiscono anche da CLI:
 
 ```bash
-docker compose exec ivx-graph-engine python -m graph_engine.api.auth_cli list
-docker compose exec ivx-graph-engine python -m graph_engine.api.auth_cli add operatore --role operator
-docker compose exec ivx-graph-engine python -m graph_engine.api.auth_cli passwd admin
+docker compose exec graph-engine python -m graph_engine.api.auth_cli list
+docker compose exec graph-engine python -m graph_engine.api.auth_cli add operatore --role operator
+docker compose exec graph-engine python -m graph_engine.api.auth_cli passwd admin
 ```
 
 I dettagli di ogni livello, gli schemi dati e le decisioni tecniche sono
