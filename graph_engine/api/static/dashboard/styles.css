@@ -2,6 +2,11 @@
    Foglio di stile unico, nessuna dipendenza esterna (font di sistema,
    nessuna icon-font): il tool deve restare utilizzabile anche offline. */
 
+/* Le regole di display di .icon-btn/.nav-link sovrascriverebbero
+   l'attributo hidden (UA stylesheet): la topbar resterebbe visibile
+   anche al login form.  Il reset ripristina la semantica HTML. */
+[hidden] { display: none !important; }
+
 :root {
   --bg: #0a0d14;
   --bg-elevated: #10141d;
