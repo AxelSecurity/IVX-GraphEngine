@@ -259,6 +259,21 @@ async function onLoginSubmit(e) {
         password: document.getElementById("login-password").value,
       }),
     });
+    // Il browser processa il cookie di sessione in modo asincrono
+    // (misurato: 300-400 ms dopo la risposta).  Se la home partisse
+    // subito con le sue fetch, la prima senza cookie riceverebbe 401
+    // e l'interceptor farebbe un auto-logout ingiustificato.  Si
+    // attende che la sessione risulti attiva (poll su /auth/me) prima
+    // di renderizzare.
+    for (let i = 0; i < 40; i++) {
+      try {
+        const probe = await fetch("/auth/me");
+        if (probe.ok) break;
+      } catch (_) {
+        /* rete assente: si riprova */
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     setUser(me);
     render(); // torna alla vista corrente (o elenco se hash vuoto)
   } catch (err) {
