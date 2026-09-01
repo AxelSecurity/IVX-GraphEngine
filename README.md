@@ -66,11 +66,30 @@ opzionali), con le stesse regole della POST `/analyses`. È servita dalla
 stessa app FastAPI dell'API (nessun servizio separato, nessuna porta
 aggiuntiva): con l'API già avviata, apri `http://localhost:8000/dashboard`.
 
-Dalla voce **"Liste forzate"** si gestiscono whitelist/blacklist per
+Dalla voce **"Whitelist/Blacklist"** si gestiscono le liste forzate per
 **domini** (match sul dominio registrabile, eTLD+1) e per **URL** (match
 sulla URL normalizzata senza query/frammento). Un hit forza subito il
 verdetto e salta l'analisi — sia nella dashboard che nella risposta a
 Trellix; in caso di conflitto vince il match più specifico (URL > dominio).
+
+### Login e utenti
+
+La dashboard **richiede il login**: le credenziali sono multi-utente in
+SQLite (ruoli `admin`/`operator`, password con hash PBKDF2) e la sessione
+vive in un cookie HttpOnly di 12h. Il login protegge anche **tutte le API
+REST** (tranne `/health` e la route Trellix, che ha la sua API key): un
+401 riporta alla schermata di accesso.
+
+Al primo avvio viene creato l'admin bootstrap: credenziali da
+`DASHBOARD_ADMIN_USER`/`DASHBOARD_ADMIN_PASSWORD` se valorizzate nel
+`.env`, altrimenti utente `admin` con password casuale **stampata nel
+log** (`docker compose logs`). Gli utenti si gestiscono anche da CLI:
+
+```bash
+docker compose exec ivx-graph-engine python -m graph_engine.api.auth_cli list
+docker compose exec ivx-graph-engine python -m graph_engine.api.auth_cli add operatore --role operator
+docker compose exec ivx-graph-engine python -m graph_engine.api.auth_cli passwd admin
+```
 
 I dettagli di ogni livello, gli schemi dati e le decisioni tecniche sono
 documentati in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -112,6 +131,11 @@ Note operative:
 - **Utente non-root**: il server non gira mai come root nel container
 - **Un solo worker uvicorn**: SQLite ha un solo scrittore; per più
   throughput la strada è l'async dentro il singolo processo
+- **Autenticazione**: dashboard e API REST richiedono il login (utenti in
+  SQLite, admin bootstrap al primo avvio — credenziali nel log se non
+  valorizzate nel `.env`); la route Trellix richiede `X-API-Key`
+  (`TRELLIX_API_KEY` nel `.env`, 503 se assente). Solo `/health` è aperto
+  (probe del container)
 
 ### Le due viste sullo stesso dato
 
@@ -132,10 +156,15 @@ contenuto di `GET /analyses/{id}/graph`.
 
 Trellix chiama il modulo **passando l'URL in query string** e **attendendo
 che la risposta contenga il JSON** del verdetto — non c'è un secondo passo
-asincrono:
+asincrono. La route è **protetta da API key**: ogni richiesta deve portare
+`X-API-Key` con il valore di `TRELLIX_API_KEY` (se la variabile non è
+configurata la route risponde **503** — configurazione mancante, mai
+aperta; il vecchio Bearer `TRELLIX_API_TOKEN` resta accettato per
+retrocompatibilità):
 
 ```bash
 curl -G http://localhost:8000/trellix/analyze \
+     -H "X-API-Key: $TRELLIX_API_KEY" \
      --data-urlencode "url=https://example.org/"
 ```
 

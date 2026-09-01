@@ -312,3 +312,61 @@ class ListRemoveResponse(BaseModel):
 
     ok: bool = True
     removed: bool
+
+
+# ---------------------------------------------------------------------------
+# Request/Response — autenticazione (/auth/*)
+# ---------------------------------------------------------------------------
+
+
+class LoginRequest(BaseModel):
+    """Body della POST /auth/login."""
+
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class AuthUserResponse(BaseModel):
+    """Utente autenticato o elencato (mai l'hash della password)."""
+
+    username: str
+    role: str  # "admin" | "operator"
+
+
+class LoginResponse(AuthUserResponse):
+    """Risposta della POST /auth/login (setta anche il cookie di sessione)."""
+
+    ok: bool = True
+
+
+class LogoutResponse(BaseModel):
+    """Risposta della POST /auth/logout."""
+
+    ok: bool = True
+
+
+class UserCreateRequest(BaseModel):
+    """Body della POST /auth/users (solo admin)."""
+
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=8, max_length=256)
+    role: str = "operator"
+
+
+class UserCreateResponse(AuthUserResponse):
+    """Risposta della POST /auth/users."""
+
+    ok: bool = True
+
+
+class UsersListResponse(BaseModel):
+    """Risposta della GET /auth/users (solo admin)."""
+
+    users: list[AuthUserResponse]
+
+
+class UserDeleteResponse(BaseModel):
+    """Risposta della DELETE /auth/users/{username} (solo admin)."""
+
+    ok: bool = True
+    removed: bool

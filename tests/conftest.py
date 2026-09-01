@@ -20,7 +20,10 @@ _ALL_CONFIG_FIELDS = (
     "opencti_url",
     "opencti_api_key",
     "urlhaus_api_key",
+    "trellix_api_key",
     "trellix_api_token",
+    "dashboard_admin_user",
+    "dashboard_admin_password",
 )
 
 

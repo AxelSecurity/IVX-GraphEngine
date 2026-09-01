@@ -961,3 +961,70 @@ select { cursor: pointer; }
   .view-root { padding: 18px 14px 60px; }
   .topbar { padding: 14px 16px; }
 }
+
+/* ------------------------------------------------------------------- auth */
+
+.auth-user {
+  font-size: 13px;
+  color: var(--text-dim);
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  white-space: nowrap;
+}
+
+.login-card {
+  max-width: 380px;
+  margin: 64px auto 0;
+  padding: 32px 28px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  text-align: center;
+}
+
+.login-title {
+  font-size: 20px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.login-hint {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 22px;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.login-form input {
+  width: 100%;
+  padding: 11px 14px;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 0.15s;
+}
+.login-form input:focus { border-color: var(--accent); }
+
+.login-form button {
+  padding: 11px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #0a0d14;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.login-form button:hover:not(:disabled) { filter: brightness(1.1); }
+.login-form button:disabled { opacity: 0.6; cursor: default; }

@@ -28,7 +28,10 @@ ALL_ENV_VARS = {
     "opencti_url": "OPENCTI_URL",
     "opencti_api_key": "OPENCTI_API_KEY",
     "urlhaus_api_key": "URLHAUS_API_KEY",
+    "trellix_api_key": "TRELLIX_API_KEY",
     "trellix_api_token": "TRELLIX_API_TOKEN",
+    "dashboard_admin_user": "DASHBOARD_ADMIN_USER",
+    "dashboard_admin_password": "DASHBOARD_ADMIN_PASSWORD",
 }
 
 
@@ -56,7 +59,9 @@ class TestSettingsFields:
         monkeypatch.setenv("OPENCTI_URL", "https://opencti.example.com")
         monkeypatch.setenv("OPENCTI_API_KEY", "opencti-key")
         monkeypatch.setenv("URLHAUS_API_KEY", "urlhaus-key")
+        monkeypatch.setenv("TRELLIX_API_KEY", "trellix-key")
         monkeypatch.setenv("TRELLIX_API_TOKEN", "trellix-token")
+        monkeypatch.setenv("DASHBOARD_ADMIN_USER", "admin-1")
 
         s = Settings(_env_file=None)
 
@@ -67,7 +72,9 @@ class TestSettingsFields:
         assert s.opencti_url == "https://opencti.example.com"
         assert s.opencti_api_key == "opencti-key"
         assert s.urlhaus_api_key == "urlhaus-key"
+        assert s.trellix_api_key == "trellix-key"
         assert s.trellix_api_token == "trellix-token"
+        assert s.dashboard_admin_user == "admin-1"
 
     def test_whitespace_stripped_from_values(self, monkeypatch):
         """Spazi accidentali (es. ``KEY = value`` in .env) vengono rimossi —
@@ -108,7 +115,7 @@ class TestConfiguredProperties:
             opencti_url="https://opencti.example.com",
             opencti_api_key="k2",
             urlhaus_api_key="k3",
-            trellix_api_token="t1",
+            trellix_api_key="k4",
         )
         assert s.foundry_configured is True
         assert s.misp_configured is True
@@ -148,7 +155,11 @@ class TestConfiguredProperties:
         assert s.trellix_auth_required is False
 
     def test_trellix_single_field(self):
-        """Trellix ha un solo campo: token presente → auth richiesta."""
+        """Trellix: basta UNA credenziale (API key o token legacy) →
+        auth richiesta."""
+        s = _clean_settings(trellix_api_key="k1")
+        assert s.trellix_auth_required is True
+
         s = _clean_settings(trellix_api_token="t1")
         assert s.trellix_auth_required is True
 
@@ -159,9 +170,11 @@ class TestConfiguredProperties:
         assert s.urlhaus_configured is True
 
     def test_empty_string_not_configured(self):
-        """Stringa vuota (es. ``TRELLIX_API_TOKEN=`` in .env) → non
+        """Stringa vuota (es. ``TRELLIX_API_KEY=`` in .env) → non
         configurata — identico al vecchio ``if token:``."""
-        s = _clean_settings(trellix_api_token="", urlhaus_api_key="")
+        s = _clean_settings(
+            trellix_api_key="", trellix_api_token="", urlhaus_api_key=""
+        )
         assert s.trellix_auth_required is False
         assert s.urlhaus_configured is False
 

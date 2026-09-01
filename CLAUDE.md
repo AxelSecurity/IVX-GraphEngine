@@ -89,11 +89,21 @@ Tutti modelli Pydantic v2 con `from __future__ import annotations`:
 
 ### Whitelist/Blacklist forzate (2026-09-01)
 
-Gestite in `api/allowlist.py` (due tabelle SQLite: `allowlist_blacklist` per i DOMINI, `allowlist_blacklist_url` per le URL), esposte via `GET/POST/DELETE /lists` e gestite dalla dashboard nella vista `#/lists` ("Liste forzate" nella topbar). Decisioni utente (2026-09-01):
+Gestite in `api/allowlist.py` (due tabelle SQLite: `allowlist_blacklist` per i DOMINI, `allowlist_blacklist_url` per le URL), esposte via `GET/POST/DELETE /lists` e gestite dalla dashboard nella vista `#/lists` ("Whitelist/Blacklist" nella topbar). Decisioni utente (2026-09-01):
 
 - **Match dominio** sul dominio registrabile (eTLD+1); **match URL** sulla URL normalizzata L0 SENZA query/frammento (scheme+host+path), solo http/https.
 - **Priorità: vince il match più specifico — URL > dominio** (`check_url_and_domain`).
 - **Bypass ovunque**: la route Trellix risponde subito con `entry_response` (firma `Whitelist/Blacklist-Override: URL|Domain explicitly …`, confidence 1.0); il POST /analyses NON accoda la pipeline — crea il target già `done` con verdetto forzato (`produced_by="prefilter"`, classification benign|phishing, rationale trasparente).
+
+### Autenticazione dashboard/API e API key Trellix (2026-09-01)
+
+Decisioni utente (2026-09-01) implementate in `api/auth.py`, `api/auth_routes.py` e nel middleware di `api/app.py`:
+
+- **Login multi-utente in SQLite**: tabella `users` (username PK, `password_hash` PBKDF2-HMAC-SHA256 stdlib formato `pbkdf2_sha256$iter$salt$hash`, role admin/operator). Sessioni **in memoria** (cookie `session` HttpOnly SameSite=Lax, TTL 12h) — deployment single-worker, nessuna persistenza tra riavvii. Route: `POST /auth/login|logout`, `GET /auth/me`, `GET/POST/DELETE /auth/users` (solo admin). CLI: `python -m graph_engine.api.auth_cli list|add|delete|passwd`.
+- **Il login protegge UI + TUTTE le API REST**, tranne `/health`, `/auth/login`, `/auth/logout`, `/trellix` (API key propria) e `/dashboard` (codice statico: è la SPA a mostrare il login quando `/auth/me` dà 401). Middleware in `create_app`; sessione valida → `request.state.user`.
+- **Bootstrap admin al primo avvio** (lifespan): da env `DASHBOARD_ADMIN_USER`/`DASHBOARD_ADMIN_PASSWORD`; senza env → utente `admin` con password casuale STAMPATA NEL LOG. Idempotente (tabella non vuota → no-op).
+- **API key Trellix OBBLIGATORIA**: header `X-API-Key` contro `TRELLIX_API_KEY` (confronto `hmac.compare_digest`); `TRELLIX_API_TOKEN` (Bearer legacy) ancora accettato. **Senza nessuna credenziale → 503 "configurazione mancante", mai route aperta**; credenziale configurata ma richiesta senza/errata → 401.
+- Test: `tests/graph_engine/test_api/conftest.py` espone `client` già autenticato (bootstrap + cookie sessione), `anon_client` per i 401 e `make_authed_client(test_app)` per le app create inline; `tests/graph_engine/test_trellix/conftest.py` imposta `trellix_api_key="test-key"` via autouse e il client la invia nell'header. I test di auth che sovrascrivono la chiave usano monkeypatch (il monkeypatch del test vince sull'autouse).
 
 ## Vincoli NON NEGOZIABILI
 

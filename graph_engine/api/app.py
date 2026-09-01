@@ -16,10 +16,12 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from graph_engine.api import auth
+from graph_engine.api.auth_routes import build_auth_router
 from graph_engine.api.browser_pool import BrowserPool
 from graph_engine.api.pipeline_runner import DEFAULT_ARTIFACT_ROOT
 from graph_engine.api.routes import build_router
@@ -40,18 +42,43 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
+# Path esenti dal middleware di sessione (decisione utente 2026-09-01:
+# il login protegge UI + tutte le API, tranne queste):
+#   - /health             probe di Front Door / container
+#   - /auth/login|logout  il login va raggiunto anonimo, il logout deve
+#                         sempre ripulire il cookie
+#   - /trellix            protetta dalla propria API key (X-API-Key)
+#   - /dashboard          codice statico della SPA: è il frontend che
+#                         mostra il form di login quando /auth/me dà 401
+_EXEMPT_PREFIXES = ("/health", "/auth/login", "/auth/logout", "/trellix", "/dashboard")
+
+
+def _is_exempt(path: str) -> bool:
+    """True se il path non richiede sessione (vedi ``_EXEMPT_PREFIXES``)."""
+    if path == "/":
+        return True  # la radice reindirizza solo alla dashboard
+    for prefix in _EXEMPT_PREFIXES:
+        if path == prefix or path.startswith(prefix + "/"):
+            return True
+    return False
+
 
 def _make_lifespan(enable_browser_pool: bool):
     """Costruisce il lifespan di FastAPI.
 
-    Con il pool attivo, UN solo processo Chromium viene lanciato
-    all'avvio dell'applicazione e riusato da tutte le analisi
+    All'avvio crea (se serve) l'amministratore bootstrap della
+    dashboard.  Con il pool attivo, UN solo processo Chromium viene
+    lanciato all'avvio dell'applicazione e riusato da tutte le analisi
     (context freschi per richiesta — isolamento cookie/storage), e
     chiuso ordinatamente allo shutdown.
     """
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        logger = logging.getLogger("graph_engine.api.app")
+        await auth.ensure_bootstrap_admin(app.state.db_path)
+        logger.info("Autenticazione pronta (admin bootstrap garantito)")
+
         if not enable_browser_pool:
             yield
             return
@@ -59,7 +86,6 @@ def _make_lifespan(enable_browser_pool: bool):
         pool = BrowserPool()
         await pool.start()
         app.state.browser_pool = pool
-        logger = logging.getLogger("graph_engine.api.app")
         logger.info("Browser condiviso pronto per le richieste")
         try:
             yield
@@ -97,11 +123,35 @@ def create_app(
         ),
         lifespan=_make_lifespan(enable_browser_pool),
     )
+    # Riferimento per lifespan e test: il middleware di sessione non
+    # accede al DB (sessioni in memoria), le route /auth sì.
+    app.state.db_path = db_path
+
+    # Middleware di sessione: protegge TUTTO tranne health, login/logout,
+    # la route Trellix (API key propria) e il codice statico della
+    # dashboard.  La sessione valida viene esposta alle route in
+    # ``request.state.user``.
+    @app.middleware("http")
+    async def _session_auth_middleware(request: Request, call_next):
+        if _is_exempt(request.url.path):
+            return await call_next(request)
+        session = auth.get_session(auth.read_session_cookie(request))
+        if session is None:
+            return JSONResponse(
+                {"detail": "Autenticazione richiesta"},
+                status_code=401,
+            )
+        request.state.user = session
+        return await call_next(request)
+
     app.include_router(
         build_router(db_path=db_path, artifact_root=artifact_root)
     )
     app.include_router(
         build_trellix_router(db_path=db_path)
+    )
+    app.include_router(
+        build_auth_router(db_path=db_path)
     )
 
     @app.get("/", include_in_schema=False)

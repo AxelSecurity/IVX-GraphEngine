@@ -3,6 +3,11 @@
 Tutti i test usano ``httpx.AsyncClient`` + ``ASGITransport`` (nessun server
 reale) e una pipeline completamente mockata (nessun browser Playwright,
 nessuna rete).
+
+Il middleware di sessione protegge TUTTE le route (tranne health,
+auth/login|logout, trellix e la dashboard statica): la fixture ``client``
+è quindi già autenticata — bootstrap dell'admin + cookie di sessione.
+Per i test che verificano il comportamento anonimo c'è ``anon_client``.
 """
 
 from __future__ import annotations
@@ -10,6 +15,7 @@ from __future__ import annotations
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from graph_engine.api import auth as auth_mod
 from graph_engine.api.app import create_app
 from graph_engine.models import (
     AnalysisTarget,
@@ -22,6 +28,15 @@ from graph_engine.models import (
     TransitionKind,
     Verdict,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fast_pbkdf2(monkeypatch):
+    """Abbassa le iterazioni PBKDF2: nei test l'hashing di ogni
+    password (bootstrap admin incluso) deve restare istantaneo.  La
+    costante di produzione (200k) è coperta dai test di ``auth.py``
+    solo a livello di formato, non di costo computazionale."""
+    monkeypatch.setattr(auth_mod, "_PBKDF2_ITERATIONS", 1_000)
 
 
 # ---------------------------------------------------------------------------
@@ -180,13 +195,45 @@ def app(tmp_path):
     )
 
 
+async def _make_authed_client(app) -> AsyncClient:
+    """Client autenticato per una app: bootstrap admin + sessione.
+
+    Il lifespan di FastAPI non gira con ASGITransport, quindi il
+    bootstrap admin (che in produzione avviene nello startup) va
+    eseguito esplicitamente.  La sessione viene creata direttamente
+    sul modulo auth (in-memory) e passata come cookie.
+    """
+    await auth_mod.ensure_bootstrap_admin(app.state.db_path)
+    token = auth_mod.create_session("admin", "admin")
+    return AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        cookies={"session": token},
+    )
+
+
 @pytest.fixture
 async def client(app):
-    """Client httpx con ASGITransport — nessun server reale."""
+    """Client httpx autenticato (cookie di sessione admin)."""
+    c = await _make_authed_client(app)
+    async with c:
+        yield c
+
+
+@pytest.fixture
+async def anon_client(app):
+    """Client httpx SENZA sessione — per i test del 401."""
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as c:
         yield c
+
+
+@pytest.fixture
+def make_authed_client():
+    """Factory di client autenticati per app create inline nei test
+    (es. ``test_app = create_app(db_path=...)`` dentro il corpo del test)."""
+    return _make_authed_client
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,11 @@
 
 const root = document.getElementById("view-root");
 
+// Utente autenticato (da /auth/me); null = vista login.  Le route
+// /auth/* sono escluse dall'interceptor 401 (il login con credenziali
+// errate DEVE mostrare il suo errore, non la vista di accesso).
+let currentUser = null;
+
 const LAYER_ORDER = ["L0", "L1", "L2", "L3", "L4", "L5", "API"];
 
 const TRANSITION_LABELS = {
@@ -29,6 +34,13 @@ const TRANSITION_LABELS = {
 
 async function fetchJSON(url, options = {}) {
   const res = await fetch(url, options);
+  if (res.status === 401 && !url.startsWith("/auth/")) {
+    // Sessione scaduta o assente: torna alla vista di login
+    showLogin();
+    const err = new Error("Sessione scaduta — accedi di nuovo.");
+    err.status = 401;
+    throw err;
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -169,6 +181,99 @@ async function pollHealth() {
 pollHealth();
 setInterval(pollHealth, 12000);
 
+// ------------------------------------------------------------------- auth
+// Login/logout della dashboard: la sessione vive in un cookie HttpOnly
+// gestito dal server (POST /auth/login setta il cookie, /auth/me lo
+// verifica).  Un 401 su QUALSIASI chiamata API riporta alla vista di
+// login (interceptor in fetchJSON).
+
+function setUser(me) {
+  currentUser = me;
+  const userEl = document.getElementById("auth-user");
+  if (userEl) {
+    userEl.textContent = `${me.username} · ${me.role}`;
+    userEl.hidden = false;
+  }
+  const logoutBtn = document.getElementById("logout-btn");
+  const listsLink = document.getElementById("lists-link");
+  const refreshBtn = document.getElementById("refresh-btn");
+  if (logoutBtn) logoutBtn.hidden = false;
+  if (listsLink) listsLink.hidden = false;
+  if (refreshBtn) refreshBtn.hidden = false;
+}
+
+function clearUserUi() {
+  currentUser = null;
+  const userEl = document.getElementById("auth-user");
+  const logoutBtn = document.getElementById("logout-btn");
+  const listsLink = document.getElementById("lists-link");
+  const refreshBtn = document.getElementById("refresh-btn");
+  if (userEl) userEl.hidden = true;
+  if (logoutBtn) logoutBtn.hidden = true;
+  if (listsLink) listsLink.hidden = true;
+  if (refreshBtn) refreshBtn.hidden = true;
+}
+
+function showLoginNotice(kind, message) {
+  const el = document.getElementById("login-notice");
+  if (!el) return;
+  el.className = `list-notice ${kind}`; // "success" | "error"
+  el.textContent = message;
+}
+
+function showLogin(message) {
+  stopPolling();
+  clearUserUi();
+  root.innerHTML = `
+    <div class="login-card">
+      <div class="login-title">Accedi alla dashboard</div>
+      <div class="login-hint">Le API e la UI richiedono autenticazione — inserisci le credenziali</div>
+      <form id="login-form" class="login-form">
+        <input type="text" id="login-username" placeholder="Username" autocomplete="username" required />
+        <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" required />
+        <button type="submit" id="login-btn">Accedi</button>
+      </form>
+      <div class="list-notice hidden" id="login-notice"></div>
+    </div>`;
+  document.getElementById("login-form").addEventListener("submit", onLoginSubmit);
+  if (message) showLoginNotice("error", message);
+  document.getElementById("login-username").focus();
+}
+
+async function onLoginSubmit(e) {
+  e.preventDefault();
+  const btn = document.getElementById("login-btn");
+  btn.disabled = true;
+  try {
+    const me = await fetchJSON("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: document.getElementById("login-username").value.trim(),
+        password: document.getElementById("login-password").value,
+      }),
+    });
+    setUser(me);
+    render(); // torna alla vista corrente (o elenco se hash vuoto)
+  } catch (err) {
+    showLoginNotice(
+      "error",
+      err.status === 401 ? err.message : `Accesso non riuscito: ${err.message}`
+    );
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("logout-btn").addEventListener("click", async () => {
+  try {
+    await fetchJSON("/auth/logout", { method: "POST" });
+  } catch (_) {
+    /* anche se la sessione è già scaduta, si torna al login */
+  }
+  showLogin();
+  navigate("#/");
+});
+
 // ----------------------------------------------------------------- render
 
 let listState = { limit: 20, offset: 0, status: "", classification: "", q: "" };
@@ -188,6 +293,10 @@ function stopPolling() {
 
 async function render() {
   stopPolling();
+  if (!currentUser) {
+    showLogin();
+    return;
+  }
   const route = currentRoute();
   if (route.name === "detail") {
     await renderDetail(route.id);
@@ -1228,4 +1337,19 @@ function wireDetail(targetId, graph) {
 
 // ------------------------------------------------------------------ start
 
+// Primo render immediato: senza sessione mostra il login (poi /auth/me
+// può confermare la sessione già attiva nel cookie e re-renderizzare).
 render();
+
+(async function init() {
+  try {
+    const me = await fetchJSON("/auth/me");
+    setUser(me);
+  } catch (_) {
+    // 401 → l'interceptor ha già mostrato la vista di login;
+    // server irraggiungibile → la vista di login resta visibile e il
+    // submit fallirà con l'errore di rete nel messaggio.
+    return;
+  }
+  render();
+})();

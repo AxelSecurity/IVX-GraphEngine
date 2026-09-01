@@ -26,12 +26,20 @@
       </div>
 
       <div class="topbar-right">
-        <a class="nav-link" href="#/lists">Whitelist/Blacklist</a>
+        <a class="nav-link" id="lists-link" href="#/lists" hidden>Whitelist/Blacklist</a>
+        <span class="auth-user" id="auth-user" hidden></span>
+        <button class="icon-btn" id="logout-btn" title="Esci" hidden>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" x2="9" y1="12" y2="12"></line>
+          </svg>
+        </button>
         <div class="health-pill" id="health-pill" title="Stato del servizio">
           <span class="dot" id="health-dot"></span>
           <span id="health-text">connessione…</span>
         </div>
-        <button class="icon-btn" id="refresh-btn" title="Aggiorna">
+        <button class="icon-btn" id="refresh-btn" title="Aggiorna" hidden>
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"></path>
           </svg>

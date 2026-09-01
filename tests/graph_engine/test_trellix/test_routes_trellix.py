@@ -283,7 +283,9 @@ class TestRoutesTrellix:
         from httpx import ASGITransport, AsyncClient
 
         async with AsyncClient(
-            transport=ASGITransport(app=test_app), base_url="http://test"
+            transport=ASGITransport(app=test_app),
+            base_url="http://test",
+            headers={"X-API-Key": "test-key"},
         ) as c:
             res = await c.get("/trellix/analyze?url=https://slow.example.com")
 

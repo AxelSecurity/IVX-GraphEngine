@@ -10,7 +10,9 @@ interni del BFS inclusi): l'analisi gira "in tranquillità".
 
 Flow della route:
 
-    1. Auth Bearer opzionale (``TRELLIX_API_TOKEN``)
+    1. Auth API key OBBLIGATORIA (``X-API-Key`` / ``TRELLIX_API_KEY``;
+       Bearer ``TRELLIX_API_TOKEN`` accettato per retrocompatibilità) —
+       503 se nessuna credenziale è configurata, 401 se errata
     2. Estrazione dell'URL dalla query string GREZZA (tutto ciò che
        segue ``url=``) + decodifica percent-encoding iterativa
     3. Allowlist/blacklist check → risposta immediata
@@ -24,15 +26,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from graph_engine.api.allowlist import check_url_and_domain
+from graph_engine.api.auth import require_trellix_api_key
 from graph_engine.api.pipeline_runner import run_full_analysis
 from graph_engine.api.trellix_verdict import build_trellix_response, entry_response
-from graph_engine.config import settings
 from graph_engine.ingestion.canonicalize import _decode_percent_iterative
 from graph_engine.models import AnalysisTarget
 from graph_engine.storage.repository import get_latest_for_url_hash, save_target
@@ -82,12 +83,8 @@ def build_trellix_router(
         invariato, uno encodato (anche più volte) converge alla forma
         leggibile.
         """
-        # ── 0. Auth ────────────────────────────────────────────────────
-        token = settings.trellix_api_token
-        if token:
-            auth_header = request.headers.get("Authorization", "")
-            if not _check_token(auth_header, token):
-                raise HTTPException(status_code=401, detail="Unauthorized")
+        # ── 0. Auth (API key obbligatoria — 503 se non configurata) ───
+        require_trellix_api_key(request)
 
         # ── 1. Estrazione URL dalla query string grezza ────────────────
         raw_query = request.url.query or ""
@@ -188,24 +185,3 @@ def build_trellix_router(
         return build_trellix_response(data)
 
     return router
-
-
-# ---------------------------------------------------------------------------
-# Auth helper
-# ---------------------------------------------------------------------------
-
-
-def _check_token(auth_header: str, expected_token: str) -> bool:
-    """Verifica il token Bearer con confronto costante nel tempo.
-
-    Args:
-        auth_header: Valore dell'header ``Authorization``.
-        expected_token: Token configurato nell'ambiente.
-
-    Returns:
-        ``True`` se il token è valido.
-    """
-    if not auth_header.startswith("Bearer "):
-        return False
-    provided = auth_header[7:]  # len("Bearer ") == 7
-    return secrets.compare_digest(provided, expected_token)

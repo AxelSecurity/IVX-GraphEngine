@@ -13,7 +13,10 @@ completo).  Nessuna credenziale è mai hardcodata nel codice.
 
 Senza alcuna variabile impostata il progetto funziona degradato come
 oggi: provider di reputazione extra disabilitati, classificazione L5
-con fallback euristico, endpoint Trellix senza autenticazione.
+con fallback euristico.  Fa eccezione l'endpoint Trellix, che SENZA
+``TRELLIX_API_KEY`` risponde 503 (configurazione mancante) e la
+dashboard, che resta comunque accessibile col login (admin bootstrap
+con password casuale stampata nel log).
 """
 
 from __future__ import annotations
@@ -39,7 +42,10 @@ _CONFIG_FIELDS = (
     "opencti_api_key",
     "ctlogs_api_key",
     "urlhaus_api_key",
+    "trellix_api_key",
     "trellix_api_token",
+    "dashboard_admin_user",
+    "dashboard_admin_password",
 )
 
 
@@ -96,7 +102,20 @@ class Settings(BaseSettings):
     ctlogs_api_key: Optional[str] = None
 
     # ── Endpoint Trellix (/trellix/analyze) ─────────────────────────
+    # API key OBBLIGATORIA (decisione utente 2026-09-01): senza chiave
+    # la route risponde 503 (configurazione mancante), mai aperta.
+    # ``trellix_api_token`` è il vecchio Bearer opzionale: resta
+    # accettato per retrocompatibilità con le integrazioni già attive.
+    trellix_api_key: Optional[str] = None
     trellix_api_token: Optional[str] = None
+
+    # ── Bootstrap amministratore dashboard ──────────────────────────
+    # Al primo avvio, se la tabella utenti è vuota, viene creato
+    # l'admin con queste credenziali.  Se mancano, l'admin viene
+    # comunque creato con una password casuale stampata nel log
+    # (visibile con ``docker compose logs``).
+    dashboard_admin_user: Optional[str] = None
+    dashboard_admin_password: Optional[str] = None
 
     @field_validator(*_CONFIG_FIELDS, mode="before")
     @classmethod
@@ -157,8 +176,9 @@ class Settings(BaseSettings):
 
     @property
     def trellix_auth_required(self) -> bool:
-        """True se il token Trellix è impostata → auth Bearer richiesta."""
-        return bool(self.trellix_api_token)
+        """True se è configurata almeno una credenziale Trellix
+        (API key o token Bearer legacy) → auth obbligatoria sulla route."""
+        return bool(self.trellix_api_key or self.trellix_api_token)
 
 
 # Istanza singleton — l'unico punto da cui il progetto legge configurazione.
