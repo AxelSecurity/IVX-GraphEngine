@@ -72,6 +72,13 @@ sulla URL normalizzata senza query/frammento). Un hit forza subito il
 verdetto e salta l'analisi — sia nella dashboard che nella risposta a
 Trellix; in caso di conflitto vince il match più specifico (URL > dominio).
 
+Dalla voce **"Utenti"** (visibile solo agli amministratori) si gestiscono
+gli account della dashboard: creazione, cambio ruolo
+(`admin`/`operator`), cambio password ed eliminazione. Protezioni: non si
+può eliminare il proprio account né eliminare o degradare a `operator`
+l'ultimo amministratore rimasto; cambiare password o ruolo revoca le
+sessioni attive dell'utente (comprese le proprie).
+
 ### Login e utenti
 
 La dashboard **richiede il login**: le credenziali sono multi-utente in
@@ -83,7 +90,13 @@ REST** (tranne `/health` e la route Trellix, che ha la sua API key): un
 Al primo avvio viene creato l'admin bootstrap: credenziali da
 `DASHBOARD_ADMIN_USER`/`DASHBOARD_ADMIN_PASSWORD` se valorizzate nel
 `.env`, altrimenti utente `admin` con password casuale **stampata nel
-log** (`docker compose logs`). Gli utenti si gestiscono anche da CLI:
+log** (`docker compose logs`). Nota: il bootstrap parte solo a tabella
+utenti **vuota** — cambiare le variabili del `.env` non sovrascrive
+l'admin già esistente.
+
+La gestione ordinaria avviene dalla dashboard (voce "Utenti", solo
+admin); da CLI resta disponibile per l'emergenza (es. password
+dimenticata):
 
 ```bash
 docker compose exec graph-engine python -m graph_engine.api.auth_cli list
@@ -131,6 +144,9 @@ Note operative:
 - **Utente non-root**: il server non gira mai come root nel container
 - **Un solo worker uvicorn**: SQLite ha un solo scrittore; per più
   throughput la strada è l'async dentro il singolo processo
+- **Browser Chromium condiviso**: il lifespan dell'app mantiene un pool
+  di browser Playwright riusati tra le richieste — nessun launch di
+  Chromium per singola analisi
 - **Autenticazione**: dashboard e API REST richiedono il login (utenti in
   SQLite, admin bootstrap al primo avvio — credenziali nel log se non
   valorizzate nel `.env`); la route Trellix richiede `X-API-Key`
@@ -145,7 +161,7 @@ separati:
 
 | Endpoint | Uso |
 |---|---|
-| `GET /trellix/analyze?url=...` | Risposta **sincrona** compatibile con Trellix IVX (verdetto `safe`/`malicious` entro ~48s; se l'analisi sfora, risponde onestamente `Analysis-Incomplete` e continua in background) |
+| `GET /trellix/analyze?url=...` | Risposta **sincrona** compatibile con Trellix IVX: attende il completamento reale dell'analisi e porta sempre il verdetto finale (nessuna deadline imposta dal modulo — l'unica finestra è quella gestita a monte da Front Door/Trellix) |
 | `POST /analyses` + `GET /analyses/{id}` | Avvio asincrono (202 Accepted) e stato dell'analisi |
 | `GET /analyses/{id}/graph` | **Il JSON completo**: target, tutti gli stati del grafo, le transizioni, le evidenze di ogni livello e il verdetto |
 
@@ -185,18 +201,23 @@ Campi:
 | Campo | Valori | Significato |
 |---|---|---|
 | `verdict` | `safe` \| `malicious` | Il verdetto binario atteso da Trellix |
-| `confidence` | 0.0–1.0 | Fiducia del verdetto (safe: ≥0.9 se completo, 0.1 se incompleto; malicious: ≥0.8) |
+| `confidence` | 0.0–1.0 | Fiducia del verdetto (≥0.8-0.9 con verdetto definitivo; 0.1 sui rami non conclusivi: analisi in corso, fallita o senza classificazione) |
 | `signature` | testo breve | Firma leggibile; su `safe` è sempre benigna (`No Threats Detected` o simile), mai "Phishing: …" |
 | `recommended_action` | `allow` \| `block` | Azione raccomandata a Trellix |
 | `reason` | testo | Motivazione leggibile (il `rationale` del classificatore, se presente) |
 
-Il chiamante resta in attesa fino a ~48s (deadline 60s di Frontdoor). Se
-l'analisi non è terminata entro la finestra, la risposta arriva comunque ma
-lo dichiara onestamente — `"verdict": "safe"`, `"confidence": 0.1`,
-`"signature": "Analysis-Incomplete — Benign By Default"` — e l'analisi
-continua in background: il risultato completo resta disponibile su
-`GET /analyses/{id}` (l'`id` è la stessa risorsa usata dal flusso
-asincrono POST).
+Il modulo **non impone alcuna deadline**: la risposta arriva quando
+l'analisi è terminata, con il verdetto finale (il budget di esplorazione
+interno resta comunque limitato). L'unica finestra di tempo è quella
+gestita a monte dal chiamante (Front Door, ~60s di origin timeout): se
+scatta, l'analisi completa comunque in background — il task è creato
+esplicitamente e non dipende dalla connessione del client — e il
+risultato (persistito su SQLite, cache 24h) viene restituito dalla
+chiamata successiva. Una richiesta che arriva mentre un'analisi è già
+in corso risponde onestamente `"verdict": "safe"`, `"confidence": 0.1`,
+`"signature": "Analysis-Incomplete — Benign By Default"`; lo stesso vale
+per un'analisi fallita (`Analysis-Failed`) o completata senza
+classificazione.
 
 ## Test
 
