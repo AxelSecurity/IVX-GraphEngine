@@ -7,3 +7,6 @@ data/osint_cache/
 data/*.db
 .pytest_cache/
 .DS_Store
+
+# Istruzioni locali per Claude Code (non da committare)
+CLAUDE.md
