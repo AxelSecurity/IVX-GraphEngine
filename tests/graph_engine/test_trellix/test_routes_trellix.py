@@ -43,9 +43,9 @@ class TestRoutesTrellix:
         res = await client.get("/trellix/analyze?url=https://example.com/login")
         assert res.status_code == 200
         body = res.json()
-        assert body["verdict"] == "safe"
-        assert body["confidence"] == 1.0
-        assert "Whitelist" in body["signature"]
+        assert body["result"]["verdict"] == "safe"
+        assert body["result"]["confidence"] == 1.0
+        assert "Whitelist" in body["result"]["signature"]
         assert not called, "run_full_analysis was called despite whitelist hit"
 
     async def test_blacklist_bypasses_analysis(self, app, client, tmp_path, monkeypatch):
@@ -68,8 +68,8 @@ class TestRoutesTrellix:
         res = await client.get("/trellix/analyze?url=https://evil.com/phish")
         assert res.status_code == 200
         body = res.json()
-        assert body["verdict"] == "malicious"
-        assert body["confidence"] == 1.0
+        assert body["result"]["verdict"] == "malicious"
+        assert body["result"]["confidence"] == 1.0
         assert not called, "run_full_analysis was called despite blacklist hit"
 
     async def test_url_whitelist_bypasses_analysis(self, app, client, tmp_path, monkeypatch):
@@ -94,9 +94,9 @@ class TestRoutesTrellix:
         )
         assert res.status_code == 200
         body = res.json()
-        assert body["verdict"] == "safe"
-        assert body["confidence"] == 1.0
-        assert body["signature"] == "Whitelist-Override: URL explicitly trusted"
+        assert body["result"]["verdict"] == "safe"
+        assert body["result"]["confidence"] == 1.0
+        assert body["result"]["signature"] == "Whitelist-Override: URL explicitly trusted"
         assert not called, "run_full_analysis was called despite URL whitelist hit"
 
     async def test_url_blacklist_wins_over_domain_whitelist(
@@ -123,8 +123,8 @@ class TestRoutesTrellix:
         res = await client.get("/trellix/analyze?url=https://example.com/evil")
         assert res.status_code == 200
         body = res.json()
-        assert body["verdict"] == "malicious"
-        assert body["signature"] == "Blacklist-Override: URL explicitly blocked"
+        assert body["result"]["verdict"] == "malicious"
+        assert body["result"]["signature"] == "Blacklist-Override: URL explicitly blocked"
         assert not called, "run_full_analysis was called despite URL blacklist hit"
 
     # ------------------------------------------------------------------
@@ -177,8 +177,8 @@ class TestRoutesTrellix:
         assert res.status_code == 200
         body = res.json()
         # Cache hit → verdetto dal seed
-        assert body["verdict"] == "malicious"
-        assert body["confidence"] >= 0.8
+        assert body["result"]["verdict"] == "malicious"
+        assert body["result"]["confidence"] >= 0.8
         assert not called, "run_full_analysis was called despite cache hit"
 
     async def test_stale_cache_triggers_new_analysis(self, app, client, tmp_path, monkeypatch):
@@ -293,9 +293,9 @@ class TestRoutesTrellix:
         # nessuna deadline, nessuna Analysis-Incomplete autoimposta
         assert res.status_code == 200
         body = res.json()
-        assert body["verdict"] == "safe"
-        assert "Analysis-Incomplete" not in body["signature"]
-        assert body["confidence"] == 0.9
+        assert body["result"]["verdict"] == "safe"
+        assert "Analysis-Incomplete" not in body["result"]["signature"]
+        assert body["result"]["confidence"] == 0.9
 
         # Il risultato è persistito su SQLite
         from graph_engine.storage.repository import get_latest_for_url_hash
@@ -452,8 +452,8 @@ class TestRoutesTrellix:
         assert res.status_code == 200
         # La risposta porta il verdetto persistito dal mock
         body = res.json()
-        assert body["verdict"] == "safe"
-        assert body["confidence"] == 0.4
+        assert body["result"]["verdict"] == "safe"
+        assert body["result"]["confidence"] == 0.4
 
         # Nessuna compressione fast: i parametri della vecchia finestra
         # NON vengono passati — il runner usa i propri default pieni

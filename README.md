@@ -190,27 +190,31 @@ curl -G http://localhost:8000/trellix/analyze \
      --data-urlencode "url=https://example.org/"
 ```
 
-Risposta (200, `Content-Type: application/json`) — verdetto binario:
+Risposta (200, `Content-Type: application/json`) — verdetto binario avvolto
+nella chiave `result`: è il formato con cui l'integrazione Trellix IVX
+legge il verdetto (`result.verdict` / `result.signature`):
 
 ```json
 {
-  "verdict": "safe",
-  "confidence": 0.95,
-  "signature": "No Threats Detected",
-  "recommended_action": "allow",
-  "reason": "Analisi completata — nessun indicatore di phishing rilevato."
+  "result": {
+    "verdict": "safe",
+    "confidence": 0.95,
+    "signature": "No Threats Detected",
+    "recommended_action": "allow",
+    "reason": "Analisi completata — nessun indicatore di phishing rilevato."
+  }
 }
 ```
 
-Campi:
+Campi di `result`:
 
 | Campo | Valori | Significato |
 |---|---|---|
-| `verdict` | `safe` \| `malicious` | Il verdetto binario atteso da Trellix |
-| `confidence` | 0.0–1.0 | Fiducia del verdetto (≥0.8-0.9 con verdetto definitivo; 0.1 sui rami non conclusivi: analisi in corso, fallita o senza classificazione) |
-| `signature` | testo breve | Firma leggibile; su `safe` è sempre benigna (`No Threats Detected` o simile), mai "Phishing: …" |
-| `recommended_action` | `allow` \| `block` | Azione raccomandata a Trellix |
-| `reason` | testo | Motivazione leggibile (il `rationale` del classificatore, se presente) |
+| `result.verdict` | `safe` \| `malicious` | Il verdetto binario atteso da Trellix |
+| `result.confidence` | 0.0–1.0 | Fiducia del verdetto (≥0.8-0.9 con verdetto definitivo; 0.1 sui rami non conclusivi: analisi in corso, fallita o senza classificazione) |
+| `result.signature` | testo breve | Firma leggibile; su `safe` è sempre benigna (`No Threats Detected` o simile), mai "Phishing: …" |
+| `result.recommended_action` | `allow` \| `block` | Azione raccomandata a Trellix |
+| `result.reason` | testo | Motivazione leggibile (il `rationale` del classificatore, se presente) |
 
 Il modulo **non impone alcuna deadline**: la risposta arriva quando
 l'analisi è terminata, con il verdetto finale (il budget di esplorazione
@@ -220,9 +224,10 @@ scatta, l'analisi completa comunque in background — il task è creato
 esplicitamente e non dipende dalla connessione del client — e il
 risultato (persistito su SQLite, cache 24h) viene restituito dalla
 chiamata successiva. Una richiesta che arriva mentre un'analisi è già
-in corso risponde onestamente `"verdict": "safe"`, `"confidence": 0.1`,
-`"signature": "Analysis-Incomplete — Benign By Default"`; lo stesso vale
-per un'analisi fallita (`Analysis-Failed`) o completata senza
+in corso risponde onestamente `"result.verdict": "safe"`,
+`"result.confidence": 0.1`, `"result.signature":
+"Analysis-Incomplete — Benign By Default"`; lo stesso vale per
+un'analisi fallita (`Analysis-Failed`) o completata senza
 classificazione.
 
 ## Test

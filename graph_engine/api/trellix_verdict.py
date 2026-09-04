@@ -189,6 +189,17 @@ def build_signature(
 # ---------------------------------------------------------------------------
 
 
+def _wrap_result(payload: dict) -> dict:
+    """Avvolge il payload nella chiave ``result`` attesa da Trellix IVX.
+
+    L'integrazione IVX legge il verdetto come ``result.verdict`` /
+    ``result.signature``: i campi flat al livello superiore non vengono
+    visti dal consumatore.  Il wrapper è quindi parte del contratto,
+    non un dettaglio cosmetico.
+    """
+    return {"result": payload}
+
+
 def build_trellix_response(data: dict | None) -> dict:
     """Costruisce la risposta Trellix dal risultato dell'analisi.
 
@@ -199,19 +210,19 @@ def build_trellix_response(data: dict | None) -> dict:
               Può essere ``None`` se l'analisi non è ancora iniziata.
 
     Returns:
-        Un dict con le chiavi attese da Trellix:
-        ``verdict``, ``confidence``, ``signature``,
+        Un dict con la chiave ``result`` contenente le chiavi attese da
+        Trellix IVX: ``verdict``, ``confidence``, ``signature``,
         ``recommended_action``, ``reason``.
     """
     # ── Nessun dato ────────────────────────────────────────────────────
     if data is None:
-        return {
+        return _wrap_result({
             "verdict": "safe",
             "confidence": 0.1,
             "signature": _SIG_INCOMPLETE,
             "recommended_action": "allow",
             "reason": "Analisi non ancora iniziata o dati non disponibili.",
-        }
+        })
 
     target = data.get("target")
     verdict = data.get("verdict")
@@ -243,17 +254,17 @@ def build_trellix_response(data: dict | None) -> dict:
             if ev.get("key") == "pipeline_error":
                 error_detail = str(ev.get("value", error_detail))
                 break
-        return {
+        return _wrap_result({
             "verdict": "safe",
             "confidence": 0.1,
             "signature": _SIG_FAILED,
             "recommended_action": "allow",
             "reason": f"Analisi fallita: {error_detail}",
-        }
+        })
 
     # ── Status running/queued ──────────────────────────────────────────
     if status_val in ("running", "queued"):
-        return {
+        return _wrap_result({
             "verdict": "safe",
             "confidence": 0.1,
             "signature": _SIG_INCOMPLETE,
@@ -262,17 +273,17 @@ def build_trellix_response(data: dict | None) -> dict:
                 f"Analisi ancora in corso (status: {status_val}). "
                 "Riprova tra qualche minuto."
             ),
-        }
+        })
 
     # ── Done senza verdict ─────────────────────────────────────────────
     if verdict is None:
-        return {
+        return _wrap_result({
             "verdict": "safe",
             "confidence": 0.1,
             "signature": _SIG_INCOMPLETE,
             "recommended_action": "allow",
             "reason": "Analisi completata ma classificazione assente.",
-        }
+        })
 
     # ── Done con verdict ───────────────────────────────────────────────
     classification = getattr(verdict, "classification", None)
@@ -320,13 +331,13 @@ def build_trellix_response(data: dict | None) -> dict:
         else "Indicatori di phishing confermati."
     )
 
-    return {
+    return _wrap_result({
         "verdict": mapped,
         "confidence": confidence,
         "signature": signature,
         "recommended_action": action,
         "reason": reason,
-    }
+    })
 
 
 def entry_response(entry: dict) -> dict:
@@ -350,18 +361,18 @@ def entry_response(entry: dict) -> dict:
     level_it = "URL" if level == "URL" else "Dominio"
 
     if list_type == "whitelist":
-        return {
+        return _wrap_result({
             "verdict": "safe",
             "confidence": 1.0,
             "signature": f"Whitelist-Override: {level} explicitly trusted",
             "recommended_action": "allow",
             "reason": note or f"{level_it} in whitelist — analisi bypassata.",
-        }
+        })
     else:
-        return {
+        return _wrap_result({
             "verdict": "malicious",
             "confidence": 1.0,
             "signature": f"Blacklist-Override: {level} explicitly blocked",
             "recommended_action": "block",
             "reason": note or f"{level_it} in blacklist — analisi bypassata.",
-        }
+        })

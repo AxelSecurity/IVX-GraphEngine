@@ -233,19 +233,28 @@ class AnalysesDeleteResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class TrellixVerdictResponse(BaseModel):
-    """Il JSON che la route Trellix IVX restituisce per questa analisi.
-
-    Rigenerato on-demand da ``build_trellix_response`` (la stessa funzione
-    della route ``GET /trellix/analyze``): ciò che la dashboard mostra è
-    ciò che Trellix ha ricevuto o riceverebbe in questo momento.
-    """
+class TrellixResult(BaseModel):
+    """Contenuto del verdetto — letto da Trellix IVX come
+    ``result.verdict`` / ``result.signature``."""
 
     verdict: str  # "safe" | "malicious"
     confidence: float
     signature: str
     recommended_action: str  # "allow" | "block"
     reason: str
+
+
+class TrellixVerdictResponse(BaseModel):
+    """Il JSON che la route Trellix IVX restituisce per questa analisi.
+
+    Rigenerato on-demand da ``build_trellix_response`` (la stessa funzione
+    della route ``GET /trellix/analyze``): ciò che la dashboard mostra è
+    ciò che Trellix ha ricevuto o riceverebbe in questo momento.  Il
+    payload è avvolto nella chiave ``result``: è il formato con cui
+    l'integrazione Trellix IVX legge il verdetto.
+    """
+
+    result: TrellixResult
 
 
 # ---------------------------------------------------------------------------

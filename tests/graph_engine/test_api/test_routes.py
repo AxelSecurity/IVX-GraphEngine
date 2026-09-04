@@ -499,11 +499,11 @@ class TestGetAnalysisTrellixResponse:
 
         assert res.status_code == 200
         body = res.json()
-        assert body["verdict"] == "malicious"
-        assert body["recommended_action"] == "block"
-        assert body["confidence"] >= 0.8
-        assert body["signature"] == "Phishing: Microsoft Impersonation"
-        assert body["reason"] == "Pagina di login falsa con logo Microsoft."
+        assert body["result"]["verdict"] == "malicious"
+        assert body["result"]["recommended_action"] == "block"
+        assert body["result"]["confidence"] >= 0.8
+        assert body["result"]["signature"] == "Phishing: Microsoft Impersonation"
+        assert body["result"]["reason"] == "Pagina di login falsa con logo Microsoft."
 
     async def test_output_identical_to_trellix_route(self, app, client, tmp_path):
         """Fedeltà: il JSON mostrato in dashboard DEVE essere identico a
@@ -546,9 +546,9 @@ class TestGetAnalysisTrellixResponse:
 
         assert res.status_code == 200
         body = res.json()
-        assert body["verdict"] == "safe"
-        assert body["recommended_action"] == "allow"
-        assert body["signature"] == "Analysis-Incomplete — Benign By Default"
+        assert body["result"]["verdict"] == "safe"
+        assert body["result"]["recommended_action"] == "allow"
+        assert body["result"]["signature"] == "Analysis-Incomplete — Benign By Default"
 
     async def test_unknown_target_returns_404(self, app, client):
         """Target inesistente → 404, come le altre route di dettaglio."""

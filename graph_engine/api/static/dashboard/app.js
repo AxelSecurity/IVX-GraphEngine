@@ -1285,7 +1285,7 @@ function buildDetailHtml(id, graph, artifacts, trellix) {
       <div class="section-title">Risposta restituita a Trellix IVX</div>
       <div class="card trellix-box">
         <div class="trellix-head">
-          <span class="trellix-verdict trellix-${escapeHtml(trellix.verdict)}">${escapeHtml(trellix.verdict)}</span>
+          <span class="trellix-verdict trellix-${escapeHtml(trellix.result.verdict)}">${escapeHtml(trellix.result.verdict)}</span>
           <button class="btn-copy" id="copy-trellix-btn" type="button">Copia JSON</button>
         </div>
         <pre class="trellix-json" id="trellix-json">${escapeHtml(JSON.stringify(trellix, null, 2))}</pre>

@@ -130,6 +130,31 @@ class TestBuildSignature:
 class TestBuildTrellixResponse:
     """Test di build_trellix_response."""
 
+    def test_result_wrapper_is_contract(self):
+        """Contratto Trellix IVX: il verdetto vive sotto ``result``
+        (letto come ``result.verdict`` / ``result.signature``) — i campi
+        flat al livello superiore non esistono più.
+
+        Regressione dell'integrazione IVX (2026-09-04): l'integrazione
+        legge il JSON come ``result.verdict`` / ``result.signature`` e
+        non vedeva i campi flat della risposta storica.
+        """
+        from graph_engine.models import AnalysisTarget, TargetStatus
+
+        target = AnalysisTarget(
+            input_url="https://ok.example",
+            status=TargetStatus.done,
+        )
+        resp = build_trellix_response(
+            {"target": target, "verdict": None, "evidence": []},
+        )
+        assert set(resp.keys()) == {"result"}
+        assert resp["result"]["verdict"] == "safe"
+        assert (
+            resp["result"]["signature"]
+            == "Analysis-Incomplete — Benign By Default"
+        )
+
     def test_none_data_returns_incomplete(self):
         """data=None → safe/allow/0.1.
 
@@ -138,9 +163,9 @@ class TestBuildTrellixResponse:
         è più raggiungibile dal path principale — resta come rete di
         sicurezza."""
         resp = build_trellix_response(None)
-        assert resp["verdict"] == "safe"
-        assert resp["confidence"] == 0.1
-        assert "Analysis-Incomplete" in resp["signature"]
+        assert resp["result"]["verdict"] == "safe"
+        assert resp["result"]["confidence"] == 0.1
+        assert "Analysis-Incomplete" in resp["result"]["signature"]
 
     def test_error_status_returns_failed(self):
         """Status error → Analysis-Failed con dettaglio."""
@@ -159,9 +184,9 @@ class TestBuildTrellixResponse:
         resp = build_trellix_response(
             {"target": target, "verdict": None, "evidence": evidence},
         )
-        assert resp["verdict"] == "safe"
-        assert "Analysis-Failed" in resp["signature"]
-        assert "something broke" in resp["reason"]
+        assert resp["result"]["verdict"] == "safe"
+        assert "Analysis-Failed" in resp["result"]["signature"]
+        assert "something broke" in resp["result"]["reason"]
 
     def test_done_without_verdict_returns_incomplete(self):
         """Status done ma nessun verdict → safe/0.1."""
@@ -174,8 +199,8 @@ class TestBuildTrellixResponse:
         resp = build_trellix_response(
             {"target": target, "verdict": None, "evidence": []},
         )
-        assert resp["verdict"] == "safe"
-        assert "classificazione assente" in resp["reason"].lower()
+        assert resp["result"]["verdict"] == "safe"
+        assert "classificazione assente" in resp["result"]["reason"].lower()
 
     def test_benign_with_brand_has_coherent_signature(self):
         """Regressione end-to-end del caso reale (example.org/IANA):
@@ -194,11 +219,11 @@ class TestBuildTrellixResponse:
         resp = build_trellix_response(
             {"target": target, "verdict": verdict, "evidence": []},
         )
-        assert resp["verdict"] == "safe"
-        assert resp["confidence"] == 0.95
-        assert resp["signature"] == "No Threats Detected"
-        assert "Phishing" not in resp["signature"]
-        assert resp["recommended_action"] == "allow"
+        assert resp["result"]["verdict"] == "safe"
+        assert resp["result"]["confidence"] == 0.95
+        assert resp["result"]["signature"] == "No Threats Detected"
+        assert "Phishing" not in resp["result"]["signature"]
+        assert resp["result"]["recommended_action"] == "allow"
 
     def test_phishing_with_brand_keeps_impersonation_signature(self):
         """Invariante: phishing + brand → malicious + firma impersonation."""
@@ -212,9 +237,9 @@ class TestBuildTrellixResponse:
         resp = build_trellix_response(
             {"target": target, "verdict": verdict, "evidence": []},
         )
-        assert resp["verdict"] == "malicious"
-        assert resp["signature"] == "Phishing: Netflix Impersonation"
-        assert resp["recommended_action"] == "block"
+        assert resp["result"]["verdict"] == "malicious"
+        assert resp["result"]["signature"] == "Phishing: Netflix Impersonation"
+        assert resp["result"]["recommended_action"] == "block"
 
 
 class TestSuspiciousBlockThreshold:
@@ -237,10 +262,10 @@ class TestSuspiciousBlockThreshold:
         resp = build_trellix_response(
             {"target": target, "verdict": verdict, "evidence": []},
         )
-        assert resp["verdict"] == "malicious"
-        assert resp["recommended_action"] == "block"
-        assert resp["confidence"] >= 0.8
-        assert resp["signature"] == "Suspicious Site Blocked"
+        assert resp["result"]["verdict"] == "malicious"
+        assert resp["result"]["recommended_action"] == "block"
+        assert resp["result"]["confidence"] >= 0.8
+        assert resp["result"]["signature"] == "Suspicious Site Blocked"
 
     def test_weak_suspicious_stays_safe_allow(self):
         """Dubbio debole (0.15, 0.4, 0.59) → safe/allow come da policy."""
@@ -258,11 +283,11 @@ class TestSuspiciousBlockThreshold:
             resp = build_trellix_response(
                 {"target": target, "verdict": verdict, "evidence": []},
             )
-            assert resp["verdict"] == "safe", f"conf={conf}"
-            assert resp["recommended_action"] == "allow", f"conf={conf}"
-            assert resp["confidence"] <= 0.5, f"conf={conf}"
+            assert resp["result"]["verdict"] == "safe", f"conf={conf}"
+            assert resp["result"]["recommended_action"] == "allow", f"conf={conf}"
+            assert resp["result"]["confidence"] <= 0.5, f"conf={conf}"
             assert (
-                resp["signature"] == "Suspicious Site (Low Confidence)"
+                resp["result"]["signature"] == "Suspicious Site (Low Confidence)"
             ), f"conf={conf}"
 
     def test_strong_suspicious_with_brand_keeps_impersonation(self):
@@ -281,8 +306,8 @@ class TestSuspiciousBlockThreshold:
         resp = build_trellix_response(
             {"target": target, "verdict": verdict, "evidence": []},
         )
-        assert resp["verdict"] == "malicious"
-        assert resp["signature"] == "Phishing: Ledger Impersonation"
+        assert resp["result"]["verdict"] == "malicious"
+        assert resp["result"]["signature"] == "Phishing: Ledger Impersonation"
 
     def test_boundary_just_below_threshold_allows(self):
         """0.5999 resta sotto soglia: il confine è ≥ 0.6."""
@@ -299,8 +324,8 @@ class TestSuspiciousBlockThreshold:
         resp = build_trellix_response(
             {"target": target, "verdict": verdict, "evidence": []},
         )
-        assert resp["verdict"] == "safe"
-        assert resp["recommended_action"] == "allow"
+        assert resp["result"]["verdict"] == "safe"
+        assert resp["result"]["recommended_action"] == "allow"
 
 
 class TestEntryResponse:
@@ -308,17 +333,17 @@ class TestEntryResponse:
 
     def test_whitelist_entry(self):
         resp = entry_response({"list_type": "whitelist", "note": "Trusted"})
-        assert resp["verdict"] == "safe"
-        assert resp["confidence"] == 1.0
-        assert resp["recommended_action"] == "allow"
-        assert "Trusted" in resp["reason"]
+        assert resp["result"]["verdict"] == "safe"
+        assert resp["result"]["confidence"] == 1.0
+        assert resp["result"]["recommended_action"] == "allow"
+        assert "Trusted" in resp["result"]["reason"]
 
     def test_blacklist_entry(self):
         resp = entry_response({"list_type": "blacklist", "note": "Known phish"})
-        assert resp["verdict"] == "malicious"
-        assert resp["confidence"] == 1.0
-        assert resp["recommended_action"] == "block"
-        assert "Known phish" in resp["reason"]
+        assert resp["result"]["verdict"] == "malicious"
+        assert resp["result"]["confidence"] == 1.0
+        assert resp["result"]["recommended_action"] == "block"
+        assert "Known phish" in resp["result"]["reason"]
 
     def test_whitelist_url_entry_signature(self):
         """Hit su lista URL: firma e reason dichiarano il livello URL."""
@@ -328,9 +353,9 @@ class TestEntryResponse:
             "matched": "url",
             "match_key": "https://site.it/trusted",
         })
-        assert resp["verdict"] == "safe"
-        assert resp["signature"] == "Whitelist-Override: URL explicitly trusted"
-        assert resp["reason"] == "URL in whitelist — analisi bypassata."
+        assert resp["result"]["verdict"] == "safe"
+        assert resp["result"]["signature"] == "Whitelist-Override: URL explicitly trusted"
+        assert resp["result"]["reason"] == "URL in whitelist — analisi bypassata."
 
     def test_blacklist_url_entry_signature(self):
         resp = entry_response({
@@ -339,12 +364,12 @@ class TestEntryResponse:
             "matched": "url",
             "match_key": "https://site.it/evil",
         })
-        assert resp["verdict"] == "malicious"
-        assert resp["signature"] == "Blacklist-Override: URL explicitly blocked"
-        assert resp["reason"] == "URL in blacklist — analisi bypassata."
+        assert resp["result"]["verdict"] == "malicious"
+        assert resp["result"]["signature"] == "Blacklist-Override: URL explicitly blocked"
+        assert resp["result"]["reason"] == "URL in blacklist — analisi bypassata."
 
     def test_domain_entry_signature_unchanged(self):
         """Senza 'matched' (entry dominio) le firme storiche restano invariate."""
         resp = entry_response({"list_type": "whitelist", "note": None})
-        assert resp["signature"] == "Whitelist-Override: Domain explicitly trusted"
-        assert resp["reason"] == "Dominio in whitelist — analisi bypassata."
+        assert resp["result"]["signature"] == "Whitelist-Override: Domain explicitly trusted"
+        assert resp["result"]["reason"] == "Dominio in whitelist — analisi bypassata."
