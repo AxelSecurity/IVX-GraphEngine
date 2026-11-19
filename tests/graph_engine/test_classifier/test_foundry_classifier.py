@@ -31,6 +31,20 @@ from graph_engine.classifier.foundry_classifier import (
 from graph_engine.models import Classification
 
 
+@pytest.fixture(autouse=True)
+def _fresh_foundry_client_cache():
+    """Ogni test parte (e finisce) senza client Foundry in cache: i test
+    iniettano classi SDK finte diverse e verificano quale credenziale
+    viene costruita."""
+    from graph_engine.classifier import foundry_classifier as fc
+
+    fc._wait_for_cleanup(timeout=5)
+    fc._reset_client_cache()
+    yield
+    fc._wait_for_cleanup(timeout=5)
+    fc._reset_client_cache()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -304,7 +318,11 @@ class TestStatelessThreadCreation:
                 f"≠ created IDs {fake_agents.thread_ids_created}"
             )
 
-            # 6. delete_thread received the SAME IDs, in order
+            # 6. delete_thread received the SAME IDs, in order (la
+            # cancellazione gira su un worker: si attende che finisca)
+            from graph_engine.classifier.foundry_classifier import _wait_for_cleanup
+
+            _wait_for_cleanup(timeout=5)
             assert fake_agents.thread_ids_delete == fake_agents.thread_ids_created, (
                 f"delete_thread IDs {fake_agents.thread_ids_delete} "
                 f"≠ created IDs {fake_agents.thread_ids_created}"
@@ -810,3 +828,37 @@ def test_real_sdk_exposes_agents_client():
     from azure.ai.agents import AgentsClient  # noqa: F401
 
     assert AgentsClient is not None
+
+
+class TestClientReuse:
+    """Credenziale e AgentsClient sono riusati tra le chiamate (token AAD
+    in cache), ma OGNI chiamata crea comunque un thread nuovo."""
+
+    async def test_client_built_once_threads_still_fresh(self, monkeypatch):
+        from graph_engine.classifier import foundry_classifier as fc
+
+        constructed = []
+        recorder = _FakeAgentsClient()
+
+        class _CountingClient:
+            def __init__(self, endpoint=None, credential=None):
+                constructed.append(endpoint)
+                self.threads = recorder.threads
+                self.messages = recorder.messages
+                self.runs = recorder.runs
+
+        saved, credential_log = _register_fake_azure_modules(_CountingClient)
+        try:
+            monkeypatch.setattr(settings, "azure_foundry_endpoint", "https://f.example")
+            monkeypatch.setattr(settings, "azure_foundry_agent_id", "agent-1")
+            for _ in range(3):
+                await fc._call_foundry_agent("prompt")
+            fc._wait_for_cleanup(timeout=5)
+        finally:
+            _unregister_fake_azure_modules(saved)
+
+        assert len(constructed) == 1
+        assert len(credential_log) == 1
+        assert len(set(recorder.thread_ids_created)) == 3
+        assert recorder.thread_ids_delete == recorder.thread_ids_created
+

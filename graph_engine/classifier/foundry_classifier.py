@@ -24,9 +24,14 @@ CRITICAL DESIGN CONSTRAINT — read before modifying:
 from __future__ import annotations
 
 import asyncio
+import functools
+import hashlib
 import json
 import logging
 import os
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from typing import Any
 
 from graph_engine.config import settings
 from graph_engine.models import Classification, Verdict
@@ -39,6 +44,7 @@ logger = logging.getLogger(__name__)
 _PROMPT_PATH = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
 
 
+@functools.lru_cache(maxsize=1)
 def _load_system_prompt() -> str:
     try:
         with open(_PROMPT_PATH, encoding="utf-8") as fh:
@@ -174,6 +180,87 @@ async def _call_foundry_agent(prompt: str) -> str:
     return await asyncio.to_thread(_call_foundry_agent_sync, prompt)
 
 
+# ---------------------------------------------------------------------------
+# Client riusato tra le chiamate — MAI lo stato conversazionale
+# ---------------------------------------------------------------------------
+# La credenziale e l'AgentsClient sono riusati: la credenziale tiene in
+# cache il token AAD (niente nuovo token a ogni analisi) e il client il
+# pool di connessioni HTTP.  Nessuno dei due porta stato conversazionale:
+# l'isolamento tra analisi resta garantito dal thread NUOVO creato a ogni
+# chiamata (vedi docstring del modulo).  La chiave include le classi SDK
+# e la configurazione, così un cambio di credenziali crea un client nuovo.
+_client_cache: dict[tuple, Any] = {}
+_client_cache_lock = threading.Lock()
+
+# Cancellazione dei thread Foundry fuori dal cammino critico: la risposta
+# è già nelle nostre mani, il round-trip di delete non deve ritardarla.
+_cleanup_executor = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="foundry-cleanup"
+)
+_pending_cleanups: set[Future] = set()
+
+
+def _get_agents_client(agents_client_cls, secret_cred_cls, default_cred_cls, endpoint: str):
+    """Restituisce (creandolo una volta) l'AgentsClient per la config corrente."""
+    if settings.service_principal_configured:
+        secret_digest = hashlib.sha256(
+            (settings.azure_client_secret or "").encode()
+        ).hexdigest()
+        key = (
+            agents_client_cls, secret_cred_cls, endpoint,
+            settings.azure_tenant_id, settings.azure_client_id, secret_digest,
+        )
+    else:
+        key = (agents_client_cls, default_cred_cls, endpoint)
+
+    with _client_cache_lock:
+        client = _client_cache.get(key)
+        if client is not None:
+            return client
+        if settings.service_principal_configured:
+            # Credenziali dal .env: pydantic-settings NON le esporta in
+            # os.environ, quindi DefaultAzureCredential non le vedrebbe —
+            # si costruisce esplicitamente il ClientSecretCredential.
+            credential = secret_cred_cls(
+                tenant_id=settings.azure_tenant_id,
+                client_id=settings.azure_client_id,
+                client_secret=settings.azure_client_secret,
+            )
+        else:
+            credential = default_cred_cls()
+        # AgentsClient (azure-ai-agents) is the CONVERSATIONAL client —
+        # threads, messages, runs.  It is split out of azure-ai-projects
+        # in current SDK versions: AIProjectClient.agents there only
+        # manages agent DEFINITIONS.
+        client = agents_client_cls(endpoint=endpoint, credential=credential)
+        _client_cache[key] = client
+        return client
+
+
+def _reset_client_cache() -> None:
+    """Svuota la cache dei client (test e cambio configurazione)."""
+    with _client_cache_lock:
+        _client_cache.clear()
+
+
+def _delete_thread(client, thread_id: str) -> None:
+    try:
+        client.threads.delete(thread_id)
+    except Exception:
+        logger.debug("Foundry thread %s not deleted", thread_id, exc_info=True)
+
+
+def _schedule_thread_delete(client, thread_id: str) -> None:
+    future = _cleanup_executor.submit(_delete_thread, client, thread_id)
+    _pending_cleanups.add(future)
+    future.add_done_callback(_pending_cleanups.discard)
+
+
+def _wait_for_cleanup(timeout: float | None = None) -> None:
+    """Attende le cancellazioni di thread in corso (test/shutdown)."""
+    wait(list(_pending_cleanups), timeout=timeout)
+
+
 def _call_foundry_agent_sync(prompt: str) -> str:
     """Create a fresh thread, send the prompt, run, and return the reply.
 
@@ -197,21 +284,9 @@ def _call_foundry_agent_sync(prompt: str) -> str:
             "pip install azure-ai-agents azure-ai-projects azure-identity"
         )
 
-    if settings.service_principal_configured:
-        # Credenziali dal .env: pydantic-settings NON le esporta in
-        # os.environ, quindi DefaultAzureCredential non le vedrebbe —
-        # si costruisce esplicitamente il ClientSecretCredential.
-        credential = ClientSecretCredential(
-            tenant_id=settings.azure_tenant_id,
-            client_id=settings.azure_client_id,
-            client_secret=settings.azure_client_secret,
-        )
-    else:
-        credential = DefaultAzureCredential()
-    # AgentsClient (azure-ai-agents) is the CONVERSATIONAL client — threads,
-    # messages, runs.  It is split out of azure-ai-projects in current SDK
-    # versions: AIProjectClient.agents there only manages agent DEFINITIONS.
-    client = AgentsClient(endpoint=endpoint, credential=credential)
+    client = _get_agents_client(
+        AgentsClient, ClientSecretCredential, DefaultAzureCredential, endpoint,
+    )
 
     # ── CRITICAL: always create a NEW thread ─────────────────────────────
     # See module-level docstring for the rationale.  One thread per call,
@@ -286,11 +361,9 @@ def _call_foundry_agent_sync(prompt: str) -> str:
         return ""
 
     finally:
-        # Clean up the ephemeral thread — no cross-session leakage
-        try:
-            client.threads.delete(thread_id)
-        except Exception:
-            pass
+        # Clean up the ephemeral thread — no cross-session leakage.  Fuori
+        # dal cammino critico: la cancellazione gira su un worker dedicato.
+        _schedule_thread_delete(client, thread_id)
 
 
 # ---------------------------------------------------------------------------
