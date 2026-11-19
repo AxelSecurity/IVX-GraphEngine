@@ -598,3 +598,70 @@ class TestFormInventoryCollected:
         assert types == ["email", "password"]
         labels = {f["nearby_label_text"] for f in fields}
         assert "Password" in labels
+
+
+# ---------------------------------------------------------------------------
+# Navigation guard — un redirect JS intercettato non distrugge la pagina
+# ---------------------------------------------------------------------------
+
+_DELAYED_REDIRECT_PAGE = """\
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Please wait</title></head>
+<body><h1>Loading your document</h1>
+<script>setTimeout(()=>{window.location.href='/landing';},300);</script>
+</body></html>"""
+
+
+class _RedirectHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        body = (
+            _DELAYED_REDIRECT_PAGE if self.path in ("/", "")
+            else "<html><head><title>Landing</title></head><body>ok</body></html>"
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class TestGuardKeepsOriginalPage:
+    async def test_root_state_is_real_page_not_chrome_error(self, tmp_path):
+        """Il redirect JS viene intercettato (transizione js_location) ma lo
+        stato radice registra la pagina REALE: prima l'abort della
+        navigazione lasciava chrome-error://chromewebdata/ al suo posto."""
+        from playwright.async_api import async_playwright
+
+        from graph_engine.budget import Budget
+        from graph_engine.explorer import StateGraphExplorer
+        from graph_engine.models import TransitionKind
+
+        server = HTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    explorer = StateGraphExplorer(browser)
+                    explorer._artifact_base = tmp_path
+                    await explorer.run(
+                        f"http://127.0.0.1:{server.server_port}/",
+                        budget=Budget(max_depth=2, max_nodes=4, timeout_s=30),
+                        capture_artifacts=True,
+                        top_n_actions=0,
+                    )
+                finally:
+                    await browser.close()
+        finally:
+            server.shutdown()
+
+        root = next(s for s in explorer.states if s.depth == 0)
+        assert root.url.startswith("http://127.0.0.1:")
+        dom = open(root.har_ref.replace("snapshot.har", "dom.html")).read()
+        assert "Loading your document" in dom
+        assert "chromewebdata" not in dom
+        assert any(t.kind == TransitionKind.js_location for t in explorer.transitions)

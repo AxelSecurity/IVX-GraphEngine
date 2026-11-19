@@ -981,7 +981,13 @@ class StateGraphExplorer:
                     self._intercepted_urls.append(
                         {"url": route.request.url, "method": "href_setter"}
                     )
-                    await route.abort()
+                    # 204 No Content, NON abort(): il browser annulla la
+                    # navigazione e resta sul documento corrente.  Con
+                    # abort() Chromium sostituiva la pagina con
+                    # chrome-error://chromewebdata/ — lo stato (DOM,
+                    # screenshot, testo, a volte l'URL) registrava la
+                    # pagina d'errore di Chrome invece del contenuto reale.
+                    await route.fulfill(status=204, body="")
                     return
             await route.continue_()
 
