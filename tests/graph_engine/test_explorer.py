@@ -262,12 +262,13 @@ class TestBfsLoopDepthLimit:
 
         async def _fake_execute(page, context, state, action):
             processed.append(state.dom_hash)
-            return State(
+            child = State(
                 target_id=explorer.target.id,
                 url=state.url + "/child",
                 dom_hash="child-of-" + state.dom_hash,
                 depth=state.depth + 1,
             )
+            return child, None
 
         explorer._enumerate_passive_actions = AsyncMock(return_value=[object()])
         explorer._execute_action = AsyncMock(side_effect=_fake_execute)
@@ -632,3 +633,83 @@ class TestClickSkippedWhenReplayFails:
 
         assert result is None
         page.click.assert_not_called()
+
+
+class TestParallelActions:
+    """_run_actions: azioni in parallelo, registrazione in ordine dei
+    candidati, tetto ai nodi e al tempo del budget."""
+
+    def _explorer(self):
+        from unittest.mock import MagicMock
+
+        explorer = StateGraphExplorer(MagicMock())
+        explorer.target = AnalysisTarget(input_url="https://x.com")
+        explorer._start_ts = time.monotonic()
+        explorer._node_count = 1
+        return explorer
+
+    def _state(self, explorer, name, depth=1):
+        return State(
+            target_id=explorer.target.id, url=f"https://x.com/{name}",
+            dom_hash=name, depth=depth,
+        )
+
+    async def test_runs_concurrently_and_records_in_candidate_order(self):
+        explorer = self._explorer()
+        parent = self._state(explorer, "parent", 0)
+        active = 0
+        peak = 0
+        delays = {"a": 0.15, "b": 0.05, "c": 0.10}
+
+        async def _fake_execute(page, context, state, action):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(delays[action])
+            active -= 1
+            return self._state(explorer, action), None
+
+        explorer._execute_action = _fake_execute
+        started = time.monotonic()
+        new_states = await explorer._run_actions(
+            None, None, parent, ["a", "b", "c"],
+            Budget(max_nodes=40, max_depth=5, timeout_s=60),
+        )
+        elapsed = time.monotonic() - started
+
+        assert peak == 3
+        assert elapsed < 0.25  # parallelo: ~max(delays), non la somma
+        assert [s.dom_hash for s in new_states] == ["a", "b", "c"]
+        assert [s.dom_hash for s in explorer.states] == ["a", "b", "c"]
+
+    async def test_node_budget_keeps_first_candidates(self):
+        explorer = self._explorer()
+        parent = self._state(explorer, "parent", 0)
+
+        async def _fake_execute(page, context, state, action):
+            return self._state(explorer, action), None
+
+        explorer._execute_action = _fake_execute
+        new_states = await explorer._run_actions(
+            None, None, parent, ["a", "b", "c"],
+            Budget(max_nodes=3, max_depth=5, timeout_s=60),
+        )
+        assert [s.dom_hash for s in new_states] == ["a", "b"]
+        assert explorer._node_count == 3
+
+    async def test_time_budget_interrupts_slow_action(self):
+        explorer = self._explorer()
+        parent = self._state(explorer, "parent", 0)
+
+        async def _fake_execute(page, context, state, action):
+            await asyncio.sleep(5 if action == "slow" else 0)
+            return self._state(explorer, action), None
+
+        explorer._execute_action = _fake_execute
+        explorer._start_ts = time.monotonic() - 59.8
+        new_states = await explorer._run_actions(
+            None, None, parent, ["fast", "slow"],
+            Budget(max_nodes=40, max_depth=5, timeout_s=60),
+        )
+        assert [s.dom_hash for s in new_states] == ["fast"]
+        assert any("budget" in e.value for e in explorer.evidence)

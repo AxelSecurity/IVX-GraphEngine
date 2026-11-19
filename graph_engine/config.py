@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     # restano "queued" finché non si libera uno slot.
     max_concurrent_analyses: int = 4
 
+    # Azioni (click/redirect) di uno stato esplorate in parallelo da L4,
+    # ognuna su una pagina propria.  Moltiplica le pagine Chromium aperte
+    # per MAX_CONCURRENT_ANALYSES: 1 = esplorazione sequenziale.
+    l4_parallel_actions: int = 3
+
     # ── Bootstrap amministratore dashboard ──────────────────────────
     # Al primo avvio, se la tabella utenti è vuota, viene creato
     # l'admin con queste credenziali.  Se mancano, l'admin viene

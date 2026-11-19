@@ -24,6 +24,7 @@ from playwright.async_api import Browser, BrowserContext, Page
 from graph_engine.actions import enumerate_actionable
 from graph_engine.budget import Budget
 from graph_engine.classifier.form_inventory import scan_form_fields
+from graph_engine.config import settings
 from graph_engine.dom_hash import normalise_and_hash
 from graph_engine.gate_solver import detect_captcha, try_pass_gate
 from graph_engine.models import (
@@ -292,6 +293,9 @@ class StateGraphExplorer:
 
         # Stato per pagina di guardia e replay (vedi _PageCtx / _ctx).
         self._page_ctx: dict[int, _PageCtx] = {}
+        # Azioni di uno stato eseguite in parallelo (vedi _run_actions).
+        self._parallel_actions: int = max(1, int(settings.l4_parallel_actions))
+        self._action_slots: Optional[asyncio.Semaphore] = None
 
         # Artifact capture
         self._capture_artifacts_flag: bool = True
@@ -543,17 +547,11 @@ class StateGraphExplorer:
                     )
                     actions.extend(click_actions)
 
-                for action in actions:
-                    if not self._within_budget(budget):
-                        break
-                    new_state = await self._execute_action(
-                        page, context, state, action
-                    )
-                    if new_state is not None:
-                        self.states.append(new_state)
-                        self._node_count += 1
-                        if new_state.dom_hash not in self._visited:
-                            await frontier.put(new_state)
+                for new_state in await self._run_actions(
+                    page, context, state, actions, budget
+                ):
+                    if new_state.dom_hash not in self._visited:
+                        await frontier.put(new_state)
 
             except Exception as exc:
                 self._record_error(
@@ -565,6 +563,80 @@ class StateGraphExplorer:
                         f"{state.id}: {exc}"
                     ),
                 )
+
+    async def _run_actions(
+        self,
+        page,
+        context,
+        state: State,
+        actions: list,
+        budget: Budget,
+    ) -> list[State]:
+        """Esegue le azioni di *state* IN PARALLELO e registra i risultati.
+
+        Ogni azione lavora su una pagina propria (stato di guardia per
+        pagina, vedi ``_PageCtx``); al massimo ``L4_PARALLEL_ACTIONS``
+        insieme.  Ogni azione ha come tetto il tempo residuo del budget:
+        il timeout globale vale anche DENTRO un'azione (prima veniva
+        controllato solo tra un'azione e l'altra).
+
+        Stati e transizioni vengono registrati nell'ORDINE DEI CANDIDATI
+        e solo fino ai nodi rimasti nel budget: il grafo è lo stesso che
+        produrrebbe l'esecuzione sequenziale, indipendentemente da quale
+        azione finisce prima.
+        """
+        if not actions or not self._within_budget(budget):
+            return []
+        if self._action_slots is None:
+            self._action_slots = asyncio.Semaphore(self._parallel_actions)
+        slots = self._action_slots
+
+        async def _one(action):
+            async with slots:
+                remaining = budget.timeout_s - (time.monotonic() - self._start_ts)
+                if remaining <= 0:
+                    return None
+                try:
+                    return await asyncio.wait_for(
+                        self._execute_action(page, context, state, action),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
+                    self._record_error(
+                        scope=EvidenceScope.state,
+                        scope_id=state.id,
+                        message=(
+                            f"Action interrupted by the exploration budget "
+                            f"({action.get('kind') if isinstance(action, dict) else action})"
+                        ),
+                    )
+                    return None
+
+        results = await asyncio.gather(
+            *(_one(a) for a in actions), return_exceptions=True
+        )
+
+        new_states: list[State] = []
+        for result in results:
+            if isinstance(result, BaseException):
+                self._record_error(
+                    scope=EvidenceScope.state,
+                    scope_id=state.id,
+                    key="unhandled_node_error",
+                    message=f"Unhandled action error on state {state.id}: {result}",
+                )
+                continue
+            if result is None:
+                continue
+            if self._node_count >= budget.max_nodes:
+                break
+            new_state, transition = result
+            self.states.append(new_state)
+            if transition is not None:
+                self.transitions.append(transition)
+            self._node_count += 1
+            new_states.append(new_state)
+        return new_states
 
     # ------------------------------------------------------------------
     # Cloaking probe branch (second L4 tree with the divergent profile)
@@ -1304,8 +1376,11 @@ class StateGraphExplorer:
         context: BrowserContext,
         from_state: State,
         action: dict,
-    ) -> Optional[State]:
+    ) -> Optional[tuple[State, Transition]]:
         """Click *action*'s element and detect navigation/DOM change.
+
+        Returns ``(new_state, transition)`` — the caller records them (in
+        candidate order) — or ``None`` when nothing changed.
 
         Strategy (revised — replay-full-path):
         1. Open a fresh page and replay the transition path to *from_state*
@@ -1386,8 +1461,7 @@ class StateGraphExplorer:
                     "combined_score": action.get("combined_score", 0.0),
                 },
             )
-            self.transitions.append(transition)
-            return new_state
+            return new_state, transition
 
         except Exception as exc:
             self._record_error(
@@ -1410,8 +1484,12 @@ class StateGraphExplorer:
         context: BrowserContext,
         from_state: State,
         action: dict,
-    ) -> Optional[State]:
-        """Execute *action*, record a Transition, return the new State (if any)."""
+    ) -> Optional[tuple[State, Transition]]:
+        """Execute *action* on a fresh page: ``(new_state, transition)`` or None.
+
+        Nothing is recorded here: ``_run_actions`` appends states and
+        transitions in candidate order.
+        """
         kind_str = action["kind"]
         if kind_str == "click":
             return await self._execute_click_action(context, from_state, action)
@@ -1445,8 +1523,7 @@ class StateGraphExplorer:
                 kind=transition_kind,
                 trigger=action.get("trigger", action),
             )
-            self.transitions.append(transition)
-            return new_state
+            return new_state, transition
 
         except Exception as exc:
             self._record_error(
