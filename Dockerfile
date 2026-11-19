@@ -10,8 +10,11 @@ FROM python:3.11-slim
 # compilata a build time → build-essential NON serve.
 # curl serve SOLO per l'healthcheck di docker-compose: python:3.11-slim
 # non include né curl né wget.
+# libatomic1: il driver Node di Playwright (usato anche da
+# `playwright install --with-deps`) non parte senza libatomic.so.1, che
+# l'immagine slim non include — l'install dei browser fallirebbe.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends curl libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Ambiente Python ---------------------------------------------------------
