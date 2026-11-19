@@ -121,6 +121,12 @@ class Settings(BaseSettings):
     # con attesa crescente prima di ripiegare sul fallback euristico.
     foundry_max_concurrent: int = 2
 
+    # ── Log ─────────────────────────────────────────────────────────
+    # Livello dei log applicativi (DEBUG, INFO, WARNING, ERROR).  Le
+    # librerie Azure restano comunque almeno a WARNING e i /health
+    # riusciti non finiscono nel log di accesso (graph_engine.api.app).
+    log_level: str = "INFO"
+
     # ── Bootstrap amministratore dashboard ──────────────────────────
     # Al primo avvio, se la tabella utenti è vuota, viene creato
     # l'admin con queste credenziali.  Se mancano, l'admin viene

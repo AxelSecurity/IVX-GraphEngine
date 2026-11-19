@@ -29,6 +29,7 @@ from graph_engine.api.retention import retention_loop
 from graph_engine.api.pipeline_runner import DEFAULT_ARTIFACT_ROOT
 from graph_engine.api.routes import build_router
 from graph_engine.api.routes_external import build_external_router
+from graph_engine.config import settings
 from graph_engine.storage.schema import DEFAULT_DB_PATH
 
 # Dashboard statica (HTML/CSS/JS puri, nessuna build): consuma le stesse
@@ -36,14 +37,51 @@ from graph_engine.storage.schema import DEFAULT_DB_PATH
 # "/", cosi le route API restano indipendenti dall'ordine di registrazione.
 _DASHBOARD_DIR = Path(__file__).parent / "static" / "dashboard"
 
-# [TIMING] diagnostica temporanea: uvicorn configura solo i propri
-# logger ("uvicorn.*") e il root resta senza handler — senza questa
-# riga NESSUN log applicativo (graph_engine.*) esce dal container.
-# Da rivalutare come configurazione stabile (level dal settings).
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+class _HealthCheckAccessFilter(logging.Filter):
+    """Scarta dal log di accesso di uvicorn i ``GET /health`` riusciti.
+
+    Il healthcheck di Docker li chiama ogni 30s (~2900 righe al giorno)
+    e coprivano tutto il resto; un /health fallito resta registrato.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 5:
+            path, status = args[2], args[4]
+            if str(path).split("?", 1)[0] == "/health" and str(status) == "200":
+                return False
+        return True
+
+
+def configure_logging(level_name: str | None = None) -> int:
+    """Configura i log del processo e restituisce il livello applicato.
+
+    - uvicorn configura solo i propri logger ("uvicorn.*") e lascia il
+      root senza handler: senza ``basicConfig`` nessun log applicativo
+      (graph_engine.*) uscirebbe dal container;
+    - livello da ``LOG_LEVEL`` (default INFO; valori ignoti → INFO);
+    - librerie Azure almeno a WARNING: a INFO la HttpLoggingPolicy
+      scriveva ogni richiesta Foundry/Vision con tutte le intestazioni
+      (oltre la metà delle righe di log);
+    - i /health riusciti escono dal log di accesso.
+    """
+    name = (level_name or settings.log_level or "INFO").strip().upper()
+    level = logging.getLevelName(name)
+    if not isinstance(level, int):
+        level = logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    logging.getLogger().setLevel(level)
+    logging.getLogger("azure").setLevel(max(level, logging.WARNING))
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _HealthCheckAccessFilter) for f in access.filters):
+        access.addFilter(_HealthCheckAccessFilter())
+    return level
+
+
+configure_logging()
 
 # Path esenti dal middleware di sessione (decisione utente 2026-09-01:
 # il login protegge UI + tutte le API, tranne queste):
