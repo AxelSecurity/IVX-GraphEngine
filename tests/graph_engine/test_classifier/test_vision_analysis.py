@@ -10,7 +10,7 @@ I confini esterni sono mockati dove il codice di produzione li tocca:
 - **REST legacy** (``httpx.AsyncClient``): stub al confine httpx che
   registra URL/header/body di ogni ``post``.
 
-Pattern di blocco rete (MISP/OpenCTI/URLhaus): quando
+Pattern di blocco rete (come URLhaus): quando
 ``settings.vision_configured`` è False, nessuna chiamata deve essere
 tentata — gli stub esplodono se vengono toccati.
 """
@@ -37,7 +37,7 @@ from graph_engine.classifier.vision_analysis import (
 
 
 def _enable_vision(monkeypatch):
-    """Forza la configurazione Vision sul singleton (come MISP/OpenCTI)."""
+    """Forza la configurazione Vision sul singleton (come URLhaus)."""
     monkeypatch.setattr(
         settings, "azure_vision_endpoint", "https://vision.example.com"
     )
@@ -387,7 +387,7 @@ class TestAnalyzeScreenshot:
 
     async def test_not_configured_returns_skipped_without_calls(self, monkeypatch):
         """vision_configured False → skipped, NE run_ocr NE
-        run_brand_detection vengono chiamate (pattern MISP/OpenCTI)."""
+        run_brand_detection vengono chiamate (pattern URLhaus)."""
         _disable_vision(monkeypatch)
 
         with patch(

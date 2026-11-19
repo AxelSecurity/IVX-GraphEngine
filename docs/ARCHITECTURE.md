@@ -169,33 +169,14 @@ Il livello L5 trasforma i dati grezzi raccolti durante l'esplorazione L4 in un
 ### Pipeline a due stadi
 
 1. **Prefiltro deterministico** (`graph_engine/classifier/prefilter.py`):
-   due famiglie di intercettazione, senza chiamare il modello.
+   intercetta solo i casi banalmente inconclusivi, senza chiamare il
+   modello. Le lookup su piattaforme di threat intelligence interne
+   (MISP/OpenCTI) NON fanno parte del motore: le gestisce a monte il
+   servizio chiamante, quindi nessun reputation hit decide da solo.
 
-   a. **Hit IOC verificato (MISP `to_ids=true` o OpenCTI attivo) →
-      Verdict `phishing` diretto** (regola prioritaria, 2026-08-27).
-      Un valore trovato in un feed MISP con `to_ids=true` è un IOC
-      curato manualmente dagli analisti e destinato agli IDS (es.
-      feed CERT-AGID con tag `campaign-type:phishing`); un osservabile
-      OpenCTI con almeno un Indicator correlato ATTIVO (non revoked,
-      non scaduto) è un IOC sulla piattaforma di threat intel. In
-      entrambi i casi è segnale malevolo VERIFICATO. La regola scatta
-      prima di ogni altra e non delega al modello — una landing decoy
-      o in errore non deve mai prevalere su un IOC curato (caso reale
-      2026-08-27: `s.kemkes.go.id/ejuiaer`, short link di phishing con
-      4 eventi MISP to_ids — Foundry lo aveva classificato `benign`
-      perché L4 vedeva solo la pagina d'errore della SPA). Confidenza
-      modulata: match su URL/hostname → 0.95; match solo su dominio
-      registrabile/IP (infrastruttura) → 0.85. Il brand impersonato
-      viene estratto dai tag `phishing-name:*` (solo MISP — i label
-      OpenCTI non seguono quella convenzione, brand resta `None`).
-      Quando entrambi i feed colpiscono vince il Verdict MISP
-      (confidenza e brand), ma il rationale cita anche OpenCTI come
-      corroborazione ("Confermato anche da OpenCTI: …") — l'analista
-      deve vedere che entrambe le piattaforme hanno confermato l'URL.
-
-   b. **Casi banalmente inconclusivi** (1 stato senza testo visibile,
-      errore non gestito senza altri segnali) → Verdict `suspicious` a
-      confidenza minima (0.05).
+   Casi intercettati (1 stato senza testo visibile, errore non gestito
+   senza altri segnali) → Verdict `suspicious` a confidenza minima
+   (0.05; 0.6 con TLS failure sul certificato dell'hostname).
 
    Per tutto il resto il prefilter restituisce `None`: L1/L2/L3 con
    segnale reale non vengono MAI intercettati come "dati insufficienti"
@@ -320,15 +301,9 @@ impone tre vincoli non negoziabili:
 ## L2 — Passivo / OSINT
 
 Il livello L2 raccoglie informazioni da fonti esterne senza interagire con
-il target. La sequenza NON è interamente parallela: la risoluzione **DNS
-avviene prima** (round-trip sul cammino critico, mitigato dalla cache 1h),
-poi ctlogs.dev, RDAP e i reputation provider partono **in parallelo**
-(`asyncio.gather` con `return_exceptions=True`). La sequenzialità è
-voluta: gli IP risolti alimentano la query dei reputation provider
-(MISP cerca anche per `ip-dst`), quindi una query MISP senza IP
-coprirebbe solo URL/hostname/dominio e perderebbe i match su
-infrastruttura condivisa. Un fallimento su una fonte non blocca mai
-le altre.
+il target. DNS, ctlogs.dev, RDAP e i reputation provider partono tutti
+**in parallelo** (`asyncio.gather` con `return_exceptions=True`). Un
+fallimento su una fonte non blocca mai le altre.
 
 ### Fonti attive
 
@@ -370,72 +345,17 @@ separata per modalità: quando la chiave arriva, un risultato anonimo
 | Provider | Variabili d'ambiente richieste | Stato |
 |---|---|---|
 | **URLhaus** | `URLHAUS_API_KEY` | Disabilitato — si attiva automaticamente quando la chiave è presente |
-| **MISP** | `MISP_URL` + `MISP_API_KEY` | Disabilitato — si attiva automaticamente quando entrambe le variabili sono presenti |
-| **OpenCTI** | `OPENCTI_URL` + `OPENCTI_API_KEY` | Disabilitato — stessa logica |
 
 URLhaus richiede ora una Auth-Key gratuita (registrazione su
 https://auth.abuse.ch/), inviata nell'header `Auth-Key` di ogni
 richiesta verso `https://urlhaus-api.abuse.ch/v1/url/` (endpoint
 invariato). Senza chiave il provider restituisce `skipped: "not
-configured"` senza tentare alcuna chiamata HTTP — stesso pattern di
-MISP/OpenCTI. Una risposta 401 con chiave configurata (chiave invalida
+configured"` senza tentare alcuna chiamata HTTP. Una risposta 401 con chiave configurata (chiave invalida
 o scaduta) produce evidenza `provider_unavailable`, mai un'eccezione.
 
-Per attivare URLhaus, MISP o OpenCTI, basta impostare le variabili
-d'ambiente corrispondenti. Nessuna modifica al codice necessaria: il
+Per attivare URLhaus basta impostare la variabile d'ambiente
+corrispondente. Nessuna modifica al codice necessaria: il
 `registry.py` rileva le variabili a runtime e istanzia i provider.
-
-#### MISP — restSearch multi-tipo e semantica to_ids
-
-Il provider MISP invia **una sola** chiamata a `/attributes/restSearch`
-con una lista di valori candidati — URL completo, hostname, dominio
-registrabile (riusando `_registrable_domain` di L1, stessa funzione
-tldextract) e gli IP risolti (`known_ips`) — e una lista di tipi
-(`domain`, `hostname`, `url`, `ip-dst`). Forma verificata contro la
-documentazione ufficiale (OpenAPI `restSearchAttributes` e sorgente
-MISP 2.4): `value` e `type` accettano liste nel body JSON e
-`includeContext: 1` annida l'oggetto `Event` completo (`info`,
-`threat_level_id`, `Tag`) in ogni attributo della risposta.
-
-La risposta viene riassunta in forma compatta (mai payload grezzo):
-`match_count`, `matched_types`, `tags` deduplicati (dall'Attributo E
-dall'Evento), `event_count`, `to_ids_match`. Il flag `to_ids` NON è
-equiparato tra i due valori:
-
-- `to_ids=true` (almeno un match) → `listed=True`, hit reale: l'IOC è
-  destinato agli IDS ed è curato manualmente dagli analisti.
-- SOLO `to_ids=false` → `listed=False` ma `details.context_only=True`:
-  contesto informativo, mai un hit (principio: mai penalizzare per
-  segnale debole).
-
-#### OpenCTI — osservabili GraphQL e semantica IOC-attivo
-
-Il provider OpenCTI interroga `POST /graphql` (auth `Bearer <API key>`,
-come il client ufficiale `pycti`) con una **sola** query
-`stixCyberObservables` che cerca i valori candidati (stesso modulo
-condiviso `_search_values.py` usato da MISP: URL, hostname, dominio
-registrabile, IP) come **confronti esatti**: un filtro
-`{ key: ["value"], values: [x], operator: eq }` per candidato,
-combinati con `FilterGroup` `mode: or`. Forma verificata contro la
-documentazione ufficiale (docs.opencti.io) e il sorgente
-`OpenCTI-Platform/opencti`. Il search full-text `search:` è
-deliberatamente NON usato per la decisione: è una query_string Lucene
-con wildcard trailing implicita — un match per prefisso
-(`example.com` → `example.com.evil.net`) non è un IOC verificato.
-
-La risposta viene riassunta in forma compatta (mai payload grezzo):
-`match_count`, `matched_types` (entity_type STIX), conteggi indicatori,
-`labels`, `markings` (TLP), `created_by`, score min/max/medio. La
-semantica è "IOC-attivo", perché su OpenCTI qualsiasi organizzazione
-può pubblicare:
-
-- Osservabile con ≥1 Indicator correlato ATTIVO (non `revoked`, con
-  `valid_until` non superato) → `listed=True` con
-  `active_ioc_match=True`: hit reale, decide il prefilter.
-- Osservabile senza Indicator attivo (nessuno, tutti revoked o tutti
-  scaduti) → `listed=False` ma `details.context_only=True`: contesto
-  informativo, mai un hit. Un `valid_until` illeggibile rende
-  l'indicatore NON attivo (conservativo).
 
 ### Segnali estratti
 
@@ -460,15 +380,7 @@ può pubblicare:
   > 90 giorni → nessuna penalizzazione (dominio stagionato).
 
 - **Reputation hit** (`reputation_hit`): URL presente in un feed di
-  minacce (es. URLhaus). Peso 0.50 — sale a **0.55** quando il match
-  è MISP con `to_ids=true` o OpenCTI con IOC attivo (fonti con IOC
-  verificato, leggermente più affidabili di un feed automatizzato).
-
-- **Context match informativo** (`<provider>_context_match`): match
-  MISP con SOLO `to_ids=false`, oppure osservabile OpenCTI senza
-  Indicator attivo. Peso 0.0 (informativa): l'IOC esiste ma non è un
-  flag attivo — mai penalizzare per segnale debole. L'evidenza resta
-  comunque nel bundle per il classificatore.
+  minacce (es. URLhaus). Peso 0.50.
 
 - **Record A** (`dns_a_records`): indirizzi IPv4 risolti per il dominio.
   Peso 0.0 (informativo). Colma una lacuna IOC: gli IP servono ai
@@ -490,8 +402,6 @@ può pubblicare:
 | `_W_DOMAIN_AGE_MODERATE` | 0.15 | Dominio 30-90 giorni |
 | `_W_SIBLING_DOMAINS` | 0.30 | Presenza domini fratelli nella SAN list |
 | `_W_REPUTATION_HIT` | 0.50 | URL presente in feed di minacce (URLhaus, ecc.) |
-| `_W_MISP_IDS_HIT` | 0.55 | Hit MISP con `to_ids=true` — feed curato manualmente |
-| `_W_OPENCTI_ACTIVE_HIT` | 0.55 | IOC attivo su OpenCTI (non revoked, non scaduto) |
 
 Il punteggio è clampato a [0, 1]. **MAI** penalizzare per l'assenza di
 segnale — solo per la presenza.
@@ -548,11 +458,8 @@ graph_engine/osint/
     rdap.py              — RDAP con bootstrap IANA
     reputation/
         __init__.py
-        base.py          — ReputationProvider (ABC, con known_ips)
+        base.py          — ReputationProvider (ABC)
         urlhaus.py       — URLhaus (richiede Auth-Key)
-        misp.py           — MISP: restSearch multi-tipo + includeContext
-        opencti.py        — OpenCTI: stixCyberObservables eq + IOC-attivo
-        _search_values.py — valori candidati condivisi (MISP/OpenCTI)
         registry.py       — get_enabled_providers()
 ```
 
@@ -1068,15 +975,10 @@ più permessa nei moduli.
 | `AZURE_CLIENT_SECRET` | `azure_client_secret` | auth Foundry (service principal) | richiede anche `TENANT_ID` + `CLIENT_ID`; senza la terna completa → `DefaultAzureCredential` |
 | `AZURE_VISION_ENDPOINT` | `azure_vision_endpoint` | arricchimento L5 (OCR + Brand Detection) | richiede anche `AZURE_VISION_KEY` (`vision_configured`); riusa la risorsa Cognitive Services già attiva (italynorth) |
 | `AZURE_VISION_KEY` | `azure_vision_key` | arricchimento L5 (OCR + Brand Detection) | richiede anche `AZURE_VISION_ENDPOINT`; chiave della risorsa (header `Ocp-Apim-Subscription-Key` per la REST legacy v3.2, `AzureKeyCredential` per la SDK moderna) |
-| `MISP_URL` | `misp_url` | provider MISP (L2) | richiede anche `MISP_API_KEY` (`misp_configured`) |
-| `MISP_API_KEY` | `misp_api_key` | provider MISP (L2) | richiede anche `MISP_URL` |
-| `OPENCTI_URL` | `opencti_url` | provider OpenCTI (L2) | richiede anche `OPENCTI_API_KEY` (`opencti_configured`) |
-| `OPENCTI_API_KEY` | `opencti_api_key` | provider OpenCTI (L2) | richiede anche `OPENCTI_URL` |
 | `URLHAUS_API_KEY` | `urlhaus_api_key` | provider URLhaus (L2) | campo singolo (`urlhaus_configured`); endpoint fisso `urlhaus-api.abuse.ch`, chiave gratuita da https://auth.abuse.ch/ |
 | `TRELLIX_API_TOKEN` | `trellix_api_token` | auth Bearer su `/trellix/analyze` | campo singolo (`trellix_auth_required`) |
 
-Le property `foundry_configured` / `vision_configured` / `misp_configured`
-/ `opencti_configured` richiedono **ENTRAMBE** le variabili della coppia
+Le property `foundry_configured` / `vision_configured` richiedono **ENTRAMBE** le variabili della coppia
 (una sola non basta); `service_principal_configured` richiede **TUTTE e
 tre** le variabili AAD; `urlhaus_configured` e `trellix_auth_required`
 sono True con il singolo valore impostato (e non vuoto).
@@ -1095,10 +997,6 @@ AZURE_CLIENT_ID=<client-id>              #   (terna completa → niente `az logi
 AZURE_CLIENT_SECRET=<secret>             #   senza terna → DefaultAzureCredential
 AZURE_VISION_ENDPOINT=https://<risorsa>.cognitiveservices.azure.com  # → OCR + Brand Detection sugli screenshot
 AZURE_VISION_KEY=<chiave-risorsa>        #   (risorsa Cognitive Services riusata)
-MISP_URL=https://misp.example.org        # → provider MISP attivo in L2
-MISP_API_KEY=<api-key>
-OPENCTI_URL=https://opencti.example.org  # → provider OpenCTI attivo in L2
-OPENCTI_API_KEY=<api-key>
 URLHAUS_API_KEY=<auth-key>               # → provider URLhaus attivo in L2 (gratuita, https://auth.abuse.ch/)
 TRELLIX_API_TOKEN=<token>                # → /trellix/analyze richiede Bearer
 ```

@@ -23,10 +23,6 @@ ALL_ENV_VARS = {
     "azure_client_secret": "AZURE_CLIENT_SECRET",
     "azure_vision_endpoint": "AZURE_VISION_ENDPOINT",
     "azure_vision_key": "AZURE_VISION_KEY",
-    "misp_url": "MISP_URL",
-    "misp_api_key": "MISP_API_KEY",
-    "opencti_url": "OPENCTI_URL",
-    "opencti_api_key": "OPENCTI_API_KEY",
     "urlhaus_api_key": "URLHAUS_API_KEY",
     "trellix_api_key": "TRELLIX_API_KEY",
     "trellix_api_token": "TRELLIX_API_TOKEN",
@@ -54,10 +50,6 @@ class TestSettingsFields:
             "AZURE_FOUNDRY_ENDPOINT", "https://foundry.example.com"
         )
         monkeypatch.setenv("AZURE_FOUNDRY_AGENT_ID", "agent-123")
-        monkeypatch.setenv("MISP_URL", "https://misp.example.com")
-        monkeypatch.setenv("MISP_API_KEY", "misp-key")
-        monkeypatch.setenv("OPENCTI_URL", "https://opencti.example.com")
-        monkeypatch.setenv("OPENCTI_API_KEY", "opencti-key")
         monkeypatch.setenv("URLHAUS_API_KEY", "urlhaus-key")
         monkeypatch.setenv("TRELLIX_API_KEY", "trellix-key")
         monkeypatch.setenv("TRELLIX_API_TOKEN", "trellix-token")
@@ -67,10 +59,6 @@ class TestSettingsFields:
 
         assert s.azure_foundry_endpoint == "https://foundry.example.com"
         assert s.azure_foundry_agent_id == "agent-123"
-        assert s.misp_url == "https://misp.example.com"
-        assert s.misp_api_key == "misp-key"
-        assert s.opencti_url == "https://opencti.example.com"
-        assert s.opencti_api_key == "opencti-key"
         assert s.urlhaus_api_key == "urlhaus-key"
         assert s.trellix_api_key == "trellix-key"
         assert s.trellix_api_token == "trellix-token"
@@ -110,16 +98,10 @@ class TestConfiguredProperties:
         s = _clean_settings(
             azure_foundry_endpoint="https://foundry.example.com",
             azure_foundry_agent_id="agent-1",
-            misp_url="https://misp.example.com",
-            misp_api_key="k1",
-            opencti_url="https://opencti.example.com",
-            opencti_api_key="k2",
             urlhaus_api_key="k3",
             trellix_api_key="k4",
         )
         assert s.foundry_configured is True
-        assert s.misp_configured is True
-        assert s.opencti_configured is True
         assert s.urlhaus_configured is True
         assert s.trellix_auth_required is True
 
@@ -133,24 +115,14 @@ class TestConfiguredProperties:
         s = _clean_settings(azure_foundry_agent_id="agent-1")
         assert s.foundry_configured is False
 
-        s = _clean_settings(misp_url="https://misp.example.com")
-        assert s.misp_configured is False
 
-        s = _clean_settings(misp_api_key="k1")
-        assert s.misp_configured is False
 
-        s = _clean_settings(opencti_url="https://opencti.example.com")
-        assert s.opencti_configured is False
 
-        s = _clean_settings(opencti_api_key="k2")
-        assert s.opencti_configured is False
 
     def test_none_present(self):
         """Nessuna variabile → tutte le property False, nessun errore."""
         s = _clean_settings()
         assert s.foundry_configured is False
-        assert s.misp_configured is False
-        assert s.opencti_configured is False
         assert s.urlhaus_configured is False
         assert s.trellix_auth_required is False
 
@@ -204,8 +176,6 @@ class TestModuleSingleton:
         """Le property esistono sul singleton (il valore dipende
         dall'ambiente di processo)."""
         assert isinstance(settings.foundry_configured, bool)
-        assert isinstance(settings.misp_configured, bool)
-        assert isinstance(settings.opencti_configured, bool)
         assert isinstance(settings.urlhaus_configured, bool)
         assert isinstance(settings.trellix_auth_required, bool)
         assert isinstance(settings.vision_configured, bool)

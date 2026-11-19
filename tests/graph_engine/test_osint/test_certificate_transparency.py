@@ -9,7 +9,7 @@ provider usa l'endpoint pubblico ``https://ctlogs.dev/search`` (stessa
 forma ``rows``/``has_next``/``next_cursor``, senza dettagli SAN).
 
 Nessuna rete reale: client httpx mockato.  La chiave si forza sul
-singleton ``graph_engine.config.settings`` (come per MISP/OpenCTI).
+singleton ``graph_engine.config.settings`` (come per URLhaus).
 """
 
 from __future__ import annotations

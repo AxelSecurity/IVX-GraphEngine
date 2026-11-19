@@ -4,7 +4,7 @@ Tutte le chiavi/endpoint API si leggono da qui::
 
     from graph_engine.config import settings
 
-    if settings.misp_configured:
+    if settings.urlhaus_configured:
         ...
 
 Le variabili possono arrivare dall'ambiente di processo o da un file
@@ -36,10 +36,6 @@ _CONFIG_FIELDS = (
     "azure_client_secret",
     "azure_vision_endpoint",
     "azure_vision_key",
-    "misp_url",
-    "misp_api_key",
-    "opencti_url",
-    "opencti_api_key",
     "ctlogs_api_key",
     "urlhaus_api_key",
     "trellix_api_key",
@@ -81,14 +77,6 @@ class Settings(BaseSettings):
     # Detection (REST legacy v3.2) sugli screenshot degli stati foglia.
     azure_vision_endpoint: Optional[str] = None
     azure_vision_key: Optional[str] = None
-
-    # ── MISP (provider reputazione L2) ──────────────────────────────
-    misp_url: Optional[str] = None
-    misp_api_key: Optional[str] = None
-
-    # ── OpenCTI (provider reputazione L2) ───────────────────────────
-    opencti_url: Optional[str] = None
-    opencti_api_key: Optional[str] = None
 
     # ── URLhaus (provider reputazione L2, abuse.ch) ──────────────────
     urlhaus_api_key: Optional[str] = None
@@ -150,16 +138,6 @@ class Settings(BaseSettings):
         )
 
     @property
-    def misp_configured(self) -> bool:
-        """True se URL e API key MISP sono entrambi presenti."""
-        return bool(self.misp_url and self.misp_api_key)
-
-    @property
-    def opencti_configured(self) -> bool:
-        """True se URL e API key OpenCTI sono entrambi presenti."""
-        return bool(self.opencti_url and self.opencti_api_key)
-
-    @property
     def ctlogs_configured(self) -> bool:
         """True se la API key ctlogs.dev è presente (endpoint fisso)."""
         return bool(self.ctlogs_api_key)
@@ -168,9 +146,8 @@ class Settings(BaseSettings):
     def urlhaus_configured(self) -> bool:
         """True se la Auth-Key URLhaus è presente.
 
-        A differenza di MISP/OpenCTI non serve una coppia URL+key:
-        l'endpoint abuse.ch è fisso e noto (``URLHAUS_API_URL``),
-        quindi basta la sola chiave.
+        Non serve una coppia URL+key: l'endpoint abuse.ch è fisso e
+        noto (``URLHAUS_API_URL``), quindi basta la sola chiave.
         """
         return bool(self.urlhaus_api_key)
 
