@@ -223,6 +223,26 @@ def _request_post_data_text(request) -> Optional[str]:
         return "<base64>" + base64.b64encode(raw).decode("ascii")
 
 
+class _PageCtx:
+    """Stato della navigation guard e del replay di UNA pagina.
+
+    Era un insieme di flag dell'istanza condivisi da tutte le pagine:
+    con più pagine attive insieme (azioni in parallelo) un replay su una
+    pagina avrebbe sospeso la guardia di un'altra.
+    """
+
+    __slots__ = ("replaying", "our_goto_active", "intercepted")
+
+    def __init__(self) -> None:
+        # True durante il replay: niente nuovi stati, navigazioni lasciate
+        # passare (si sta solo riposizionando la pagina).
+        self.replaying = False
+        # True durante i nostri page.goto(): la guardia non li intercetta.
+        self.our_goto_active = False
+        # Navigazioni avviate dalla pagina e intercettate dalla guardia.
+        self.intercepted: list[dict] = []
+
+
 class StateGraphExplorer:
     """BFS explorer that builds a State → Transition graph for a single URL.
 
@@ -270,18 +290,13 @@ class StateGraphExplorer:
         self._start_ts: float = 0.0
         self._node_count: int = 0
 
-        # Navigation guard state (see _install_navigation_guard)
-        self._our_goto_active: bool = False
-        self._intercepted_urls: list[dict] = []
+        # Stato per pagina di guardia e replay (vedi _PageCtx / _ctx).
+        self._page_ctx: dict[int, _PageCtx] = {}
 
         # Artifact capture
         self._capture_artifacts_flag: bool = True
         self._network_captures: dict[int, list[dict]] = {}
         self._page_listeners: dict[int, list[tuple]] = {}
-
-        # Replay guard — when True, suppress side-effects (no new states,
-        # transitions, or intercepted-urls leakage during path replay).
-        self._replaying: bool = False
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -353,6 +368,7 @@ class StateGraphExplorer:
             self._profile = profile
 
         self._visited.clear()
+        self._page_ctx.clear()
         self.states.clear()
         self.transitions.clear()
         self.evidence.clear()
@@ -719,6 +735,22 @@ class StateGraphExplorer:
         return True
 
     # ------------------------------------------------------------------
+    # Stato per pagina
+    # ------------------------------------------------------------------
+
+    def _ctx(self, page: Page) -> _PageCtx:
+        """Stato di guardia/replay di *page* (creato al primo uso)."""
+        ctx = self._page_ctx.get(id(page))
+        if ctx is None:
+            ctx = _PageCtx()
+            self._page_ctx[id(page)] = ctx
+        return ctx
+
+    def _release_page(self, page: Page) -> None:
+        """Dimentica lo stato di una pagina chiusa (gli id vengono riusati)."""
+        self._page_ctx.pop(id(page), None)
+
+    # ------------------------------------------------------------------
     # Attese intelligenti
     # ------------------------------------------------------------------
 
@@ -853,15 +885,15 @@ class StateGraphExplorer:
         The ``_replaying`` flag suppresses leak of intercepted navigations
         into the exploration accumulators.
         """
-        was_replaying = self._replaying
-        self._replaying = True
+        was_replaying = self._ctx(page).replaying
+        self._ctx(page).replaying = True
         try:
             return await self._replay_to_state_impl(page, state)
         finally:
-            self._replaying = was_replaying
+            self._ctx(page).replaying = was_replaying
             # Discard any navigation intercepts that fired during replay —
             # they belong to the original exploration, not new discovery.
-            self._intercepted_urls.clear()
+            self._ctx(page).intercepted.clear()
             try:
                 await page.evaluate(
                     "() => { window.__ge_js_locations = []; }"
@@ -875,7 +907,7 @@ class StateGraphExplorer:
 
         if not path:
             # Root — simple navigation.
-            self._our_goto_active = True
+            self._ctx(page).our_goto_active = True
             try:
                 await page.goto(state.url, wait_until="domcontentloaded")
                 await self._wait_for_dom_hash(page, state.dom_hash, cap_s=1.5)
@@ -891,12 +923,12 @@ class StateGraphExplorer:
                 )
                 return False
             finally:
-                self._our_goto_active = False
+                self._ctx(page).our_goto_active = False
 
         # Navigate to the root state's URL first.
         root_state = self._find_state_by_id(path[0].from_state)
         root_url = root_state.url if root_state else state.url
-        self._our_goto_active = True
+        self._ctx(page).our_goto_active = True
         try:
             await page.goto(root_url, wait_until="domcontentloaded")
         except Exception as exc:
@@ -910,7 +942,7 @@ class StateGraphExplorer:
             )
             return False
         finally:
-            self._our_goto_active = False
+            self._ctx(page).our_goto_active = False
         await self._wait_for_dom_hash(
             page, root_state.dom_hash if root_state else None, cap_s=1.0,
         )
@@ -942,13 +974,13 @@ class StateGraphExplorer:
                                 f"goto({state.url})"
                             ),
                         )
-                        self._our_goto_active = True
+                        self._ctx(page).our_goto_active = True
                         try:
                             await page.goto(
                                 state.url, wait_until="domcontentloaded"
                             )
                         finally:
-                            self._our_goto_active = False
+                            self._ctx(page).our_goto_active = False
                         await asyncio.sleep(1.5)
                         return False
                 # Let the page settle after gate resolution.
@@ -974,13 +1006,13 @@ class StateGraphExplorer:
                             f"goto({state.url})"
                         ),
                     )
-                    self._our_goto_active = True
+                    self._ctx(page).our_goto_active = True
                     try:
                         await page.goto(
                             state.url, wait_until="domcontentloaded"
                         )
                     finally:
-                        self._our_goto_active = False
+                        self._ctx(page).our_goto_active = False
                     await asyncio.sleep(1.5)
                     return False
                 # Stato di arrivo noto: si attende il suo DOM, con lo stesso
@@ -1004,7 +1036,7 @@ class StateGraphExplorer:
     ) -> None:
         """Adaptive post-goto settle (replaces the old fixed 1.5s wait).
 
-        Polls ``window.__ge_js_locations`` and ``self._intercepted_urls``
+        Polls ``window.__ge_js_locations`` and ``self._ctx(page).intercepted``
         every ``_SETTLE_POLL_INTERVAL`` and exits IMMEDIATELY as soon as a
         new interception appears — a redirect that fires before the ceiling
         must not wait for it (same scheme as try_pass_gate() in
@@ -1040,7 +1072,7 @@ class StateGraphExplorer:
             except Exception:
                 # Page torn down mid-poll: nothing to read, keep waiting.
                 js_stash = []
-            current = len(js_stash) + len(self._intercepted_urls)
+            current = len(js_stash) + len(self._ctx(page).intercepted)
 
             if current > seen_count:
                 break  # new interception: the redirect fired, exit now
@@ -1066,7 +1098,7 @@ class StateGraphExplorer:
         """
         # Belt-and-suspenders: during replay we must never create new State
         # objects — the replay's job is only to position the page.
-        if self._replaying:
+        if self._ctx(page).replaying:
             return None
 
         network_entries: list[dict] = []
@@ -1082,9 +1114,9 @@ class StateGraphExplorer:
             await page.add_init_script(_INIT_SCRIPT)
 
             # Navigate — the guard marks our goto as safe.
-            self._our_goto_active = True
+            self._ctx(page).our_goto_active = True
             await page.goto(url, wait_until="domcontentloaded")
-            self._our_goto_active = False
+            self._ctx(page).our_goto_active = False
 
             # Settle: adaptive poll (see _settle_navigation_poll).  A fixed
             # short wait loses delayed JS redirects (2s+ evasion pattern).
@@ -1134,14 +1166,14 @@ class StateGraphExplorer:
     async def _install_navigation_guard(self, page: Page) -> None:
         """Install a route handler that aborts JS-initiated navigations.
 
-        Any *navigation* request that fires while ``self._our_goto_active``
+        Any *navigation* request that fires while ``self._ctx(page).our_goto_active``
         is ``False`` is considered page-initiated: we abort it and stash
         the URL so the BFS can create a ``js_location`` transition.
         """
-        self._intercepted_urls.clear()
+        self._ctx(page).intercepted.clear()
 
         async def _guard(route):
-            if self._replaying:
+            if self._ctx(page).replaying:
                 # During replay, let all navigations through — we are only
                 # positioning the page and already clear intercepts afterwards.
                 await route.continue_()
@@ -1151,10 +1183,10 @@ class StateGraphExplorer:
                 # redirects: subframe/iframe requests (CAPTCHA widgets,
                 # embeds) are not the page navigating away.
                 if (
-                    not self._our_goto_active
+                    not self._ctx(page).our_goto_active
                     and route.request.frame == page.main_frame
                 ):
-                    self._intercepted_urls.append(
+                    self._ctx(page).intercepted.append(
                         {"url": route.request.url, "method": "href_setter"}
                     )
                     # 204 No Content, NON abort(): il browser annulla la
@@ -1208,8 +1240,8 @@ class StateGraphExplorer:
             )
         except Exception:
             js_locs = []
-        js_locs += self._intercepted_urls
-        self._intercepted_urls.clear()
+        js_locs += self._ctx(page).intercepted
+        self._ctx(page).intercepted.clear()
         try:
             await page.evaluate("() => { window.__ge_js_locations = []; }")
         except Exception:
@@ -1328,7 +1360,7 @@ class StateGraphExplorer:
             # --- build the new State from the current page state --------------
             # Belt-and-suspenders: during replay the flag is True and we must
             # never create State / Transition objects.
-            if self._replaying:
+            if self._ctx(new_page).replaying:
                 return None
 
             new_state = State(
@@ -1366,6 +1398,7 @@ class StateGraphExplorer:
             return None
         finally:
             await new_page.close()
+            self._release_page(new_page)
 
     # ------------------------------------------------------------------
     # Action execution
@@ -1424,6 +1457,7 @@ class StateGraphExplorer:
             return None
         finally:
             await new_page.close()
+            self._release_page(new_page)
 
     # ------------------------------------------------------------------
     # Error recording
