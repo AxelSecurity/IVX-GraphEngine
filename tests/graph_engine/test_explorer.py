@@ -389,11 +389,13 @@ def _make_local_handler(start_html: str):
     return _Handler
 
 
-def _delayed_redirect_html(delay_ms: int = 2000, target: str = "/payload") -> str:
+def _delayed_redirect_html(
+    delay_ms: int = 2000, target: str = "/payload", body_text: str = "start page",
+) -> str:
     """HTML che esegue window.location.href dopo *delay_ms* millisecondi —
     replica esatta del pattern di evasione (2s) trovato su un kit TDS reale."""
     return (
-        "<html><body>start page"
+        f"<html><body>{body_text}"
         "<script>setTimeout(function () {"
         f"window.location.href = {target!r};"
         f"}}, {delay_ms});</script>"
@@ -440,6 +442,24 @@ async def real_browser():
 class TestSettlePolling:
     """Polling adattivo post-goto: redirect JS ritardati vs tetto massimo."""
 
+    async def test_empty_page_grace_catches_late_redirect(
+        self, real_browser, local_server,
+    ):
+        """Pagina quasi vuota ("start page") con redirect a 2s e settle di
+        soli 1.0s: l'attesa extra per le pagine vuote vede comunque il
+        redirect → transizione js_location (prima andava perso)."""
+        base = local_server(_delayed_redirect_html(2000, "/payload"))
+        explorer = StateGraphExplorer(real_browser)
+        await explorer.run(
+            base + "/start",
+            budget=Budget(max_depth=2, max_nodes=10, timeout_s=60),
+            capture_artifacts=False,
+            top_n_actions=0,
+            captcha_wait_s=0,
+            settle_max_wait_s=1.0,
+        )
+        assert [t.kind for t in explorer.transitions] == [TransitionKind.js_location]
+
     async def test_delayed_js_redirect_captured(self, real_browser, local_server):
         """Redirect setTimeout(2000ms) → transizione js_location.
 
@@ -479,9 +499,12 @@ class TestSettlePolling:
         """Con tetto 1.0s il redirect a 2s NON viene visto → stato foglia.
 
         Comportamento del vecchio sleep fisso: nessuna transizione,
-        il target resta un singolo stato (foglia).
+        il target resta un singolo stato (foglia).  La pagina ha testo
+        reale: l'attesa extra per le pagine vuote non si applica.
         """
-        base = local_server(_delayed_redirect_html(2000, "/payload"))
+        base = local_server(_delayed_redirect_html(
+            2000, "/payload", body_text="Please wait while we prepare your secure document preview for you",
+        ))
         explorer = StateGraphExplorer(real_browser)
 
         target = await explorer.run(
@@ -504,7 +527,7 @@ class TestSettlePolling:
         osservazione + 2 cicli quieti). Il tetto pieno costerebbe >= 4.0s:
         l'uscita anticipata deve essere verificabile sul tempo reale.
         """
-        base = local_server("<html><body>static page</body></html>")
+        base = local_server("<html><body>Please wait while we prepare your secure document preview for you</body></html>")
         explorer = StateGraphExplorer(real_browser)
 
         started = time.monotonic()
@@ -809,3 +832,51 @@ class TestReplayShortcuts:
         page.url = "about:blank"
         await explorer._replay_to_state(page, child)
         assert gotos == ["https://k.example/"]  # scorciatoia non ritentata
+
+
+class TestEmptyPageGrace:
+    """Attesa extra solo per pagine vuote, mai per pagine con contenuto
+    o per i redirector."""
+
+    def _explorer(self):
+        from unittest.mock import MagicMock
+
+        return StateGraphExplorer(MagicMock())
+
+    async def test_page_with_content_does_not_wait(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        explorer = self._explorer()
+        page = MagicMock()
+        page.evaluate = AsyncMock(side_effect=[[], {"chars": 300, "interactive": True}])
+        slept = []
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock(side_effect=lambda s: slept.append(s)))
+        await explorer._wait_if_page_empty(page)
+        assert slept == []
+
+    async def test_redirector_does_not_wait(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        explorer = self._explorer()
+        page = MagicMock()
+        explorer._ctx(page).intercepted.append({"url": "https://x/next"})
+        page.evaluate = AsyncMock()
+        await explorer._wait_if_page_empty(page)
+        page.evaluate.assert_not_called()
+
+    async def test_empty_page_waits_until_content_appears(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        explorer = self._explorer()
+        page = MagicMock()
+        probes = [[],  # stash js vuoto
+                  {"chars": 0, "interactive": False},   # vuota dopo il settle
+                  {"chars": 0, "interactive": False},
+                  {"chars": 120, "interactive": True}]  # il form compare
+        page.evaluate = AsyncMock(side_effect=probes)
+        slept = []
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock(side_effect=lambda s: slept.append(s)))
+        await explorer._wait_if_page_empty(page)
+        # due poll + l'assestamento finale dopo la comparsa
+        assert len(slept) == 3
+        assert page.evaluate.await_count == 4

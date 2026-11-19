@@ -110,6 +110,33 @@ _SETTLE_QUIET_CYCLES = 2       # consecutive mature cycles with nothing
                                # new → page is stable, stop waiting
 
 # ---------------------------------------------------------------------------
+# Pagina "vuota" dopo il settle — render ritardato
+# ---------------------------------------------------------------------------
+# Molti kit mostrano solo un caricamento e disegnano il form dopo alcuni
+# secondi (caso reale: login Bell Canada su Netlify, form dopo ~5,2s),
+# come il redirect JS ritardato contro i crawler veloci.  Se dopo il
+# settle la pagina sembra vuota — pochissimo testo e nessun elemento
+# interattivo — si attende ancora che compaia il contenuto.  Le pagine
+# con contenuto non pagano nulla.
+_EMPTY_PAGE_MAX_CHARS = 50     # sotto questa soglia di testo la pagina è "vuota"
+_EMPTY_PAGE_GRACE_S = 6.0      # attesa extra massima
+_EMPTY_PAGE_POLL_S = 0.25
+_CONTENT_SETTLE_S = 0.5        # dopo la comparsa: lascia finire il render
+
+_PAGE_CONTENT_PROBE = """() => {
+    const text = (document.body ? document.body.innerText : '')
+        .replace(/\\s+/g, ' ').trim();
+    const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        return r.width >= 4 && r.height >= 4;
+    };
+    const interactive = Array.from(document.querySelectorAll(
+        'input:not([type=hidden]), select, textarea, button, a[href], iframe'
+    )).some(visible);
+    return {chars: text.length, interactive: interactive};
+}"""
+
+# ---------------------------------------------------------------------------
 # Gate settle — fase 3 di try_pass_gate() (attesa post-click del checkbox)
 # ---------------------------------------------------------------------------
 # Ridotta nel fast path (captcha_wait_s <= 4) per non bruciare
@@ -1183,6 +1210,42 @@ class StateGraphExplorer:
     # Navigation + state creation
     # ------------------------------------------------------------------
 
+    async def _page_has_content(self, page: Page) -> bool:
+        """True se la pagina ha testo o elementi interattivi visibili."""
+        try:
+            probe = await page.evaluate(_PAGE_CONTENT_PROBE)
+        except Exception:
+            return True  # pagina non leggibile: non si attende
+        if not isinstance(probe, dict):
+            return True
+        return bool(probe.get("interactive")) or (
+            probe.get("chars", 0) >= _EMPTY_PAGE_MAX_CHARS
+        )
+
+    async def _wait_if_page_empty(self, page: Page) -> None:
+        """Attesa extra (max ``_EMPTY_PAGE_GRACE_S``) per le pagine vuote.
+
+        Salta se la pagina ha già contenuto o se ha già avviato un
+        redirect (intercettato dalla guardia o dallo script di init):
+        in quel caso è un redirector, non un render ritardato.
+        """
+        if self._ctx(page).intercepted:
+            return
+        try:
+            stash = await page.evaluate("() => window.__ge_js_locations || []")
+        except Exception:
+            stash = []
+        if stash or await self._page_has_content(page):
+            return
+        deadline = time.monotonic() + _EMPTY_PAGE_GRACE_S
+        while time.monotonic() < deadline:
+            await asyncio.sleep(_EMPTY_PAGE_POLL_S)
+            if self._ctx(page).intercepted:
+                return  # redirect partito durante l'attesa
+            if await self._page_has_content(page):
+                await asyncio.sleep(_CONTENT_SETTLE_S)
+                return
+
     async def _settle_navigation_poll(
         self,
         page: Page,
@@ -1277,6 +1340,7 @@ class StateGraphExplorer:
             # The poll never clears the stash — _enumerate_passive_actions
             # consumes it downstream.
             await self._settle_navigation_poll(page, self._settle_max_wait_s)
+            await self._wait_if_page_empty(page)
 
         except Exception as exc:
             if self._capture_artifacts_flag:

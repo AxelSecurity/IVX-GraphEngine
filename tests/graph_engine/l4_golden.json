@@ -16,6 +16,16 @@
       "click": 1
     }
   },
+  "delayed_render": {
+    "states": [
+      [
+        0,
+        "/delay/",
+        "9e6ab30885f159ec0236e938a63523231ba2a50a51a45a84fe79d465e0e2a4d6"
+      ]
+    ],
+    "transition_kinds": {}
+  },
   "fetch_render": {
     "states": [
       [

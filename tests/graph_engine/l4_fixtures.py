@@ -1,7 +1,7 @@
 """Banco di prova L4 — sito locale deterministico con i casi difficili.
 
 Un solo ``ThreadingHTTPServer`` (thread per richiesta: le pagine aperte
-in parallelo dall'explorer non si bloccano a vicenda) serve sette
+in parallelo dall'explorer non si bloccano a vicenda) serve otto
 scenari, ognuno sotto il proprio prefisso:
 
 ==========  ==============================================================
@@ -12,6 +12,7 @@ scenari, ognuno sotto il proprio prefisso:
 ``/beacon/``polling continuo (fetch ogni 200ms): mai in networkidle
 ``/fr/``    click → fetch con risposta dopo 1s → render del form
 ``/meta/``  meta refresh verso una pagina finale
+``/delay/`` pagina vuota che disegna il form di login dopo 4s
 ==========  ==============================================================
 
 ``run_scenario`` esegue l'explorer su uno scenario e restituisce una
@@ -135,6 +136,13 @@ PAGES: dict[str, str] = {
         head="<meta http-equiv=\"refresh\" content=\"0;url=/meta/target\">",
     ),
     "/meta/target": _page("Target", _LOGIN_FORM),
+    # 8 — render ritardato: pagina vuota, il form compare dopo 4s
+    "/delay/": _page(
+        "Sign in to your Account",
+        "<div id=\"root\"></div>"
+        "<script>setTimeout(()=>{document.getElementById('root').innerHTML="
+        "'<h1>Sign in</h1><input id=\"e\" type=\"email\"><input id=\"p\" type=\"password\">';},4000);</script>",
+    ),
 }
 
 SCENARIOS: dict[str, str] = {
@@ -145,6 +153,7 @@ SCENARIOS: dict[str, str] = {
     "beacon": "/beacon/",
     "fetch_render": "/fr/",
     "meta_refresh": "/meta/",
+    "delayed_render": "/delay/",
 }
 
 FR_API_DELAY_S = 1.0

@@ -308,11 +308,13 @@ class TestExplorerClickEnumeration:
         # passivo dei campi form — MAI allo scoring delle azioni.
         from graph_engine.actions import _SCORING_SCRIPT
         from graph_engine.classifier.form_inventory import _SCAN_SCRIPT
+        from graph_engine.explorer import _PAGE_CONTENT_PROBE
 
         scripts = [c.args[0] for c in page.evaluate.call_args_list if c.args]
         assert _SCORING_SCRIPT not in scripts
         assert all(
-            "ge_js_locations" in script or script == _SCAN_SCRIPT
+            "ge_js_locations" in script
+            or script in (_SCAN_SCRIPT, _PAGE_CONTENT_PROBE)
             for script in scripts
         )
 
