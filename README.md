@@ -166,7 +166,9 @@ Note operative:
   assente). Solo `/health` è aperto (probe del container)
 - **Concorrenza**: al massimo `MAX_CONCURRENT_ANALYSES` analisi in
   esecuzione insieme (default 4); le altre restano `queued` finché si
-  libera uno slot
+  libera uno slot. Dentro ogni analisi L4 esplora fino a
+  `L4_PARALLEL_ACTIONS` azioni (click/redirect) in parallelo (default 3):
+  le pagine Chromium aperte arrivano a circa il prodotto dei due valori
 
 ### Integrazione con un servizio esterno
 

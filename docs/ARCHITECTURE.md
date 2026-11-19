@@ -104,6 +104,45 @@ Il primario resta invariato: `root_state_id` e `final_url` del target
 sono del primo pass. I leaf del ramo divergente entrano nel bundle L5
 automaticamente (leaf = stato senza transizioni outbound).
 
+### Esplorazione: attese, parallelismo e replay
+
+- **Navigation guard.** I redirect avviati dalla pagina (JS, meta refresh)
+  vengono intercettati e registrati come transizioni `js_location`. La
+  navigazione viene annullata rispondendo **204 No Content**, non con
+  `abort()`: con l'abort Chromium sostituiva la pagina con
+  `chrome-error://chromewebdata/` e lo stato registrava la pagina
+  d'errore di Chrome invece del contenuto reale.
+- **Attese dopo un'interazione** (niente sleep fissi né `networkidle`):
+  - **click esplorativo** (esito ignoto): si attende che le richieste
+    xhr/fetch/document partite dopo il click siano finite, che il
+    documento sia completo e che il DOM resti fermo per 500ms
+    (MutationObserver). Minimo 300ms, tetto 3,5s. `networkidle` non
+    arrivava mai sulle pagine con analytics o polling e tornava subito
+    se la pagina era già idle, perdendo le fetch lanciate dal click;
+  - **replay verso uno stato noto**: si attende che la pagina mostri
+    proprio il `dom_hash` registrato, a documento completo. Il tetto
+    resta quello dei vecchi sleep fissi, quindi non si attende mai di
+    più.
+- **Azioni in parallelo.** Le azioni di uno stato (click e redirect
+  passivi) girano insieme, ognuna su una pagina propria, al massimo
+  `L4_PARALLEL_ACTIONS` (default 3; 1 = sequenziale). Stato di guardia
+  e replay sono per pagina (`_PageCtx`). Stati e transizioni vengono
+  registrati nell'**ordine dei candidati** e fino ai nodi rimasti nel
+  budget: il grafo è quello della versione sequenziale. Ogni azione ha
+  come tetto il tempo residuo del budget.
+- **Replay** (`_replay_to_state`), in quest'ordine:
+  1. la pagina mostra già lo stato (stesso URL e `dom_hash`): nessuna
+     navigazione;
+  2. stato raggiunto cambiando URL: `goto(state.url)` verificato dal
+     `dom_hash`, che sfrutta i cookie del context (gate superati,
+     sessione del kit); l'esito viene ricordato per stato;
+  3. replay completo dalla radice; se il DOM finale non coincide si
+     registra l'evidenza `replay_divergence` (peso 0, diagnostica).
+- **Banco di prova.** `tests/graph_engine/l4_fixtures.py` contiene 7
+  scenari locali; `test_l4_equivalence.py` confronta il grafo con
+  `l4_golden.json`, che si aggiorna solo in commit motivati.
+  `scripts/bench_l4.py` misura L4 su URL reali (run/compare).
+
 ## Interaction engine (fasi successive, non in questo primo batch)
 
 - **Actionable scoring**: elementi interagibili (`button, a, [role=button],
@@ -927,6 +966,7 @@ più permessa nei moduli.
 | `URLHAUS_API_KEY` | `urlhaus_api_key` | provider URLhaus (L2) | campo singolo (`urlhaus_configured`); endpoint fisso `urlhaus-api.abuse.ch`, chiave gratuita da https://auth.abuse.ch/ |
 | `API_KEY` | `api_key` | auth `X-API-Key` su `/api/v1/*` (e polling `/analyses`) | più chiavi separate da virgola (`api_keys`); senza → 503 |
 | `MAX_CONCURRENT_ANALYSES` | `max_concurrent_analyses` | limite di pipeline concorrenti | intero, default 4 |
+| `L4_PARALLEL_ACTIONS` | `l4_parallel_actions` | azioni L4 in parallelo per stato | intero, default 3 (1 = sequenziale) |
 
 Le property `foundry_configured` / `vision_configured` richiedono **ENTRAMBE** le variabili della coppia
 (una sola non basta); `service_principal_configured` richiede **TUTTE e
