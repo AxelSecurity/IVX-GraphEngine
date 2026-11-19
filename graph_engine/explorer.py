@@ -116,7 +116,9 @@ _SETTLE_QUIET_CYCLES = 2       # consecutive mature cycles with nothing
 # secondi (caso reale: login Bell Canada su Netlify, form dopo ~5,2s),
 # come il redirect JS ritardato contro i crawler veloci.  Se dopo il
 # settle la pagina sembra vuota — pochissimo testo e nessun elemento
-# interattivo — si attende ancora che compaia il contenuto.  Le pagine
+# interattivo (un iframe conta solo se grande almeno 250x150: il badge
+# "Powered by Netlify" del caso reale no) — si attende ancora che
+# compaia il contenuto.  Le pagine
 # con contenuto non pagano nulla.
 _EMPTY_PAGE_MAX_CHARS = 50     # sotto questa soglia di testo la pagina è "vuota"
 _EMPTY_PAGE_GRACE_S = 6.0      # attesa extra massima
@@ -128,6 +130,11 @@ _PAGE_CONTENT_PROBE = """() => {
         .replace(/\\s+/g, ' ').trim();
     const visible = (el) => {
         const r = el.getBoundingClientRect();
+        if (el.tagName === 'IFRAME') {
+            // Un iframe conta solo se abbastanza grande da contenere un
+            // form: badge di hosting, banner e widget CAPTCHA no.
+            return r.width >= 250 && r.height >= 150;
+        }
         return r.width >= 4 && r.height >= 4;
     };
     const interactive = Array.from(document.querySelectorAll(

@@ -771,3 +771,33 @@ class TestIframeInventory:
         texts = explorer.frame_texts_by_state[str(root.id)]
         assert len(texts) == 1  # l'iframe Turnstile è escluso
         assert "Webmail login" in texts[0]["text"]
+
+
+class TestEmptyPageProbe:
+    async def test_small_badge_iframe_does_not_count_as_content(self):
+        """Il badge 'Powered by Netlify' (iframe ~194x64) non rende 'piena'
+        una pagina vuota; un iframe grande (form) sì."""
+        from playwright.async_api import async_playwright
+
+        from graph_engine.explorer import _PAGE_CONTENT_PROBE
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            try:
+                page = await browser.new_page(viewport={"width": 1280, "height": 720})
+                await page.set_content(
+                    "<html><body><div id='root'></div>"
+                    "<iframe srcdoc='Powered by Netlify' width='194' height='64'></iframe>"
+                    "</body></html>"
+                )
+                badge = await page.evaluate(_PAGE_CONTENT_PROBE)
+                await page.set_content(
+                    "<html><body><iframe srcdoc='<input type=password>' "
+                    "width='600' height='400'></iframe></body></html>"
+                )
+                form_frame = await page.evaluate(_PAGE_CONTENT_PROBE)
+            finally:
+                await browser.close()
+
+        assert badge["interactive"] is False
+        assert form_frame["interactive"] is True

@@ -114,7 +114,8 @@ automaticamente (leaf = stato senza transizioni outbound).
   d'errore di Chrome invece del contenuto reale.
 - **Pagine vuote dopo il caricamento.** Se dopo il settle la pagina ha
   meno di 50 caratteri di testo e nessun elemento interattivo visibile
-  (campi, bottoni, link, iframe), l'explorer attende fino a 6s in più che
+  (campi, bottoni, link, iframe di almeno 250×150 — badge e widget
+  piccoli non contano), l'explorer attende fino a 6s in più che
   compaia il contenuto (`_wait_if_page_empty`): molti kit mostrano un
   caricamento e disegnano il form dopo alcuni secondi. Non scatta se la
   pagina ha contenuto o ha già avviato un redirect; se il redirect parte
