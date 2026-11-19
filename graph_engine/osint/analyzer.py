@@ -85,7 +85,7 @@ async def analyze(
     Args:
         canonical_url: URL normalizzato (output di L0 canonicalize).
         timeout_s: Timeout HTTP in secondi per ctlogs.dev, RDAP, DNS e
-                   i reputation provider (URLhaus).  Se ``None``, ogni
+                   i reputation provider eventualmente abilitati.  Se ``None``, ogni
                    fonte usa il proprio default (15s, 15s, 5s, 10s
                    rispettivamente).
 

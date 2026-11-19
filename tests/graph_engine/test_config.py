@@ -23,7 +23,6 @@ ALL_ENV_VARS = {
     "azure_client_secret": "AZURE_CLIENT_SECRET",
     "azure_vision_endpoint": "AZURE_VISION_ENDPOINT",
     "azure_vision_key": "AZURE_VISION_KEY",
-    "urlhaus_api_key": "URLHAUS_API_KEY",
     "api_key": "API_KEY",
     "dashboard_admin_user": "DASHBOARD_ADMIN_USER",
     "dashboard_admin_password": "DASHBOARD_ADMIN_PASSWORD",
@@ -49,7 +48,6 @@ class TestSettingsFields:
             "AZURE_FOUNDRY_ENDPOINT", "https://foundry.example.com"
         )
         monkeypatch.setenv("AZURE_FOUNDRY_AGENT_ID", "agent-123")
-        monkeypatch.setenv("URLHAUS_API_KEY", "urlhaus-key")
         monkeypatch.setenv("API_KEY", "ext-key")
         monkeypatch.setenv("DASHBOARD_ADMIN_USER", "admin-1")
 
@@ -57,7 +55,6 @@ class TestSettingsFields:
 
         assert s.azure_foundry_endpoint == "https://foundry.example.com"
         assert s.azure_foundry_agent_id == "agent-123"
-        assert s.urlhaus_api_key == "urlhaus-key"
         assert s.api_key == "ext-key"
         assert s.dashboard_admin_user == "admin-1"
 
@@ -95,11 +92,9 @@ class TestConfiguredProperties:
         s = _clean_settings(
             azure_foundry_endpoint="https://foundry.example.com",
             azure_foundry_agent_id="agent-1",
-            urlhaus_api_key="k3",
             api_key="k4",
         )
         assert s.foundry_configured is True
-        assert s.urlhaus_configured is True
         assert s.api_keys == ["k4"]
 
     def test_only_one_of_pair_is_false(self):
@@ -120,7 +115,6 @@ class TestConfiguredProperties:
         """Nessuna variabile → tutte le property False, nessun errore."""
         s = _clean_settings()
         assert s.foundry_configured is False
-        assert s.urlhaus_configured is False
         assert s.api_keys == []
 
     def test_api_keys_comma_separated(self):
@@ -134,20 +128,13 @@ class TestConfiguredProperties:
         s = _clean_settings()
         assert s.max_concurrent_analyses == 4
 
-    def test_urlhaus_single_field(self):
-        """URLhaus ha un solo campo (endpoint fisso): chiave presente →
-        configurato."""
-        s = _clean_settings(urlhaus_api_key="k")
-        assert s.urlhaus_configured is True
-
     def test_empty_string_not_configured(self):
         """Stringa vuota (es. ``API_KEY=`` in .env) → non
         configurata — identico al vecchio ``if token:``."""
         s = _clean_settings(
-            api_key="", urlhaus_api_key=""
+            api_key=""
         )
         assert s.api_keys == []
-        assert s.urlhaus_configured is False
 
     def test_service_principal_requires_all_three(self):
         """Service principal AAD: servono TUTTE e tre le credenziali —
@@ -175,7 +162,6 @@ class TestModuleSingleton:
         """Le property esistono sul singleton (il valore dipende
         dall'ambiente di processo)."""
         assert isinstance(settings.foundry_configured, bool)
-        assert isinstance(settings.urlhaus_configured, bool)
         assert isinstance(settings.api_keys, list)
         assert isinstance(settings.vision_configured, bool)
         assert isinstance(settings.service_principal_configured, bool)

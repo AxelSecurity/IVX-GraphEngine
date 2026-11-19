@@ -15,7 +15,6 @@ from graph_engine.config import settings
 _ALL_CONFIG_FIELDS = (
     "azure_foundry_endpoint",
     "azure_foundry_agent_id",
-    "urlhaus_api_key",
     "api_key",
     "dashboard_admin_user",
     "dashboard_admin_password",
@@ -29,7 +28,7 @@ def _isolate_config_from_environment():
     Il singleton ``graph_engine.config.settings`` viene creato
     all'import e legge le variabili d'ambiente del processo (o
     ``.env``): se lo sviluppatore ha ``AZURE_FOUNDRY_*``,
-    ``URLHAUS_API_KEY`` o ``API_KEY`` esportate nella
+    ``AZURE_VISION_*`` o ``API_KEY`` esportate nella
     propria shell, alcuni test fallirebbero in modo dipendente dalla
     macchina — es. l'API esterna accetterebbe chiavi reali
     o il registro L2 attiverebbe provider reali (chiamate di rete).

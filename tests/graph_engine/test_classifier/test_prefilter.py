@@ -365,8 +365,8 @@ class TestPrefilterStrongSignals:
         assert verdict.produced_by == "prefilter"
         assert verdict.classification == Classification.suspicious
 
-    def test_urlhaus_reputation_hit_delegates(self):
-        """Hit URLhaus su L4 sparsa → delega a Foundry (segnale forte da
+    def test_reputation_hit_delegates(self):
+        """Hit di reputazione su L4 sparsa → delega a Foundry (segnale forte da
         aggregare, mai un Verdict deterministico)."""
         bundle = _sparse_l4_bundle(
             passive_risk_score=0.5,

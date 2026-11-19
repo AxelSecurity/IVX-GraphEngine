@@ -74,38 +74,6 @@ class TestRealRdap:
 
 
 @pytest.mark.integration
-class TestRealUrlhaus:
-    """URLhaus su URL nota — verifichiamo solo che l'API risponda.
-
-    Nota (2026-08): l'API URLhaus ora restituisce 401 Unauthorized —
-    potrebbe richiedere autenticazione. Il nostro provider gestisce
-    correttamente questa risposta come errore, senza crash.
-    """
-
-    async def test_urlhaus_real_no_results_for_google(self):
-        """google.com non dovrebbe essere nel feed URLhaus."""
-        import httpx
-        from graph_engine.osint.reputation.urlhaus import UrlhausProvider
-
-        async with httpx.AsyncClient() as client:
-            provider = UrlhausProvider()
-            result = await provider.check("https://www.google.com", client)
-
-        assert result["provider"] == "urlhaus"
-        # Accetta sia no_results (API funzionante) che error (es. 401 auth)
-        # — il provider non deve mai crashare
-        if "error" in result.get("details", {}):
-            pytest.skip(
-                f"URLhaus API non disponibile (possibile cambiamento auth): "
-                f"{result['details']['error'][:100]}"
-            )
-            return
-
-        assert result["listed"] is False
-        assert result["details"].get("query_status") == "no_results"
-
-
-@pytest.mark.integration
 class TestRealDns:
     """Risoluzione DNS reale su hostname stabili."""
 

@@ -189,7 +189,7 @@ class TestBuildEvidenceBundle:
             ),
             _evidence(
                 "reputation_hit",
-                '{"provider": "urlhaus", "listed": true}',
+                '{"provider": "feed", "listed": true}',
             ),
             _evidence("cloaking_detected", "true"),
             _evidence("navigation_error", "timeout"),  # non forte → esclusa
@@ -211,7 +211,7 @@ class TestBuildEvidenceBundle:
             {"domain": "rnnovospid.cc", "brand": "Aruba", "distance": 1}
         ]
         assert details["reputation_hit"] == [
-            {"provider": "urlhaus", "listed": True}
+            {"provider": "feed", "listed": True}
         ]
         assert "cloaking_detected" in details
         assert "navigation_error" not in details

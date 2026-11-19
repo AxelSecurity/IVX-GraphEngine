@@ -4,7 +4,7 @@ Tutte le chiavi/endpoint API si leggono da qui::
 
     from graph_engine.config import settings
 
-    if settings.urlhaus_configured:
+    if settings.vision_configured:
         ...
 
 Le variabili possono arrivare dall'ambiente di processo o da un file
@@ -37,7 +37,6 @@ _CONFIG_FIELDS = (
     "azure_vision_endpoint",
     "azure_vision_key",
     "ctlogs_api_key",
-    "urlhaus_api_key",
     "api_key",
     "dashboard_admin_user",
     "dashboard_admin_password",
@@ -76,9 +75,6 @@ class Settings(BaseSettings):
     # Detection (REST legacy v3.2) sugli screenshot degli stati foglia.
     azure_vision_endpoint: Optional[str] = None
     azure_vision_key: Optional[str] = None
-
-    # ── URLhaus (provider reputazione L2, abuse.ch) ──────────────────
-    urlhaus_api_key: Optional[str] = None
 
     # ── ctlogs.dev (certificate transparency L2) ──────────────────────
     # Chiave della REST API di ctlogs.dev (https://api.ctlogs.dev),
@@ -150,15 +146,6 @@ class Settings(BaseSettings):
     def ctlogs_configured(self) -> bool:
         """True se la API key ctlogs.dev è presente (endpoint fisso)."""
         return bool(self.ctlogs_api_key)
-
-    @property
-    def urlhaus_configured(self) -> bool:
-        """True se la Auth-Key URLhaus è presente.
-
-        Non serve una coppia URL+key: l'endpoint abuse.ch è fisso e
-        noto (``URLHAUS_API_URL``), quindi basta la sola chiave.
-        """
-        return bool(self.urlhaus_api_key)
 
     @property
     def api_keys(self) -> list[str]:

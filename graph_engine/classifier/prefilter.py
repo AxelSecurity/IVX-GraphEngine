@@ -8,10 +8,10 @@ verification).
 
 In all other cases it returns None, delegating to the full classifier.
 
-Threat-intel lookups on internal platforms (MISP/OpenCTI) are NOT part
-of this engine: they are handled upstream by the calling service, so
-no reputation hit decides the verdict on its own here.  A URLhaus hit
-is a strong signal and is delegated to the classifier.
+Threat-intel / reputation lookups (MISP, OpenCTI, URLhaus) are NOT
+part of this engine: they are handled upstream by the calling service.
+Should a reputation provider be added again, its ``reputation_hit`` is
+a strong signal that is delegated to the classifier, never decided here.
 
 DESIGN NOTE — why the filter stays deliberately weak:
     The pre-filter only catches the trivially inconclusive case of "we

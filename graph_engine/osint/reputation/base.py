@@ -32,7 +32,7 @@ class ReputationProvider(ABC):
             client: Client HTTP asincrono già configurato.
             timeout_s: Timeout HTTP in secondi per la chiamata del
                        provider.  Se ``None``, il provider usa il proprio
-                       default (es. ``URLHAUS_TIMEOUT``).
+                       default.
 
         Returns:
             Un dizionario con almeno:

@@ -400,22 +400,15 @@ api.ctlogs.dev; ogni richiesta costa 1 unit della quota mensile. La cache è
 separata per modalità: quando la chiave arriva, un risultato anonimo
 (senza sibling) non viene riusato dall'API.
 
-### Adapter predisposti (disabilitati di default)
+### Provider di reputazione
 
-| Provider | Variabili d'ambiente richieste | Stato |
-|---|---|---|
-| **URLhaus** | `URLHAUS_API_KEY` | Disabilitato — si attiva automaticamente quando la chiave è presente |
-
-URLhaus richiede ora una Auth-Key gratuita (registrazione su
-https://auth.abuse.ch/), inviata nell'header `Auth-Key` di ogni
-richiesta verso `https://urlhaus-api.abuse.ch/v1/url/` (endpoint
-invariato). Senza chiave il provider restituisce `skipped: "not
-configured"` senza tentare alcuna chiamata HTTP. Una risposta 401 con chiave configurata (chiave invalida
-o scaduta) produce evidenza `provider_unavailable`, mai un'eccezione.
-
-Per attivare URLhaus basta impostare la variabile d'ambiente
-corrispondente. Nessuna modifica al codice necessaria: il
-`registry.py` rileva le variabili a runtime e istanzia i provider.
+Nessun provider di reputazione è attivo nel motore: le lookup su feed e
+piattaforme di threat intelligence (MISP, OpenCTI, URLhaus) sono gestite
+a monte dal servizio chiamante. Resta il punto di estensione
+`osint/reputation/` (`ReputationProvider` in `base.py`,
+`get_enabled_providers()` in `registry.py`, oggi lista vuota): un
+provider futuro viene aggiunto lì e l'analyzer ne trasforma già i
+risultati in evidenze `reputation_hit` / `provider_unavailable`.
 
 ### Segnali estratti
 
@@ -440,7 +433,8 @@ corrispondente. Nessuna modifica al codice necessaria: il
   > 90 giorni → nessuna penalizzazione (dominio stagionato).
 
 - **Reputation hit** (`reputation_hit`): URL presente in un feed di
-  minacce (es. URLhaus). Peso 0.50.
+  minacce. Peso 0.50. Prodotta solo da un eventuale provider di
+  reputazione (oggi nessuno è attivo).
 
 - **Record A** (`dns_a_records`): indirizzi IPv4 risolti per il dominio.
   Peso 0.0 (informativo). Colma una lacuna IOC: gli IP servono ai
@@ -461,7 +455,7 @@ corrispondente. Nessuna modifica al codice necessaria: il
 | `_W_DOMAIN_AGE_YOUNG` | 0.35 | Dominio < 30 giorni |
 | `_W_DOMAIN_AGE_MODERATE` | 0.15 | Dominio 30-90 giorni |
 | `_W_SIBLING_DOMAINS` | 0.30 | Presenza domini fratelli nella SAN list |
-| `_W_REPUTATION_HIT` | 0.50 | URL presente in feed di minacce (URLhaus, ecc.) |
+| `_W_REPUTATION_HIT` | 0.50 | URL presente in un feed di minacce (provider futuri) |
 
 Il punteggio è clampato a [0, 1]. **MAI** penalizzare per l'assenza di
 segnale — solo per la presenza.
@@ -493,7 +487,6 @@ TTL differenziati per tipo di dato:
 
 - RDAP: 24 ore (i dati WHOIS cambiano molto raramente)
 - ctlogs.dev: 6 ore (nuovi certificati possono comparire)
-- URLhaus: 1 ora (feed di minacce, più dinamico)
 - IANA bootstrap: 30 giorni (la mappatura TLD→server RDAP è stabile)
 
 La cache non è mai bloccante: un fallimento di scrittura viene
@@ -519,8 +512,7 @@ graph_engine/osint/
     reputation/
         __init__.py
         base.py          — ReputationProvider (ABC)
-        urlhaus.py       — URLhaus (richiede Auth-Key)
-        registry.py       — get_enabled_providers()
+        registry.py      — get_enabled_providers() (oggi vuoto)
 ```
 
 ## L3 — Attivo low-interaction
@@ -963,15 +955,13 @@ più permessa nei moduli.
 | `AZURE_CLIENT_SECRET` | `azure_client_secret` | auth Foundry (service principal) | richiede anche `TENANT_ID` + `CLIENT_ID`; senza la terna completa → `DefaultAzureCredential` |
 | `AZURE_VISION_ENDPOINT` | `azure_vision_endpoint` | arricchimento L5 (OCR + Brand Detection) | richiede anche `AZURE_VISION_KEY` (`vision_configured`); riusa la risorsa Cognitive Services già attiva (italynorth) |
 | `AZURE_VISION_KEY` | `azure_vision_key` | arricchimento L5 (OCR + Brand Detection) | richiede anche `AZURE_VISION_ENDPOINT`; chiave della risorsa (header `Ocp-Apim-Subscription-Key` per la REST legacy v3.2, `AzureKeyCredential` per la SDK moderna) |
-| `URLHAUS_API_KEY` | `urlhaus_api_key` | provider URLhaus (L2) | campo singolo (`urlhaus_configured`); endpoint fisso `urlhaus-api.abuse.ch`, chiave gratuita da https://auth.abuse.ch/ |
 | `API_KEY` | `api_key` | auth `X-API-Key` su `/api/v1/*` (e polling `/analyses`) | più chiavi separate da virgola (`api_keys`); senza → 503 |
 | `MAX_CONCURRENT_ANALYSES` | `max_concurrent_analyses` | limite di pipeline concorrenti | intero, default 4 |
 | `L4_PARALLEL_ACTIONS` | `l4_parallel_actions` | azioni L4 in parallelo per stato | intero, default 3 (1 = sequenziale) |
 
 Le property `foundry_configured` / `vision_configured` richiedono **ENTRAMBE** le variabili della coppia
 (una sola non basta); `service_principal_configured` richiede **TUTTE e
-tre** le variabili AAD; `urlhaus_configured` è True con il singolo
-valore impostato (e non vuoto).
+tre** le variabili AAD.
 
 ### Attivazione
 
@@ -987,7 +977,6 @@ AZURE_CLIENT_ID=<client-id>              #   (terna completa → niente `az logi
 AZURE_CLIENT_SECRET=<secret>             #   senza terna → DefaultAzureCredential
 AZURE_VISION_ENDPOINT=https://<risorsa>.cognitiveservices.azure.com  # → OCR + Brand Detection sugli screenshot
 AZURE_VISION_KEY=<chiave-risorsa>        #   (risorsa Cognitive Services riusata)
-URLHAUS_API_KEY=<auth-key>               # → provider URLhaus attivo in L2 (gratuita, https://auth.abuse.ch/)
 API_KEY=<chiave-client-1>,<chiave-client-2>  # → /api/v1/analyze (obbligatoria)
 ```
 
