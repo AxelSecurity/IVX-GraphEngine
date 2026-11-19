@@ -43,7 +43,7 @@ from graph_engine.models import (
     Transition,
     Verdict,
 )
-from graph_engine.storage.repository import get_target_by_id, save_target
+from graph_engine.storage.repository import save_target
 from graph_engine.storage.schema import DEFAULT_DB_PATH
 
 logger = logging.getLogger("graph_engine.api")

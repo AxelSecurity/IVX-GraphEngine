@@ -7,7 +7,6 @@ Produces a ``(canonical_url, url_hash)`` tuple suitable for
 from __future__ import annotations
 
 import hashlib
-import re
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 _IDN_PREFIX = "xn--"

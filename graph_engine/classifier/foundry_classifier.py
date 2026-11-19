@@ -383,7 +383,6 @@ def _heuristic_fallback(bundle: dict, reason: str = "Foundry non disponibile") -
     states WHY the model verdict is missing (``reason``: "Foundry non
     disponibile" / "run Foundry fallito" / "risposta JSON non valida").
     """
-    flags = bundle.get("flags", {})
     graph_states = bundle.get("states", [])
     total_fields = sum(
         len(st.get("form_fields", [])) for st in graph_states

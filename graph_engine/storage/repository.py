@@ -17,7 +17,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator
 
 import aiosqlite
 

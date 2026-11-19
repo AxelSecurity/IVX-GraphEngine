@@ -12,15 +12,6 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from graph_engine.models import (
-    AnalysisTarget,
-    Classification,
-    Evidence,
-    State,
-    TargetStatus,
-    Transition,
-    Verdict,
-)
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from urllib.parse import parse_qs, urlparse, urlunparse
+from urllib.parse import parse_qs, urlparse
 
 
 @dataclass

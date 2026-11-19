@@ -11,10 +11,7 @@ lo dichiara esplicitamente — mai spacciare dati parziali per conclusivi.
 from __future__ import annotations
 
 import json
-import os
-from typing import Optional
 
-import yaml
 
 from graph_engine.models import Classification
 
@@ -61,37 +58,6 @@ _SIG_GENERIC = {
 }
 
 # ---------------------------------------------------------------------------
-# Caricamento brand (lazy, module-level cache)
-# ---------------------------------------------------------------------------
-
-_BRANDS_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "lexical", "data", "brands.yaml",
-)
-
-_BRAND_NAMES: set[str] | None = None
-
-
-def _get_brand_names() -> set[str]:
-    """Carica i nomi dei brand dal file YAML una volta sola."""
-    global _BRAND_NAMES
-    if _BRAND_NAMES is not None:
-        return _BRAND_NAMES
-
-    _BRAND_NAMES = set()
-    try:
-        with open(_BRANDS_PATH, encoding="utf-8") as fh:
-            data = yaml.safe_load(fh)
-        if isinstance(data, list):
-            for entry in data:
-                if isinstance(entry, dict) and "brand" in entry:
-                    _BRAND_NAMES.add(entry["brand"])
-    except Exception:
-        # Se il file non esiste o è corrotto, insieme vuoto → firma generica
-        pass
-    return _BRAND_NAMES
-
-
-# ---------------------------------------------------------------------------
 # build_signature
 # ---------------------------------------------------------------------------
 
@@ -120,15 +86,13 @@ def build_signature(
        o ``verdict.kit_family`` che contenga "aitm"/"harvest".
     4. **Firma generica** basata sulla classificazione.
 
-    Nota: i form fields NON sono persistiti come evidenza
-    (``pipeline_runner._run_classification`` li inizializza a ``[]``),
-    quindi il rilevamento credenziali usa solo i segnali L1 persistiti.
+    Nota: i campi form raggiungono il classificatore (bundle L5) ma NON
+    sono persistiti come evidenza: la firma, ricostruita dal DB, usa per
+    il rilevamento credenziali solo i segnali L1 persistiti e il
+    ``kit_family`` del verdetto.
     """
     if mapped == "malicious":
-        # 1. Brand impersonation
-        brand_names = _get_brand_names()
-
-        # Cerca nelle evidence con key="typosquat" (L1)
+        # 1. Brand impersonation — cerca nelle evidence con key="typosquat" (L1)
         for ev in evidence:
             if isinstance(ev, dict) and ev.get("key") == "typosquat":
                 value = ev.get("value", "")

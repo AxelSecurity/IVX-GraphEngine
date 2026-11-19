@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
-from typing import Optional
 
 from graph_engine.osint.cache import TTL_DNS, TTL_ERROR, cache_get, cache_set
 

@@ -16,10 +16,10 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 from lxml import html as lxml_html
-from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright.async_api import Browser, BrowserContext, Page
 
 from graph_engine.actions import enumerate_actionable
 from graph_engine.budget import Budget
@@ -907,7 +907,7 @@ class StateGraphExplorer:
 
             # Navigate — the guard marks our goto as safe.
             self._our_goto_active = True
-            response = await page.goto(url, wait_until="domcontentloaded")
+            await page.goto(url, wait_until="domcontentloaded")
             self._our_goto_active = False
 
             # Settle: adaptive poll (see _settle_navigation_poll).  A fixed
@@ -930,20 +930,8 @@ class StateGraphExplorer:
         if self._capture_artifacts_flag:
             network_entries = self._stop_network_capture(page)
 
-        # --- determine final URL and any HTTP-redirect chain ----------------
+        # --- final URL (after any HTTP redirect) ------------------------------
         final_url = page.url
-        redirect_chain: list[str] = []
-
-        if response is not None:
-            # Walk back through the request chain to detect 3xx redirects.
-            req = response.request
-            while req is not None:
-                redirected_from = req.redirected_from
-                if redirected_from is not None:
-                    redirect_chain.append(redirected_from.url)
-                    req = redirected_from
-                else:
-                    break
 
         # --- capture HTML and compute hash -----------------------------------
         html_str = await page.content()

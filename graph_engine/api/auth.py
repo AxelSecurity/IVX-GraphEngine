@@ -37,7 +37,6 @@ import aiosqlite
 from fastapi import HTTPException
 
 from graph_engine.config import settings
-from graph_engine.storage.schema import DEFAULT_DB_PATH
 
 logger = logging.getLogger("graph_engine.api.auth")
 
