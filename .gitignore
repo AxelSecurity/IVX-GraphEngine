@@ -5,6 +5,8 @@ __pycache__/
 data/graph_artifacts/
 data/osint_cache/
 data/*.db
+data/*.db-wal
+data/*.db-shm
 .pytest_cache/
 .DS_Store
 
