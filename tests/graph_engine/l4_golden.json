@@ -22,9 +22,16 @@
         0,
         "/fr/",
         "75f2d367e0c725d27694742ef3d0a703f9bb76464184913d7ea0a62330100025"
+      ],
+      [
+        1,
+        "/fr/",
+        "5eb3597cefb931b16d6bda1ea5aa6acc8924b69022bd00707b1da10fd2ea26e4"
       ]
     ],
-    "transition_kinds": {}
+    "transition_kinds": {
+      "click": 1
+    }
   },
   "gate": {
     "states": [

@@ -179,11 +179,20 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 
+class _QuietServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        # Le pagine chiuse dall'explorer interrompono richieste in volo
+        # (es. i ping del polling): BrokenPipe atteso, non un errore.
+        pass
+
+
 class FixtureServer:
     """Server del banco di prova su una porta libera di 127.0.0.1."""
 
     def __enter__(self) -> "FixtureServer":
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self._server = _QuietServer(("127.0.0.1", 0), _Handler)
         self._server.daemon_threads = True
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()

@@ -118,6 +118,88 @@ _GATE_SETTLE_FAST_S = 1.5
 _GATE_SETTLE_DEFAULT_S = 3.0
 
 # ---------------------------------------------------------------------------
+# Attese dopo un'interazione — al posto di sleep fissi e networkidle
+# ---------------------------------------------------------------------------
+# networkidle non arriva MAI su pagine con analytics/polling (si pagava
+# sempre il timeout pieno) e torna SUBITO se la pagina era già idle prima
+# del click (una fetch lanciata dal click veniva persa).  Al suo posto:
+#   - replay: lo stato di arrivo è noto → si attende che la pagina mostri
+#     proprio quel dom_hash (tetto = vecchio sleep fisso: mai peggio);
+#   - click esplorativo: si attende che le richieste xhr/fetch/document
+#     partite DOPO il click siano finite e che il DOM resti fermo per
+#     ``_QUIET_WINDOW_S`` (tetto = vecchio networkidle 3s + sleep 0.5s).
+_WAIT_POLL_S = 0.1
+_WAIT_MIN_S = 0.3
+_QUIET_WINDOW_S = 0.5
+_CLICK_WAIT_CAP_S = 3.5
+_TRACKED_RESOURCE_TYPES = frozenset({"xhr", "fetch", "document"})
+
+# MutationObserver: registra l'istante dell'ultima mutazione del DOM.
+_INSTALL_MUTATION_PROBE = """() => {
+    window.__ge_last_mut = performance.now();
+    if (window.__ge_mo) return;
+    const mo = new MutationObserver(() => { window.__ge_last_mut = performance.now(); });
+    mo.observe(document, {subtree: true, childList: true, attributes: true, characterData: true});
+    window.__ge_mo = mo;
+}"""
+# ms dall'ultima mutazione; -1 = documento nuovo (sonda assente), -2 =
+# documento non ancora completo (parsing o risorse in caricamento).
+_READ_MUTATION_PROBE = """() => {
+    if (document.readyState !== 'complete') return -2;
+    if (!window.__ge_mo) return -1;
+    return performance.now() - window.__ge_last_mut;
+}"""
+
+
+class _RequestTracker:
+    """Conta le richieste xhr/fetch/document ancora in volo su una pagina.
+
+    Va agganciato PRIMA dell'interazione: conta solo ciò che parte dopo.
+    I document dei sub-frame (iframe di widget/CAPTCHA) sono ignorati.
+    """
+
+    def __init__(self, page: Page) -> None:
+        self._page = page
+        self._inflight: set = set()
+
+    @property
+    def inflight(self) -> int:
+        return len(self._inflight)
+
+    def _on_request(self, request) -> None:
+        try:
+            if request.resource_type not in _TRACKED_RESOURCE_TYPES:
+                return
+            if (
+                request.resource_type == "document"
+                and request.frame != self._page.main_frame
+            ):
+                return
+        except Exception:
+            return
+        self._inflight.add(request)
+
+    def _on_done(self, request) -> None:
+        self._inflight.discard(request)
+
+    def attach(self) -> "_RequestTracker":
+        self._page.on("request", self._on_request)
+        self._page.on("requestfinished", self._on_done)
+        self._page.on("requestfailed", self._on_done)
+        return self
+
+    def detach(self) -> None:
+        for event, handler in (
+            ("request", self._on_request),
+            ("requestfinished", self._on_done),
+            ("requestfailed", self._on_done),
+        ):
+            try:
+                self._page.remove_listener(event, handler)
+            except Exception:
+                pass
+
+# ---------------------------------------------------------------------------
 # Explorer
 # ---------------------------------------------------------------------------
 
@@ -637,8 +719,101 @@ class StateGraphExplorer:
         return True
 
     # ------------------------------------------------------------------
+    # Attese intelligenti
+    # ------------------------------------------------------------------
+
+    async def _wait_for_dom_hash(
+        self, page: Page, expected_hash: Optional[str], cap_s: float,
+    ) -> bool:
+        """Attende che *page* mostri il DOM atteso (replay verso uno stato noto).
+
+        Esce appena ``dom_hash`` coincide con *expected_hash* a documento
+        completo (``readyState == complete``: gli script async hanno
+        avuto modo di agganciare i listener) e dopo almeno
+        ``_WAIT_MIN_S``.  Altrimenti attende fino a *cap_s* — il vecchio
+        sleep fisso, quindi mai più di prima.  Restituisce True se il DOM
+        atteso è stato visto.
+        """
+        started = time.monotonic()
+        deadline = started + cap_s
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                return False
+            await asyncio.sleep(min(_WAIT_POLL_S * 2, deadline - now))
+            if expected_hash is None or time.monotonic() - started < _WAIT_MIN_S:
+                continue
+            try:
+                if await page.evaluate("() => document.readyState") != "complete":
+                    continue
+                html_str = await page.content()
+            except Exception:
+                continue  # navigazione in corso
+            if await asyncio.to_thread(normalise_and_hash, html_str) == expected_hash:
+                return True
+
+    async def _arm_interaction_wait(self, page: Page) -> _RequestTracker:
+        """Da chiamare PRIMA di un'interazione: aggancia contatore richieste
+        e sonda delle mutazioni DOM."""
+        tracker = _RequestTracker(page).attach()
+        try:
+            await page.evaluate(_INSTALL_MUTATION_PROBE)
+        except Exception:
+            pass
+        return tracker
+
+    async def _wait_after_interaction(
+        self,
+        page: Page,
+        tracker: _RequestTracker,
+        cap_s: float = _CLICK_WAIT_CAP_S,
+    ) -> None:
+        """Attende la fine degli effetti di un click di esito ignoto.
+
+        Fine = (dopo almeno ``_WAIT_MIN_S``) nessuna richiesta
+        xhr/fetch/document partita dopo il click ancora in volo, documento
+        completo e DOM fermo da ``_QUIET_WINDOW_S``.  Una navigazione
+        viene seguita: sul nuovo documento la sonda viene reinstallata.
+        Tetto *cap_s* (= vecchio networkidle 3s + sleep 0.5s).
+        """
+        started = time.monotonic()
+        deadline = started + cap_s
+        try:
+            while True:
+                now = time.monotonic()
+                if now >= deadline:
+                    return
+                await asyncio.sleep(min(_WAIT_POLL_S, deadline - now))
+                try:
+                    since_mut_ms = await page.evaluate(_READ_MUTATION_PROBE)
+                except Exception:
+                    continue  # navigazione in corso
+                if since_mut_ms == -1:
+                    # Documento nuovo (navigazione): sonda da reinstallare.
+                    try:
+                        await page.evaluate(_INSTALL_MUTATION_PROBE)
+                    except Exception:
+                        pass
+                    continue
+                if since_mut_ms < 0:
+                    continue  # documento non ancora completo
+                if time.monotonic() - started < _WAIT_MIN_S:
+                    continue
+                if tracker.inflight:
+                    continue
+                if since_mut_ms / 1000.0 >= _QUIET_WINDOW_S:
+                    return
+        finally:
+            tracker.detach()
+
+    # ------------------------------------------------------------------
     # Transition path reconstruction
     # ------------------------------------------------------------------
+
+    def _expected_hash(self, transition: Transition) -> Optional[str]:
+        """dom_hash dello stato di arrivo di *transition* (None se ignoto)."""
+        target = self._find_state_by_id(transition.to_state)
+        return target.dom_hash if target else None
 
     def _find_state_by_id(self, state_id: uuid.UUID) -> Optional[State]:
         """Look up a State by its id in ``self.states``."""
@@ -703,7 +878,7 @@ class StateGraphExplorer:
             self._our_goto_active = True
             try:
                 await page.goto(state.url, wait_until="domcontentloaded")
-                await asyncio.sleep(1.5)
+                await self._wait_for_dom_hash(page, state.dom_hash, cap_s=1.5)
                 return True
             except Exception as exc:
                 self._record_error(
@@ -736,7 +911,9 @@ class StateGraphExplorer:
             return False
         finally:
             self._our_goto_active = False
-        await asyncio.sleep(1.0)
+        await self._wait_for_dom_hash(
+            page, root_state.dom_hash if root_state else None, cap_s=1.0,
+        )
 
         # Replay transitions in chronological order.
         for t in path:
@@ -775,7 +952,9 @@ class StateGraphExplorer:
                         await asyncio.sleep(1.5)
                         return False
                 # Let the page settle after gate resolution.
-                await asyncio.sleep(1.0)
+                await self._wait_for_dom_hash(
+                    page, self._expected_hash(t), cap_s=1.0,
+                )
 
             elif t.kind == TransitionKind.click and t.trigger:
                 selector = t.trigger.get("selector", "")
@@ -804,14 +983,11 @@ class StateGraphExplorer:
                         self._our_goto_active = False
                     await asyncio.sleep(1.5)
                     return False
-                # Wait for potential navigation or DOM mutation.
-                try:
-                    await page.wait_for_load_state(
-                        "networkidle", timeout=3000
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(0.5)
+                # Stato di arrivo noto: si attende il suo DOM, con lo stesso
+                # tetto del vecchio networkidle 3s + sleep 0.5s.
+                await self._wait_for_dom_hash(
+                    page, self._expected_hash(t), cap_s=_CLICK_WAIT_CAP_S,
+                )
             # URL-based transitions (http_3xx, meta_refresh, js_location) are
             # already reflected in the current page URL — the browser followed
             # them automatically.  No explicit replay needed.
@@ -1129,20 +1305,16 @@ class StateGraphExplorer:
             pre_url = new_page.url
 
             # Click.
+            tracker = await self._arm_interaction_wait(new_page)
             try:
                 await new_page.click(selector, timeout=5000)
             except Exception:
                 # Element not found / not clickable — not an error, just skip.
+                tracker.detach()
                 return None
 
-            # Wait for potential navigation.
-            try:
-                await new_page.wait_for_load_state("networkidle", timeout=3000)
-            except Exception:
-                pass  # timeout is expected for pages that don't navigate
-
-            # Let any in-flight DOM mutations settle.
-            await asyncio.sleep(0.5)
+            # Effetti del click: navigazione, fetch + render, mutazioni DOM.
+            await self._wait_after_interaction(new_page, tracker)
 
             # Post-click snapshot.
             post_url = new_page.url
