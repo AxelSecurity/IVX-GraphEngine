@@ -271,8 +271,18 @@ def fake_pipeline(monkeypatch):
     async def _fake_l2(url, timeout_s=None):
         return {"evidence": [], "passive_risk_score": 0.0}
 
-    async def _fake_l3(url, timeout_s=None):
+    async def _fake_l3(url, timeout_s=None, profile_probe=None):
+        if profile_probe is not None:
+            await profile_probe
         return {"evidence": [], "recommended_profile": {}}
+
+    async def _fake_probe(url):
+        return {
+            "diff_result": None,
+            "cloaking": None,
+            "recommended_profile": {},
+            "cloaking_profile": None,
+        }
 
     monkeypatch.setattr(
         "graph_engine.osint.analyzer.analyze",
@@ -281,6 +291,10 @@ def fake_pipeline(monkeypatch):
     monkeypatch.setattr(
         "graph_engine.active.analyzer.analyze",
         _fake_l3,
+    )
+    monkeypatch.setattr(
+        "graph_engine.active.analyzer.probe_profile",
+        _fake_probe,
     )
     monkeypatch.setattr(
         "graph_engine.api.pipeline_runner._run_classification",

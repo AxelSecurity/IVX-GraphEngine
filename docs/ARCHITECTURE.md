@@ -458,7 +458,7 @@ per i TLD a due componenti.
 ```
 graph_engine/osint/
     __init__.py
-    analyzer.py          — orchestratore: DNS prima, poi resto in parallelo
+    analyzer.py          — orchestratore: tutte le fonti in parallelo
     cache.py             — cache filesystem con TTL
     certificate_transparency.py — ctlogs.dev (provider CT unico)
     dns_resolve.py       — risoluzione DNS A/AAAA (asyncio nativo)
@@ -576,8 +576,17 @@ altre. Un fallimento su una sonda non blocca MAI le altre
 
 ### Wiring L3 → L4
 
-Il `recommended_profile` prodotto dall'analyzer L3 viene passato a
-`StateGraphExplorer.run(profile=...)`. Il profilo contiene
+L4 ha bisogno di UN solo dato L3: il profilo ricavato dal differential
+fetch. `probe_profile(canonical_url)` esegue solo quella sonda; la
+pipeline (`pipeline_runner.run_full_analysis`) la avvia insieme a L2 e
+a `analyze(..., profile_probe=task)` — che riusa lo stesso task invece
+di ripetere le richieste — e fa partire L4 **appena il profilo è
+pronto**. JARM, favicon, redirect chain e tutto L2 corrono in parallelo
+all'esplorazione e vengono raccolti prima di L5; se L4 fallisce, i task
+ancora in volo vengono cancellati.
+
+Il `recommended_profile` (e l'eventuale `cloaking_profile`) viene
+passato a `StateGraphExplorer.run(profile=...)`. Il profilo contiene
 `user_agent` e `headers`:
 
 - `user_agent` → `browser.new_context(user_agent=...)`
