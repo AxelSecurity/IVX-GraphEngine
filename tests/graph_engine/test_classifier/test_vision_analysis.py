@@ -500,3 +500,62 @@ class TestAnalyzeScreenshot:
             {"name": "Microsoft", "confidence": 0.8}
         ]
         assert "errors" not in result
+
+
+class TestImageLimits:
+    """Immagini fuori dai limiti di Azure Vision: nessuna chiamata."""
+
+    @staticmethod
+    def _png(path, width, height, extra_bytes=0):
+        import struct
+        import zlib
+
+        def chunk(kind, data):
+            return (struct.pack(">I", len(data)) + kind + data
+                    + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+        body = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IEND", b"")
+        path.write_bytes(body + b"\0" * extra_bytes)
+        return str(path)
+
+    def test_png_dimensions_read_from_header(self, tmp_path):
+        from graph_engine.classifier.vision_analysis import _png_dimensions
+
+        assert _png_dimensions(self._png(tmp_path / "a.png", 1280, 20000)) == (1280, 20000)
+        (tmp_path / "x.png").write_bytes(b"not a png")
+        assert _png_dimensions(str(tmp_path / "x.png")) is None
+
+    async def test_too_tall_image_skips_all_calls(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from graph_engine.classifier import vision_analysis as va
+
+        _enable_vision(monkeypatch)
+        ocr = AsyncMock()
+        brands = AsyncMock()
+        monkeypatch.setattr(va, "run_ocr", ocr)
+        monkeypatch.setattr(va, "run_brand_detection", brands)
+
+        result = await va.analyze_screenshot(self._png(tmp_path / "t.png", 1280, 20000))
+
+        assert result["skipped"] == "image 1280x20000 outside Vision limits"
+        ocr.assert_not_called()
+        brands.assert_not_called()
+
+    async def test_large_file_skips_only_brand_detection(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from graph_engine.classifier import vision_analysis as va
+
+        _enable_vision(monkeypatch)
+        monkeypatch.setattr(va, "run_ocr", AsyncMock(return_value={"ocr_text": "ok", "error": None}))
+        brands = AsyncMock()
+        monkeypatch.setattr(va, "run_brand_detection", brands)
+
+        path = self._png(tmp_path / "big.png", 1280, 8000, extra_bytes=5 * 1024 * 1024)
+        result = await va.analyze_screenshot(path)
+
+        assert result["ocr_text"] == "ok"
+        brands.assert_not_called()
+        assert any("4 MB" in e for e in result["errors"])

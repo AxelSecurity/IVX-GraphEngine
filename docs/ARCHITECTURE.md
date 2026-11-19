@@ -970,6 +970,7 @@ più permessa nei moduli.
 | `MAX_CONCURRENT_ANALYSES` | `max_concurrent_analyses` | limite di pipeline concorrenti | intero, default 4 |
 | `L4_PARALLEL_ACTIONS` | `l4_parallel_actions` | azioni L4 in parallelo per stato | intero, default 3 (1 = sequenziale) |
 | `FOUNDRY_MAX_CONCURRENT` | `foundry_max_concurrent` | run Foundry contemporanei; sul rate limit retry con backoff (10/20/40s o Retry-After) | intero, default 2 |
+| `SCREENSHOT_MAX_HEIGHT` | `screenshot_max_height` | tetto all'altezza dello screenshot (px); prima di chiamare Vision si verificano i limiti dell'immagine | intero, default 8000 (0 = pagina intera) |
 | `ARTIFACT_RETENTION_DAYS` | `artifact_retention_days` | retention artefatti su disco (`api/retention.py`) | intero, default 30 (0 = mai); il DB non viene toccato |
 
 Le property `foundry_configured` / `vision_configured` richiedono **ENTRAMBE** le variabili della coppia

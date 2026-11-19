@@ -108,6 +108,12 @@ class Settings(BaseSettings):
     # perdono).  0 = mai.  Vedi graph_engine.api.retention.
     artifact_retention_days: int = 30
 
+    # Altezza massima (pixel) dello screenshot di uno stato: oltre, si
+    # cattura solo la parte superiore della pagina.  Azure Vision rifiuta
+    # immagini oltre 16000 px per lato; logo, marchio e form stanno in
+    # alto.  0 = nessun tetto (pagina intera).
+    screenshot_max_height: int = 8000
+
     # ── Classificatore Foundry ──────────────────────────────────────
     # Run Foundry contemporanei al massimo (le altre analisi attendono
     # lo slot): evita raffiche di prompt che superano la quota di token

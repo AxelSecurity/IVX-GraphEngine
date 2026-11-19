@@ -1748,6 +1748,32 @@ class StateGraphExplorer:
             }
         }
 
+    async def _take_screenshot(self, page: Page, path: Path) -> None:
+        """Screenshot dell'intera pagina, con tetto all'altezza.
+
+        Oltre ``SCREENSHOT_MAX_HEIGHT`` pixel si cattura solo la parte
+        superiore (clip sulla pagina intera): Azure Vision rifiuta
+        immagini oltre 16000 px per lato, e logo/marchio/form stanno in
+        alto.  Il DOM salvato resta completo.
+        """
+        cap = int(settings.screenshot_max_height)
+        clip = None
+        if cap > 0:
+            try:
+                width, height = await page.evaluate(
+                    "() => [document.documentElement.clientWidth || window.innerWidth,"
+                    " Math.max(document.documentElement.scrollHeight,"
+                    " document.body ? document.body.scrollHeight : 0)]"
+                )
+                if height > cap:
+                    clip = {"x": 0, "y": 0, "width": width, "height": cap}
+            except Exception:
+                clip = None  # misura fallita: screenshot intero come prima
+        if clip is None:
+            await page.screenshot(path=str(path), full_page=True)
+        else:
+            await page.screenshot(path=str(path), full_page=True, clip=clip)
+
     async def _scan_forms(self, state: State, page: Page) -> None:
         """Inventario passivo dei campi form di *state* (mai fill/click).
 
@@ -1780,7 +1806,7 @@ class StateGraphExplorer:
         # --- screenshot ------------------------------------------------------
         try:
             screenshot_path = base_dir / "screenshot.png"
-            await page.screenshot(path=str(screenshot_path), full_page=True)
+            await self._take_screenshot(page, screenshot_path)
             state.screenshot_ref = str(screenshot_path)
         except Exception as exc:
             self._record_error(

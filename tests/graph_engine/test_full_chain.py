@@ -665,3 +665,41 @@ class TestGuardKeepsOriginalPage:
         assert "Loading your document" in dom
         assert "chromewebdata" not in dom
         assert any(t.kind == TransitionKind.js_location for t in explorer.transitions)
+
+
+# ---------------------------------------------------------------------------
+# Screenshot con tetto all'altezza (limite Azure Vision: 16000 px)
+# ---------------------------------------------------------------------------
+
+class TestScreenshotHeightCap:
+    async def test_long_page_capped_short_page_full(self, tmp_path, monkeypatch):
+        from playwright.async_api import async_playwright
+
+        from graph_engine.classifier.vision_analysis import _png_dimensions
+        from graph_engine.config import settings
+        from graph_engine.explorer import StateGraphExplorer
+
+        monkeypatch.setattr(settings, "screenshot_max_height", 8000)
+        explorer = StateGraphExplorer(None)
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            try:
+                page = await browser.new_page(viewport={"width": 1280, "height": 720})
+                await page.set_content(
+                    "<html><body style='margin:0'><div style='height:20000px'>"
+                    "<h1>very long page</h1></div></body></html>"
+                )
+                long_png = tmp_path / "long.png"
+                await explorer._take_screenshot(page, long_png)
+
+                await page.set_content(
+                    "<html><body style='margin:0'><div style='height:3000px'>"
+                    "short</div></body></html>"
+                )
+                short_png = tmp_path / "short.png"
+                await explorer._take_screenshot(page, short_png)
+            finally:
+                await browser.close()
+
+        assert _png_dimensions(str(long_png)) == (1280, 8000)
+        assert _png_dimensions(str(short_png)) == (1280, 3000)

@@ -37,6 +37,43 @@ logger = logging.getLogger(__name__)
 # Percorso della REST legacy v3.2 per la Brand Detection.
 _BRAND_ANALYZE_PATH = "/vision/v3.2/analyze?visualFeatures=Brands"
 
+# Limiti delle immagini accettate da Azure Vision: lato tra 50 e 16000
+# px; file fino a 20 MB (Image Analysis 4.0, OCR) e 4 MB (REST v3.2,
+# Brand Detection).  Fuori dai limiti la chiamata verrebbe rifiutata
+# (InvalidImageSize): si salta e si annota il motivo.
+_MIN_SIDE_PX = 50
+_MAX_SIDE_PX = 16000
+_MAX_OCR_BYTES = 20 * 1024 * 1024
+_MAX_BRAND_BYTES = 4 * 1024 * 1024
+
+
+def _png_dimensions(image_path: str) -> tuple[int, int] | None:
+    """(larghezza, altezza) dall'header PNG, o None se non è un PNG."""
+    try:
+        with open(image_path, "rb") as fh:
+            head = fh.read(24)
+    except OSError:
+        return None
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        return None
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+
+def _size_problem(image_path: str) -> str | None:
+    """Motivo per cui l'immagine verrebbe rifiutata da Vision, o None."""
+    dims = _png_dimensions(image_path)
+    if dims is not None:
+        width, height = dims
+        if not (_MIN_SIDE_PX <= width <= _MAX_SIDE_PX
+                and _MIN_SIDE_PX <= height <= _MAX_SIDE_PX):
+            return f"image {width}x{height} outside Vision limits"
+    try:
+        if os.path.getsize(image_path) > _MAX_OCR_BYTES:
+            return "image larger than 20 MB"
+    except OSError:
+        return None
+    return None
+
 
 async def run_ocr(image_path: str) -> dict:
     """OCR dello screenshot via SDK moderna ``ImageAnalysisClient``.
@@ -163,16 +200,31 @@ async def analyze_screenshot(image_path: str) -> dict:
       di una NON blocca l'altra.
 
     Ritorna sempre ``{"ocr_text": str, "brands": [...], "errors": [...]}``
-    (``"skipped"`` presente solo nei due casi di skip).
+    (``"skipped"`` presente solo nei casi di skip, compresa un'immagine
+    fuori dai limiti di Vision: lato fuori da 50–16000 px o file oltre
+    20 MB; oltre 4 MB si salta solo la Brand Detection).
     """
     if not settings.vision_configured:
         return {"ocr_text": "", "brands": [], "skipped": "not configured"}
     if not os.path.isfile(image_path):
         return {"ocr_text": "", "brands": [], "skipped": "no screenshot"}
+    problem = _size_problem(image_path)
+    if problem is not None:
+        # Nessuna chiamata destinata al rifiuto (InvalidImageSize).
+        return {"ocr_text": "", "brands": [], "skipped": problem}
+
+    async def _brands_if_small_enough() -> dict:
+        try:
+            too_big = os.path.getsize(image_path) > _MAX_BRAND_BYTES
+        except OSError:
+            too_big = False
+        if too_big:
+            return {"brands": [], "error": "brand detection skipped: image larger than 4 MB"}
+        return await run_brand_detection(image_path)
 
     ocr_result, brand_result = await asyncio.gather(
         run_ocr(image_path),
-        run_brand_detection(image_path),
+        _brands_if_small_enough(),
         return_exceptions=True,
     )
 
