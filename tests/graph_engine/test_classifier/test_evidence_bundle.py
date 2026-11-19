@@ -612,6 +612,75 @@ class TestVisionEnrichment:
         assert entries[1]["brands"] == []
 
 
+class TestVisionDedupAndLimit:
+    """Vision: stati con lo stesso dom_hash condividono UNA chiamata, e
+    le chiamate concorrenti hanno un tetto (niente raffiche di 429)."""
+
+    @staticmethod
+    def _shot(dom_hash: str, n: int) -> State:
+        return State(
+            target_id=uuid.uuid4(),
+            url=f"https://example.com/p{n}",
+            dom_hash=dom_hash,
+            depth=0,
+            screenshot_ref=f"/nonexistent/shot-{n}.png",
+        )
+
+    async def _build(self, states):
+        return await build_evidence_bundle(
+            target_url="https://example.com",
+            canonical_url=None,
+            states=states,
+            transitions=[],
+            evidence=[],
+            form_fields_by_state={},
+            visible_text_by_state={},
+            titles_by_state={},
+        )
+
+    async def test_same_dom_hash_analyzed_once(self):
+        calls = []
+
+        async def _vision(ref):
+            calls.append(ref)
+            return {"ocr_text": f"OCR {ref}", "brands": []}
+
+        states = [self._shot("same", 1), self._shot("same", 2), self._shot("other", 3)]
+        with patch(
+            "graph_engine.classifier.evidence_bundle.analyze_screenshot",
+            new=_vision,
+        ):
+            bundle = await self._build(states)
+
+        assert len(calls) == 2
+        entries = bundle["states"]
+        assert entries[0]["ocr_text"] == entries[1]["ocr_text"] == "OCR /nonexistent/shot-1.png"
+        assert entries[2]["ocr_text"] == "OCR /nonexistent/shot-3.png"
+
+    async def test_concurrency_capped(self):
+        from graph_engine.classifier import evidence_bundle as eb
+
+        active = 0
+        peak = 0
+
+        async def _vision(ref):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return {"ocr_text": "", "brands": []}
+
+        states = [self._shot(f"h{i}", i) for i in range(10)]
+        with patch(
+            "graph_engine.classifier.evidence_bundle.analyze_screenshot",
+            new=_vision,
+        ):
+            await self._build(states)
+
+        assert peak == eb._VISION_CONCURRENCY
+
+
 class TestCloakingProbeInBundle:
     """Il ramo divergente entra nel bundle senza modifiche: il kind
     cloaking_probe è contato in transition_kinds_seen e ogni stato del

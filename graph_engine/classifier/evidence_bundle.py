@@ -39,6 +39,11 @@ _MAX_FORM_FIELDS = 25
 _MAX_FORM_LABEL_CHARS = 60
 _MAX_DETAILED_INTERMEDIATE_STATES = 12
 
+# Chiamate Azure AI Vision concorrenti per analisi: ogni screenshot costa
+# 2 richieste (OCR + Brand Detection) — senza tetto un grafo di 40 stati
+# ne lancerebbe 80 insieme, finendo in 429 sulla risorsa condivisa.
+_VISION_CONCURRENCY = 4
+
 
 def _truncate(text: str, limit: int) -> str:
     """Taglia *text* a *limit* caratteri con marker di troncamento."""
@@ -169,10 +174,18 @@ async def build_evidence_bundle(
     # NON filtra il contenuto.
     from_state_ids = {str(t.from_state) for t in transitions}
     state_entries: list[dict] = []
-    # Vision (OCR + Brand) sugli screenshot: i task partono TUTTI
-    # insieme (gather finale) invece che in sequenza — con N stati il
-    # costo passa da N×2-4s a ~1×2-4s nel full path.
+    # Vision (OCR + Brand) sugli screenshot: i task partono insieme
+    # (gather finale) con un tetto di concorrenza, e stati con lo STESSO
+    # dom_hash (pagina identica, es. ramo cloaking che converge) riusano
+    # un'unica analisi invece di pagarla due volte.
     pending: dict[int, asyncio.Task] = {}
+    vision_by_hash: dict[str, asyncio.Task] = {}
+    vision_slots = asyncio.Semaphore(_VISION_CONCURRENCY)
+
+    async def _limited_vision(path: str) -> dict:
+        async with vision_slots:
+            return await analyze_screenshot(path)
+
     for s in states:
         sid = str(s.id)
         entry: dict = {
@@ -191,9 +204,12 @@ async def build_evidence_bundle(
             "brands": [],
         }
         if analyze_screenshots and s.screenshot_ref:
-            pending[len(state_entries)] = asyncio.create_task(
-                analyze_screenshot(s.screenshot_ref)
-            )
+            task = vision_by_hash.get(s.dom_hash) if s.dom_hash else None
+            if task is None:
+                task = asyncio.create_task(_limited_vision(s.screenshot_ref))
+                if s.dom_hash:
+                    vision_by_hash[s.dom_hash] = task
+            pending[len(state_entries)] = task
         state_entries.append(entry)
 
     if pending:
