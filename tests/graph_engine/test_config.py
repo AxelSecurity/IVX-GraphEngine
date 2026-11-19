@@ -5,7 +5,7 @@ Questi test verificano:
 
 1. i campi si leggono dalle variabili d'ambiente (o ``.env``)
 2. le property ``*_configured`` richiedono ENTRAMBE le variabili della
-   coppia (per Trellix basta il token)
+   coppia; ``api_keys`` divide la lista di chiavi separate da virgola
 3. senza ``.env`` e senza env vars, ``Settings()`` non solleva errori —
    il progetto funziona degradato come prima
 """
@@ -23,13 +23,8 @@ ALL_ENV_VARS = {
     "azure_client_secret": "AZURE_CLIENT_SECRET",
     "azure_vision_endpoint": "AZURE_VISION_ENDPOINT",
     "azure_vision_key": "AZURE_VISION_KEY",
-    "misp_url": "MISP_URL",
-    "misp_api_key": "MISP_API_KEY",
-    "opencti_url": "OPENCTI_URL",
-    "opencti_api_key": "OPENCTI_API_KEY",
     "urlhaus_api_key": "URLHAUS_API_KEY",
-    "trellix_api_key": "TRELLIX_API_KEY",
-    "trellix_api_token": "TRELLIX_API_TOKEN",
+    "api_key": "API_KEY",
     "dashboard_admin_user": "DASHBOARD_ADMIN_USER",
     "dashboard_admin_password": "DASHBOARD_ADMIN_PASSWORD",
 }
@@ -54,26 +49,16 @@ class TestSettingsFields:
             "AZURE_FOUNDRY_ENDPOINT", "https://foundry.example.com"
         )
         monkeypatch.setenv("AZURE_FOUNDRY_AGENT_ID", "agent-123")
-        monkeypatch.setenv("MISP_URL", "https://misp.example.com")
-        monkeypatch.setenv("MISP_API_KEY", "misp-key")
-        monkeypatch.setenv("OPENCTI_URL", "https://opencti.example.com")
-        monkeypatch.setenv("OPENCTI_API_KEY", "opencti-key")
         monkeypatch.setenv("URLHAUS_API_KEY", "urlhaus-key")
-        monkeypatch.setenv("TRELLIX_API_KEY", "trellix-key")
-        monkeypatch.setenv("TRELLIX_API_TOKEN", "trellix-token")
+        monkeypatch.setenv("API_KEY", "ext-key")
         monkeypatch.setenv("DASHBOARD_ADMIN_USER", "admin-1")
 
         s = Settings(_env_file=None)
 
         assert s.azure_foundry_endpoint == "https://foundry.example.com"
         assert s.azure_foundry_agent_id == "agent-123"
-        assert s.misp_url == "https://misp.example.com"
-        assert s.misp_api_key == "misp-key"
-        assert s.opencti_url == "https://opencti.example.com"
-        assert s.opencti_api_key == "opencti-key"
         assert s.urlhaus_api_key == "urlhaus-key"
-        assert s.trellix_api_key == "trellix-key"
-        assert s.trellix_api_token == "trellix-token"
+        assert s.api_key == "ext-key"
         assert s.dashboard_admin_user == "admin-1"
 
     def test_whitespace_stripped_from_values(self, monkeypatch):
@@ -110,18 +95,12 @@ class TestConfiguredProperties:
         s = _clean_settings(
             azure_foundry_endpoint="https://foundry.example.com",
             azure_foundry_agent_id="agent-1",
-            misp_url="https://misp.example.com",
-            misp_api_key="k1",
-            opencti_url="https://opencti.example.com",
-            opencti_api_key="k2",
             urlhaus_api_key="k3",
-            trellix_api_key="k4",
+            api_key="k4",
         )
         assert s.foundry_configured is True
-        assert s.misp_configured is True
-        assert s.opencti_configured is True
         assert s.urlhaus_configured is True
-        assert s.trellix_auth_required is True
+        assert s.api_keys == ["k4"]
 
     def test_only_one_of_pair_is_false(self):
         """Una sola variabile della coppia NON basta — deve essere False."""
@@ -133,35 +112,27 @@ class TestConfiguredProperties:
         s = _clean_settings(azure_foundry_agent_id="agent-1")
         assert s.foundry_configured is False
 
-        s = _clean_settings(misp_url="https://misp.example.com")
-        assert s.misp_configured is False
 
-        s = _clean_settings(misp_api_key="k1")
-        assert s.misp_configured is False
 
-        s = _clean_settings(opencti_url="https://opencti.example.com")
-        assert s.opencti_configured is False
 
-        s = _clean_settings(opencti_api_key="k2")
-        assert s.opencti_configured is False
 
     def test_none_present(self):
         """Nessuna variabile → tutte le property False, nessun errore."""
         s = _clean_settings()
         assert s.foundry_configured is False
-        assert s.misp_configured is False
-        assert s.opencti_configured is False
         assert s.urlhaus_configured is False
-        assert s.trellix_auth_required is False
+        assert s.api_keys == []
 
-    def test_trellix_single_field(self):
-        """Trellix: basta UNA credenziale (API key o token legacy) →
-        auth richiesta."""
-        s = _clean_settings(trellix_api_key="k1")
-        assert s.trellix_auth_required is True
+    def test_api_keys_comma_separated(self):
+        """API_KEY accetta più chiavi separate da virgola (una per
+        client); spazi e voci vuote vengono ignorati."""
+        s = _clean_settings(api_key=" k1, k2 ,,k3 ")
+        assert s.api_keys == ["k1", "k2", "k3"]
 
-        s = _clean_settings(trellix_api_token="t1")
-        assert s.trellix_auth_required is True
+    def test_max_concurrent_analyses_default(self):
+        """Il limite di pipeline concorrenti ha un default sensato."""
+        s = _clean_settings()
+        assert s.max_concurrent_analyses == 4
 
     def test_urlhaus_single_field(self):
         """URLhaus ha un solo campo (endpoint fisso): chiave presente →
@@ -170,12 +141,12 @@ class TestConfiguredProperties:
         assert s.urlhaus_configured is True
 
     def test_empty_string_not_configured(self):
-        """Stringa vuota (es. ``TRELLIX_API_KEY=`` in .env) → non
+        """Stringa vuota (es. ``API_KEY=`` in .env) → non
         configurata — identico al vecchio ``if token:``."""
         s = _clean_settings(
-            trellix_api_key="", trellix_api_token="", urlhaus_api_key=""
+            api_key="", urlhaus_api_key=""
         )
-        assert s.trellix_auth_required is False
+        assert s.api_keys == []
         assert s.urlhaus_configured is False
 
     def test_service_principal_requires_all_three(self):
@@ -204,9 +175,7 @@ class TestModuleSingleton:
         """Le property esistono sul singleton (il valore dipende
         dall'ambiente di processo)."""
         assert isinstance(settings.foundry_configured, bool)
-        assert isinstance(settings.misp_configured, bool)
-        assert isinstance(settings.opencti_configured, bool)
         assert isinstance(settings.urlhaus_configured, bool)
-        assert isinstance(settings.trellix_auth_required, bool)
+        assert isinstance(settings.api_keys, list)
         assert isinstance(settings.vision_configured, bool)
         assert isinstance(settings.service_principal_configured, bool)

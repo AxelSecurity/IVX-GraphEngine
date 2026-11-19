@@ -4,7 +4,7 @@ Tutte le chiavi/endpoint API si leggono da qui::
 
     from graph_engine.config import settings
 
-    if settings.misp_configured:
+    if settings.urlhaus_configured:
         ...
 
 Le variabili possono arrivare dall'ambiente di processo o da un file
@@ -13,8 +13,8 @@ completo).  Nessuna credenziale è mai hardcodata nel codice.
 
 Senza alcuna variabile impostata il progetto funziona degradato come
 oggi: provider di reputazione extra disabilitati, classificazione L5
-con fallback euristico.  Fa eccezione l'endpoint Trellix, che SENZA
-``TRELLIX_API_KEY`` risponde 503 (configurazione mancante) e la
+con fallback euristico.  Fa eccezione l'API esterna (``/api/v1``),
+che SENZA ``API_KEY`` risponde 503 (configurazione mancante) e la
 dashboard, che resta comunque accessibile col login (admin bootstrap
 con password casuale stampata nel log).
 """
@@ -36,14 +36,9 @@ _CONFIG_FIELDS = (
     "azure_client_secret",
     "azure_vision_endpoint",
     "azure_vision_key",
-    "misp_url",
-    "misp_api_key",
-    "opencti_url",
-    "opencti_api_key",
     "ctlogs_api_key",
     "urlhaus_api_key",
-    "trellix_api_key",
-    "trellix_api_token",
+    "api_key",
     "dashboard_admin_user",
     "dashboard_admin_password",
 )
@@ -82,14 +77,6 @@ class Settings(BaseSettings):
     azure_vision_endpoint: Optional[str] = None
     azure_vision_key: Optional[str] = None
 
-    # ── MISP (provider reputazione L2) ──────────────────────────────
-    misp_url: Optional[str] = None
-    misp_api_key: Optional[str] = None
-
-    # ── OpenCTI (provider reputazione L2) ───────────────────────────
-    opencti_url: Optional[str] = None
-    opencti_api_key: Optional[str] = None
-
     # ── URLhaus (provider reputazione L2, abuse.ch) ──────────────────
     urlhaus_api_key: Optional[str] = None
 
@@ -101,13 +88,18 @@ class Settings(BaseSettings):
     # cronologia certificati (crt.sh rimosso, 2026-08-27).
     ctlogs_api_key: Optional[str] = None
 
-    # ── Endpoint Trellix (/trellix/analyze) ─────────────────────────
-    # API key OBBLIGATORIA (decisione utente 2026-09-01): senza chiave
-    # la route risponde 503 (configurazione mancante), mai aperta.
-    # ``trellix_api_token`` è il vecchio Bearer opzionale: resta
-    # accettato per retrocompatibilità con le integrazioni già attive.
-    trellix_api_key: Optional[str] = None
-    trellix_api_token: Optional[str] = None
+    # ── API esterna (/api/v1/analyze + polling /analyses) ───────────
+    # API key OBBLIGATORIA: senza chiave la route /api/v1/analyze
+    # risponde 503 (configurazione mancante), mai aperta.  Accetta più
+    # chiavi separate da virgola (una per servizio chiamante), così una
+    # chiave si revoca senza toccare gli altri client.
+    api_key: Optional[str] = None
+
+    # ── Concorrenza ─────────────────────────────────────────────────
+    # Numero massimo di pipeline in esecuzione contemporanea (un solo
+    # processo, un solo Chromium condiviso).  Le analisi oltre il limite
+    # restano "queued" finché non si libera uno slot.
+    max_concurrent_analyses: int = 4
 
     # ── Bootstrap amministratore dashboard ──────────────────────────
     # Al primo avvio, se la tabella utenti è vuota, viene creato
@@ -150,16 +142,6 @@ class Settings(BaseSettings):
         )
 
     @property
-    def misp_configured(self) -> bool:
-        """True se URL e API key MISP sono entrambi presenti."""
-        return bool(self.misp_url and self.misp_api_key)
-
-    @property
-    def opencti_configured(self) -> bool:
-        """True se URL e API key OpenCTI sono entrambi presenti."""
-        return bool(self.opencti_url and self.opencti_api_key)
-
-    @property
     def ctlogs_configured(self) -> bool:
         """True se la API key ctlogs.dev è presente (endpoint fisso)."""
         return bool(self.ctlogs_api_key)
@@ -168,17 +150,19 @@ class Settings(BaseSettings):
     def urlhaus_configured(self) -> bool:
         """True se la Auth-Key URLhaus è presente.
 
-        A differenza di MISP/OpenCTI non serve una coppia URL+key:
-        l'endpoint abuse.ch è fisso e noto (``URLHAUS_API_URL``),
-        quindi basta la sola chiave.
+        Non serve una coppia URL+key: l'endpoint abuse.ch è fisso e
+        noto (``URLHAUS_API_URL``), quindi basta la sola chiave.
         """
         return bool(self.urlhaus_api_key)
 
     @property
-    def trellix_auth_required(self) -> bool:
-        """True se è configurata almeno una credenziale Trellix
-        (API key o token Bearer legacy) → auth obbligatoria sulla route."""
-        return bool(self.trellix_api_key or self.trellix_api_token)
+    def api_keys(self) -> list[str]:
+        """Le API key valide per l'API esterna (``API_KEY``, separate da
+        virgola; spazi e voci vuote ignorati).  Lista vuota → API esterna
+        non configurata (503)."""
+        if not self.api_key:
+            return []
+        return [k.strip() for k in self.api_key.split(",") if k.strip()]
 
 
 # Istanza singleton — l'unico punto da cui il progetto legge configurazione.

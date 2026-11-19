@@ -7,6 +7,9 @@ distanza 0 (dominio identico) non conta — è il sito vero.
 
 from __future__ import annotations
 
+import functools
+import os
+
 from pathlib import Path
 from typing import Optional
 
@@ -94,7 +97,18 @@ def _registrable_domain(hostname: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _load_brands(path: str) -> list[dict]:
-    """Carica la lista brand da un file YAML."""
+    """Carica la lista brand da un file YAML.
+
+    Il parsing è in cache per (path, mtime): ``check_typosquat`` gira a
+    ogni analisi e prima rileggeva e riparsava il YAML ogni volta.  Un
+    file modificato su disco viene ricaricato automaticamente.
+    """
+    return _load_brands_cached(path, os.stat(path).st_mtime_ns)
+
+
+@functools.lru_cache(maxsize=8)
+def _load_brands_cached(path: str, mtime_ns: int) -> list[dict]:
+    del mtime_ns  # parte della chiave di cache, non usato
     with open(path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
     if not isinstance(data, list):

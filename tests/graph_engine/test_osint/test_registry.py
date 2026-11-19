@@ -1,7 +1,8 @@
 """Tests per il registro provider di reputazione.
 
-URLhaus, MISP e OpenCTI sono tutti condizionali alla configurazione
-centralizzata: in un ambiente pulito la lista è vuota.
+URLhaus è condizionale alla configurazione centralizzata: in un
+ambiente pulito la lista è vuota.  MISP/OpenCTI non fanno più parte
+del motore (gestiti a monte dal servizio chiamante).
 """
 
 from __future__ import annotations
@@ -19,21 +20,12 @@ class TestRegistry:
     def test_no_config_returns_empty_list(self, monkeypatch):
         """Senza alcuna variabile → nessun provider attivo."""
         monkeypatch.setattr(settings, "urlhaus_api_key", None)
-        monkeypatch.setattr(settings, "misp_url", None)
-        monkeypatch.setattr(settings, "misp_api_key", None)
-        monkeypatch.setattr(settings, "opencti_url", None)
-        monkeypatch.setattr(settings, "opencti_api_key", None)
 
         assert get_enabled_providers() == []
 
     def test_urlhaus_present_only_when_key_configured(self, monkeypatch):
         """URLhaus è condizionale: con la Auth-Key è presente,
         senza non compare nella lista."""
-        monkeypatch.setattr(settings, "misp_url", None)
-        monkeypatch.setattr(settings, "misp_api_key", None)
-        monkeypatch.setattr(settings, "opencti_url", None)
-        monkeypatch.setattr(settings, "opencti_api_key", None)
-
         monkeypatch.setattr(settings, "urlhaus_api_key", None)
         assert "urlhaus" not in _provider_names()
 
@@ -44,24 +36,8 @@ class TestRegistry:
         """Il provider istanziato dal registry legge la chiave dal
         singleton al momento della costruzione."""
         monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
-        monkeypatch.setattr(settings, "misp_url", None)
-        monkeypatch.setattr(settings, "misp_api_key", None)
-        monkeypatch.setattr(settings, "opencti_url", None)
-        monkeypatch.setattr(settings, "opencti_api_key", None)
 
         providers = get_enabled_providers()
         assert len(providers) == 1
         assert isinstance(providers[0], UrlhausProvider)
         assert providers[0]._api_key == "test-key"
-
-    def test_misp_and_opencti_still_conditional(self, monkeypatch):
-        """MISP e OpenCTI restano attivabili con le rispettive coppie,
-        insieme a URLhaus configurato."""
-        monkeypatch.setattr(settings, "urlhaus_api_key", "test-key")
-        monkeypatch.setattr(settings, "misp_url", "https://misp.example.org")
-        monkeypatch.setattr(settings, "misp_api_key", "misp-key")
-        monkeypatch.setattr(settings, "opencti_url", "https://opencti.example.org")
-        monkeypatch.setattr(settings, "opencti_api_key", "opencti-key")
-
-        names = _provider_names()
-        assert names == ["urlhaus", "misp", "opencti"]

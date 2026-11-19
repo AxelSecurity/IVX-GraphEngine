@@ -274,7 +274,7 @@ class TestTryPassGate:
 
     async def test_settle_s_controls_final_wait(self):
         """``settle_s`` parametrizza la fase 3: con 0.0 nessuno sleep
-        extra (fast path Trellix), con 3.0 il default.  Lo sleep è
+        extra (fast path), con 3.0 il default.  Lo sleep è
         mockato — il test è istantaneo e deterministico."""
         from unittest.mock import AsyncMock, MagicMock, patch
 

@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import base64
 from typing import Optional
-from urllib.parse import urljoin
 
 import httpx
 import mmh3

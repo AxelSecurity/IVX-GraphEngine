@@ -1,4 +1,4 @@
-"""Test per l'endpoint Trellix /trellix/analyze."""
+"""Test per l'endpoint sincrono /api/v1/analyze."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from graph_engine.models import (
 from graph_engine.storage.repository import save_target
 
 
-class TestRoutesTrellix:
-    """Test end-to-end per GET /trellix/analyze."""
+class TestRoutesExternal:
+    """Test end-to-end per GET /api/v1/analyze."""
 
     # ------------------------------------------------------------------
     # Allowlist hit → risposta immediata
@@ -36,11 +36,11 @@ class TestRoutesTrellix:
             return "should-not-be-called"
 
         monkeypatch.setattr(
-            "graph_engine.api.routes_trellix.run_full_analysis",
+            "graph_engine.api.jobs.run_full_analysis",
             _fake_pipeline,
         )
 
-        res = await client.get("/trellix/analyze?url=https://example.com/login")
+        res = await client.get("/api/v1/analyze?url=https://example.com/login")
         assert res.status_code == 200
         body = res.json()
         assert body["result"]["verdict"] == "safe"
@@ -61,11 +61,11 @@ class TestRoutesTrellix:
             return "should-not-be-called"
 
         monkeypatch.setattr(
-            "graph_engine.api.routes_trellix.run_full_analysis",
+            "graph_engine.api.jobs.run_full_analysis",
             _fake_pipeline,
         )
 
-        res = await client.get("/trellix/analyze?url=https://evil.com/phish")
+        res = await client.get("/api/v1/analyze?url=https://evil.com/phish")
         assert res.status_code == 200
         body = res.json()
         assert body["result"]["verdict"] == "malicious"
@@ -85,12 +85,12 @@ class TestRoutesTrellix:
             return "should-not-be-called"
 
         monkeypatch.setattr(
-            "graph_engine.api.routes_trellix.run_full_analysis",
+            "graph_engine.api.jobs.run_full_analysis",
             _fake_pipeline,
         )
 
         res = await client.get(
-            "/trellix/analyze?url=https://example.com/trusted?sid=abc"
+            "/api/v1/analyze?url=https://example.com/trusted?sid=abc"
         )
         assert res.status_code == 200
         body = res.json()
@@ -116,11 +116,11 @@ class TestRoutesTrellix:
             return "should-not-be-called"
 
         monkeypatch.setattr(
-            "graph_engine.api.routes_trellix.run_full_analysis",
+            "graph_engine.api.jobs.run_full_analysis",
             _fake_pipeline,
         )
 
-        res = await client.get("/trellix/analyze?url=https://example.com/evil")
+        res = await client.get("/api/v1/analyze?url=https://example.com/evil")
         assert res.status_code == 200
         body = res.json()
         assert body["result"]["verdict"] == "malicious"
@@ -167,12 +167,12 @@ class TestRoutesTrellix:
             return "should-not-be-called"
 
         monkeypatch.setattr(
-            "graph_engine.api.routes_trellix.run_full_analysis",
+            "graph_engine.api.jobs.run_full_analysis",
             _fake_pipeline,
         )
 
         res = await client.get(
-            "/trellix/analyze?url=https://fresh.example.com/page"
+            "/api/v1/analyze?url=https://fresh.example.com/page"
         )
         assert res.status_code == 200
         body = res.json()
@@ -227,12 +227,12 @@ class TestRoutesTrellix:
             return str(t.id) if t else "no-target"
 
         monkeypatch.setattr(
-            "graph_engine.api.routes_trellix.run_full_analysis",
+            "graph_engine.api.jobs.run_full_analysis",
             _fake_pipeline,
         )
 
         res = await client.get(
-            "/trellix/analyze?url=https://old.example.com/page"
+            "/api/v1/analyze?url=https://old.example.com/page"
         )
         assert res.status_code == 200
         assert called, "run_full_analysis was NOT called despite stale cache"
@@ -245,8 +245,8 @@ class TestRoutesTrellix:
         """La route attende il completamento REALE della pipeline anche
         quando è lenta: risponde col verdetto finale persistito — mai
         una risposta "incompleta" autoimposta.  La finestra di tempo è
-        gestita a monte (Front Door / Trellix), non dal modulo."""
-        from graph_engine.api.routes_trellix import build_trellix_router
+        gestita a monte dal chiamante, non dal modulo."""
+        from graph_engine.api.routes_external import build_external_router
 
         db = str(tmp_path / "test.db")
 
@@ -269,16 +269,16 @@ class TestRoutesTrellix:
             return str(t.id) if t else "done"
 
         monkeypatch.setattr(
-            "graph_engine.api.routes_trellix.run_full_analysis",
+            "graph_engine.api.jobs.run_full_analysis",
             _slow_pipeline,
         )
 
-        trellix_router = build_trellix_router(db_path=db)
+        external_router = build_external_router(db_path=db)
 
         from fastapi import FastAPI
 
         test_app = FastAPI()
-        test_app.include_router(trellix_router)
+        test_app.include_router(external_router)
 
         from httpx import ASGITransport, AsyncClient
 
@@ -287,7 +287,7 @@ class TestRoutesTrellix:
             base_url="http://test",
             headers={"X-API-Key": "test-key"},
         ) as c:
-            res = await c.get("/trellix/analyze?url=https://slow.example.com")
+            res = await c.get("/api/v1/analyze?url=https://slow.example.com")
 
         # La risposta porta il verdetto finale della pipeline lenta —
         # nessuna deadline, nessuna Analysis-Incomplete autoimposta
@@ -313,7 +313,7 @@ class TestRoutesTrellix:
     # ------------------------------------------------------------------
 
     async def test_double_encoded_url(self, app, client, tmp_path, monkeypatch):
-        """URL doppio-encodato (pattern Trellix) → decodificato correttamente."""
+        """URL doppio-encodato → decodificato correttamente."""
         db = str(tmp_path / "test.db")
 
         received_url = None
@@ -329,13 +329,13 @@ class TestRoutesTrellix:
             return str(t.id) if t else "done"
 
         monkeypatch.setattr(
-            "graph_engine.api.routes_trellix.run_full_analysis",
+            "graph_engine.api.jobs.run_full_analysis",
             _fake_pipeline,
         )
 
         # URL con encoding %253A%252F%252F → dopo un unquote diventa https://...
         res = await client.get(
-            "/trellix/analyze?url=https%253A%252F%252Fexample.com%252Flogin"
+            "/api/v1/analyze?url=https%253A%252F%252Fexample.com%252Flogin"
         )
         assert res.status_code == 200
         assert received_url == "https://example.com/login", (
@@ -343,12 +343,12 @@ class TestRoutesTrellix:
         )
 
     # ------------------------------------------------------------------
-    # URL in chiaro nella query string (il formato reale di Trellix)
+    # URL in chiaro nella query string (il formato reale del chiamante)
     # ------------------------------------------------------------------
 
     async def test_plain_url_passed_unchanged(self, app, client, tmp_path, monkeypatch):
         """URL in chiaro senza caratteri speciali → arriva identico alla
-        pipeline (formato Trellix: ?url=http://example.org)."""
+        pipeline (formato: ?url=http://example.org)."""
         db = str(tmp_path / "test.db")
 
         received_url = None
@@ -363,11 +363,11 @@ class TestRoutesTrellix:
             return str(t.id) if t else "done"
 
         monkeypatch.setattr(
-            "graph_engine.api.routes_trellix.run_full_analysis",
+            "graph_engine.api.jobs.run_full_analysis",
             _fake_pipeline,
         )
 
-        res = await client.get("/trellix/analyze?url=http://example.org")
+        res = await client.get("/api/v1/analyze?url=http://example.org")
         assert res.status_code == 200
         assert received_url == "http://example.org", (
             f"Expected 'http://example.org', got '{received_url}'"
@@ -394,13 +394,13 @@ class TestRoutesTrellix:
             return str(t.id) if t else "done"
 
         monkeypatch.setattr(
-            "graph_engine.api.routes_trellix.run_full_analysis",
+            "graph_engine.api.jobs.run_full_analysis",
             _fake_pipeline,
         )
 
         target = "https://evil.example/redirect?a=1&b=2"
         res = await client.get(
-            "/trellix/analyze?url=" + target,
+            "/api/v1/analyze?url=" + target,
         )
         assert res.status_code == 200
         assert received_url == target, (
@@ -409,17 +409,16 @@ class TestRoutesTrellix:
 
     async def test_missing_url_param_returns_422(self, app, client):
         """GET senza il parametro url → 422."""
-        res = await client.get("/trellix/analyze")
+        res = await client.get("/api/v1/analyze")
         assert res.status_code == 422
 
     async def test_pipeline_runs_with_full_defaults(
         self, app, client, tmp_path, monkeypatch,
     ):
-        """La route Trellix non comprime più la pipeline: nessun budget
-        fast, nessun timeout di pagina/settle/captcha ridotto — l'analisi
-        gira con i default PIENI del runner.  Regressione sulla vecchia
-        finestra dei 60s (il fast path è stato rimosso: la deadline è
-        gestita a monte da Front Door / Trellix)."""
+        """La route non comprime la pipeline: nessun budget fast, nessun
+        timeout di pagina/settle/captcha ridotto — l'analisi gira con i
+        default PIENI del runner (la deadline è gestita a monte dal
+        chiamante)."""
         db = str(tmp_path / "test.db")
 
         captured = {}
@@ -442,12 +441,12 @@ class TestRoutesTrellix:
             return str(t.id) if t else "done"
 
         monkeypatch.setattr(
-            "graph_engine.api.routes_trellix.run_full_analysis",
+            "graph_engine.api.jobs.run_full_analysis",
             _fake_pipeline,
         )
 
         res = await client.get(
-            "/trellix/analyze?url=https://full.example.com/login"
+            "/api/v1/analyze?url=https://full.example.com/login"
         )
         assert res.status_code == 200
         # La risposta porta il verdetto persistito dal mock
@@ -473,3 +472,141 @@ class TestRoutesTrellix:
                 f"Parametro fast '{key}' ancora passato alla pipeline: "
                 "la route deve usare i default pieni del runner"
             )
+
+
+def _persisting_pipeline(db: str, gate: asyncio.Event, calls: list,
+                         classification=Classification.benign):
+    """Pipeline finta: attende *gate*, poi persiste un verdetto."""
+
+    async def _pipeline(*args, **kwargs):
+        calls.append(kwargs.get("target"))
+        await gate.wait()
+        t = kwargs["target"]
+        t.status = TargetStatus.done
+        await save_target(
+            t, [], [], [],
+            Verdict(
+                target_id=t.id,
+                classification=classification,
+                confidence=0.9,
+                produced_by="foundry",
+            ),
+            db_path=db,
+        )
+        return str(t.id)
+
+    return _pipeline
+
+
+class TestInflightAndShield:
+    """Dedup delle analisi in corso e indipendenza dalla connessione."""
+
+    async def test_concurrent_requests_share_one_analysis(
+        self, app, client, tmp_path, monkeypatch,
+    ):
+        """Due richieste concorrenti per lo stesso URL → UNA sola
+        pipeline; entrambe ricevono il verdetto finale."""
+        db = str(tmp_path / "test.db")
+        gate = asyncio.Event()
+        calls: list = []
+        monkeypatch.setattr(
+            "graph_engine.api.jobs.run_full_analysis",
+            _persisting_pipeline(db, gate, calls),
+        )
+
+        url = "/api/v1/analyze?url=https://dup.example.com/x"
+        first = asyncio.create_task(client.get(url))
+        second = asyncio.create_task(client.get(url))
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if calls:
+                break
+        await asyncio.sleep(0.05)  # lascia arrivare anche la seconda
+        gate.set()
+        r1, r2 = await asyncio.gather(first, second)
+
+        assert len(calls) == 1, "la seconda richiesta ha avviato un'altra analisi"
+        for res in (r1, r2):
+            assert res.status_code == 200
+            assert res.json()["result"]["confidence"] == 0.9
+            assert "Analysis-Incomplete" not in res.json()["result"]["signature"]
+
+    async def test_analysis_survives_client_cancellation(
+        self, app, client, tmp_path, monkeypatch,
+    ):
+        """La richiesta viene cancellata (client disconnesso) → l'analisi
+        completa comunque e la chiamata successiva riceve il verdetto
+        dalla cache, senza una nuova pipeline."""
+        db = str(tmp_path / "test.db")
+        gate = asyncio.Event()
+        calls: list = []
+        monkeypatch.setattr(
+            "graph_engine.api.jobs.run_full_analysis",
+            _persisting_pipeline(db, gate, calls, Classification.phishing),
+        )
+
+        url = "/api/v1/analyze?url=https://gone.example.com/x"
+        request = asyncio.create_task(client.get(url))
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if calls:
+                break
+        request.cancel()
+        try:
+            await request
+        except asyncio.CancelledError:
+            pass
+
+        gate.set()
+        jobs = app.state.jobs
+        for _ in range(100):
+            if jobs.running_count == 0:
+                break
+            await asyncio.sleep(0.01)
+        assert jobs.running_count == 0
+
+        res = await client.get(url)
+        assert res.status_code == 200
+        assert res.json()["result"]["verdict"] == "malicious"
+        assert len(calls) == 1, "cache non usata dopo l'analisi in background"
+
+    async def test_response_reads_own_analysis_not_latest_row(
+        self, app, client, tmp_path, monkeypatch,
+    ):
+        """La risposta è letta per id dell'analisi avviata, non come
+        'ultima riga per url_hash': una riga più recente (es. un'altra
+        analisi running) non deve trasformarla in Analysis-Incomplete."""
+        db = str(tmp_path / "test.db")
+        from graph_engine.ingestion.pipeline import ingest
+
+        url_hash = ingest("https://race.example.com/x")["url_hash"]
+
+        async def _pipeline(*args, **kwargs):
+            t = kwargs["target"]
+            # Una riga più recente e ancora running per lo stesso URL
+            other = AnalysisTarget(
+                input_url="https://race.example.com/x",
+                canonical_url="https://race.example.com/x",
+                url_hash=url_hash,
+                status=TargetStatus.running,
+                created_at=datetime.now(timezone.utc) + timedelta(seconds=5),
+            )
+            await save_target(other, [], [], [], None, db_path=db)
+            t.status = TargetStatus.done
+            await save_target(
+                t, [], [], [],
+                Verdict(
+                    target_id=t.id,
+                    classification=Classification.phishing,
+                    confidence=0.95,
+                    produced_by="foundry",
+                ),
+                db_path=db,
+            )
+            return str(t.id)
+
+        monkeypatch.setattr("graph_engine.api.jobs.run_full_analysis", _pipeline)
+
+        res = await client.get("/api/v1/analyze?url=https://race.example.com/x")
+        assert res.status_code == 200
+        assert res.json()["result"]["verdict"] == "malicious"

@@ -6,11 +6,16 @@ import uuid
 
 import pytest
 
+from graph_engine.api.pipeline_runner import (
+    _run_classification as _REAL_RUN_CLASSIFICATION,
+)
 from graph_engine.models import (
     AnalysisTarget,
+    Classification,
     EvidenceScope,
     State,
     TargetStatus,
+    Verdict,
 )
 from graph_engine.storage.repository import get_target_by_id, save_target
 
@@ -325,7 +330,7 @@ class TestPipelineRunner:
             await asyncio.wait_for(release_l2.wait(), timeout=3.0)
             return {"evidence": [], "passive_risk_score": 0.0}
 
-        async def _handshake_l3(url, timeout_s=None):
+        async def _handshake_l3(url, timeout_s=None, profile_probe=None):
             l3_done.set()
             return {"evidence": [], "recommended_profile": {}}
 
@@ -358,7 +363,7 @@ class TestPipelineRunner:
     ):
         """Plumb fast L4: ``page_timeout_ms`` deve arrivare al costruttore
         di StateGraphExplorer e ``settle_max_wait_s`` a ``explorer.run()``
-        (parametri usati dal path Trellix)."""
+        (parametri usati dai chiamanti con budget personalizzato)."""
         from graph_engine.api.pipeline_runner import run_full_analysis
 
         _RecordingExplorer.init_kwargs = {}
@@ -380,3 +385,172 @@ class TestPipelineRunner:
 
         assert _RecordingExplorer.init_kwargs == {"page_timeout_ms": 15000}
         assert _RecordingExplorer.run_kwargs["settle_max_wait_s"] == 3.0
+
+
+class TestL4StartsAfterProfileProbe:
+    """L4 parte appena il profilo (differential fetch) è pronto: L2 e il
+    resto di L3 corrono IN PARALLELO all'esplorazione."""
+
+    async def test_l4_runs_while_l2_and_l3_are_still_running(
+        self, fake_pipeline, tmp_path, monkeypatch,
+    ):
+        """Handshake deterministico: L2 e L3 terminano SOLO dopo che L4
+        è partito.  Con l'orchestrazione sequenziale (L2/L3 prima di L4)
+        il test va in deadlock e scade il timeout."""
+        import asyncio
+
+        from graph_engine.api.pipeline_runner import run_full_analysis
+        from tests.graph_engine.test_api.conftest import FakeExplorer
+
+        l4_started = asyncio.Event()
+
+        class _SignallingExplorer(FakeExplorer):
+            async def run(self, *args, **kwargs):
+                l4_started.set()
+                return await super().run(*args, **kwargs)
+
+        async def _l2_waits_for_l4(url, timeout_s=None):
+            await l4_started.wait()
+            return {"evidence": [], "passive_risk_score": 0.0}
+
+        async def _l3_waits_for_l4(url, timeout_s=None, profile_probe=None):
+            await l4_started.wait()
+            return {"evidence": [], "recommended_profile": {}}
+
+        monkeypatch.setattr("graph_engine.explorer.StateGraphExplorer", _SignallingExplorer)
+        monkeypatch.setattr("graph_engine.osint.analyzer.analyze", _l2_waits_for_l4)
+        monkeypatch.setattr("graph_engine.active.analyzer.analyze", _l3_waits_for_l4)
+
+        db = str(tmp_path / "test.db")
+        target_id = await asyncio.wait_for(
+            run_full_analysis("https://example.com", db_path=db, classify=False),
+            timeout=5.0,
+        )
+        data = await get_target_by_id(target_id, db_path=db)
+        assert data["target"].status == TargetStatus.done
+
+    async def test_l4_receives_probe_profiles_and_l3_reuses_probe(
+        self, fake_pipeline, tmp_path, monkeypatch,
+    ):
+        """Il profilo e il ramo cloaking arrivano a L4 dalla sonda; L3
+        riceve lo STESSO task (nessun secondo differential fetch)."""
+        from graph_engine.api.pipeline_runner import run_full_analysis
+
+        probe_calls = []
+        seen_probe = []
+
+        async def _probe(url):
+            probe_calls.append(url)
+            return {
+                "diff_result": None,
+                "cloaking": None,
+                "recommended_profile": {"user_agent": "UA-probe"},
+                "cloaking_profile": {"user_agent": "UA-cloak"},
+            }
+
+        async def _l3(url, timeout_s=None, profile_probe=None):
+            seen_probe.append(profile_probe)
+            await profile_probe
+            return {"evidence": [], "recommended_profile": {}}
+
+        _RecordingExplorer.run_kwargs = {}
+        monkeypatch.setattr("graph_engine.explorer.StateGraphExplorer", _RecordingExplorer)
+        monkeypatch.setattr("graph_engine.active.analyzer.probe_profile", _probe)
+        monkeypatch.setattr("graph_engine.active.analyzer.analyze", _l3)
+
+        await run_full_analysis(
+            "https://example.com", db_path=str(tmp_path / "t.db"), classify=False,
+        )
+
+        assert len(probe_calls) == 1
+        assert seen_probe and seen_probe[0] is not None
+        assert _RecordingExplorer.run_kwargs["profile"] == {"user_agent": "UA-probe"}
+        assert _RecordingExplorer.run_kwargs["cloaking_profile"] == {"user_agent": "UA-cloak"}
+
+    async def test_l4_failure_cancels_pending_l2_l3(
+        self, fake_pipeline, tmp_path, monkeypatch,
+    ):
+        """Se L4 esplode, i task L2/L3 ancora in volo vengono cancellati
+        (nessun lavoro di rete orfano) e il target va in error."""
+        import asyncio
+
+        from graph_engine.api.pipeline_runner import run_full_analysis
+
+        cancelled = asyncio.Event()
+
+        async def _l2_hangs(url, timeout_s=None):
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return {"evidence": [], "passive_risk_score": 0.0}
+
+        class _ExplodingRun(_ExplodingImmediatelyExplorer):
+            pass
+
+        monkeypatch.setattr("graph_engine.osint.analyzer.analyze", _l2_hangs)
+        monkeypatch.setattr("graph_engine.explorer.StateGraphExplorer", _ExplodingRun)
+
+        db = str(tmp_path / "test.db")
+        with pytest.raises(RuntimeError):
+            await asyncio.wait_for(
+                run_full_analysis("https://example.com", db_path=db, classify=False),
+                timeout=5.0,
+            )
+        assert cancelled.is_set()
+
+
+class TestFormFieldsReachClassifier:
+    """L'inventario dei campi form raccolto da L4 arriva al bundle L5
+    (prima ogni stato arrivava con form_fields=[])."""
+
+    async def test_explorer_form_fields_forwarded(
+        self, fake_pipeline, tmp_path, monkeypatch,
+    ):
+        from graph_engine.api import pipeline_runner
+        from tests.graph_engine.test_api.conftest import FakeExplorer
+
+        fields = [{"tag": "input", "type": "password", "name_or_id": "pwd",
+                   "nearby_label_text": "Password"}]
+
+        class _FormExplorer(FakeExplorer):
+            async def run(self, *args, **kwargs):
+                target = await super().run(*args, **kwargs)
+                self.form_fields_by_state = {
+                    str(st.id): fields for st in self.states
+                }
+                return target
+
+        captured = {}
+
+        async def _capture_bundle(**kwargs):
+            captured.update(kwargs)
+            return {"states": [], "flags": {}, "evidence_summary": {}}
+
+        monkeypatch.setattr("graph_engine.explorer.StateGraphExplorer", _FormExplorer)
+        # La fixture sostituisce _run_classification: qui serve quella vera.
+        monkeypatch.setattr(
+            pipeline_runner, "_run_classification", _REAL_RUN_CLASSIFICATION,
+        )
+        monkeypatch.setattr(
+            "graph_engine.classifier.evidence_bundle.build_evidence_bundle",
+            _capture_bundle,
+        )
+        monkeypatch.setattr(
+            "graph_engine.classifier.prefilter.prefilter",
+            lambda bundle: Verdict(
+                target_id=bundle["target_id"],
+                classification=Classification.benign,
+                confidence=0.9,
+                produced_by="prefilter",
+            ),
+        )
+
+        await pipeline_runner.run_full_analysis(
+            "https://example.com", db_path=str(tmp_path / "t.db"), classify=True,
+        )
+
+        by_state = captured["form_fields_by_state"]
+        assert by_state, "nessuno stato nel bundle"
+        assert all(v == fields for v in by_state.values())

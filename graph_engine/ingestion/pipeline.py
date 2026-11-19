@@ -8,7 +8,7 @@ ready to populate an ``AnalysisTarget`` and its L0 ``Evidence`` records.
 from __future__ import annotations
 
 from graph_engine.ingestion.refang import refang
-from graph_engine.ingestion.unwrap import unwrap_url, UnwrapResult, UnwrapStep
+from graph_engine.ingestion.unwrap import unwrap_url, UnwrapResult
 from graph_engine.ingestion.payload_extraction import extract_nested_payloads
 from graph_engine.ingestion.canonicalize import canonicalize_and_hash
 

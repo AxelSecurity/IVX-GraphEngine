@@ -15,7 +15,7 @@ from typing import Optional
 import httpx
 
 from graph_engine.config import settings
-from graph_engine.osint.cache import TTL_URLHAUS, cache_get, cache_set
+from graph_engine.osint.cache import TTL_ERROR, TTL_URLHAUS, cache_get, cache_set
 from graph_engine.osint.reputation.base import ReputationProvider
 
 URLHAUS_API_URL = "https://urlhaus-api.abuse.ch/v1/url/"
@@ -39,15 +39,8 @@ class UrlhausProvider(ReputationProvider):
         url: str,
         client: httpx.AsyncClient,
         timeout_s: Optional[float] = None,
-        known_ips: Optional[list[str]] = None,
     ) -> dict:
-        """Interroga URLhaus per *url*. Se non configurato, skipped.
-
-        ``known_ips`` è accettato per uniformità col contratto di
-        ``ReputationProvider`` ma IGNORATO: l'API di URLhaus cerca
-        solo per URL.
-        """
-        del known_ips  # accettato per contratto, non usato
+        """Interroga URLhaus per *url*. Se non configurato, skipped."""
         if not _is_configured():
             return {
                 "provider": self._provider,
@@ -60,7 +53,12 @@ class UrlhausProvider(ReputationProvider):
             return cached
 
         result = await self._query(url, client, timeout_s)
-        cache_set("urlhaus", url, result)
+        cache_set(
+            "urlhaus", url, result,
+            ttl_seconds=(
+                TTL_ERROR if "error" in result.get("details", {}) else None
+            ),
+        )
         return result
 
     async def _query(

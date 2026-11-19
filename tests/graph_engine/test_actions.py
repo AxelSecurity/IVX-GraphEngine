@@ -304,16 +304,16 @@ class TestExplorerClickEnumeration:
         )
 
         assert target.status == TargetStatus.done
-        # evaluate is called exactly twice: for js_locations + clearing stash
-        # (both in _navigate_and_create_state), NOT for action scoring
-        action_evaluate_calls = [
-            c for c in page.evaluate.call_args_list
-            if "_SCORING_SCRIPT" not in str(c)
-        ]
-        # All evaluate calls should be from the navigation path, not scoring
+        # evaluate serve alla navigazione (js_locations) e all'inventario
+        # passivo dei campi form — MAI allo scoring delle azioni.
+        from graph_engine.actions import _SCORING_SCRIPT
+        from graph_engine.classifier.form_inventory import _SCAN_SCRIPT
+
+        scripts = [c.args[0] for c in page.evaluate.call_args_list if c.args]
+        assert _SCORING_SCRIPT not in scripts
         assert all(
-            "ge_js_locations" in str(c) or "ge_js_locations" in str(c)
-            for c in page.evaluate.call_args_list
+            "ge_js_locations" in script or script == _SCAN_SCRIPT
+            for script in scripts
         )
 
 

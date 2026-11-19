@@ -16,13 +16,14 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 from lxml import html as lxml_html
-from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright.async_api import Browser, BrowserContext, Page
 
 from graph_engine.actions import enumerate_actionable
 from graph_engine.budget import Budget
+from graph_engine.classifier.form_inventory import scan_form_fields
 from graph_engine.dom_hash import normalise_and_hash
 from graph_engine.gate_solver import detect_captcha, try_pass_gate
 from graph_engine.models import (
@@ -110,7 +111,7 @@ _SETTLE_QUIET_CYCLES = 2       # consecutive mature cycles with nothing
 # ---------------------------------------------------------------------------
 # Gate settle — fase 3 di try_pass_gate() (attesa post-click del checkbox)
 # ---------------------------------------------------------------------------
-# Ridotta nel fast path (captcha_wait_s <= 4, es. Trellix) per non bruciare
+# Ridotta nel fast path (captcha_wait_s <= 4) per non bruciare
 # budget sul secondo rilevamento; standard altrimenti.
 
 _GATE_SETTLE_FAST_S = 1.5
@@ -178,6 +179,9 @@ class StateGraphExplorer:
         self.states: list[State] = []
         self.transitions: list[Transition] = []
         self.evidence: list[Evidence] = []
+        # Campi form visibili per stato (str(state.id) → scan_form_fields):
+        # inventario PASSIVO (sola lettura, nessun fill/click) per L5.
+        self.form_fields_by_state: dict[str, list[dict]] = {}
 
         # Internal BFS state
         self._visited: set[str] = set()  # dom_hash set
@@ -387,7 +391,7 @@ class StateGraphExplorer:
                             # The DOM changed (gate iframe gone / replaced) —
                             # record a new State + Transition.
                             post_html = await page.content()
-                            post_hash = normalise_and_hash(post_html)
+                            post_hash = await asyncio.to_thread(normalise_and_hash, post_html)
                             post_url = page.url
 
                             if post_hash != state.dom_hash:
@@ -397,6 +401,7 @@ class StateGraphExplorer:
                                     dom_hash=post_hash,
                                     depth=state.depth + 1,
                                 )
+                                await self._scan_forms(gate_state, page)
                                 if self._capture_artifacts_flag:
                                     await self._save_artifacts(
                                         gate_state, page, post_html, []
@@ -902,7 +907,7 @@ class StateGraphExplorer:
 
             # Navigate — the guard marks our goto as safe.
             self._our_goto_active = True
-            response = await page.goto(url, wait_until="domcontentloaded")
+            await page.goto(url, wait_until="domcontentloaded")
             self._our_goto_active = False
 
             # Settle: adaptive poll (see _settle_navigation_poll).  A fixed
@@ -925,24 +930,12 @@ class StateGraphExplorer:
         if self._capture_artifacts_flag:
             network_entries = self._stop_network_capture(page)
 
-        # --- determine final URL and any HTTP-redirect chain ----------------
+        # --- final URL (after any HTTP redirect) ------------------------------
         final_url = page.url
-        redirect_chain: list[str] = []
-
-        if response is not None:
-            # Walk back through the request chain to detect 3xx redirects.
-            req = response.request
-            while req is not None:
-                redirected_from = req.redirected_from
-                if redirected_from is not None:
-                    redirect_chain.append(redirected_from.url)
-                    req = redirected_from
-                else:
-                    break
 
         # --- capture HTML and compute hash -----------------------------------
         html_str = await page.content()
-        dom_hash = normalise_and_hash(html_str)
+        dom_hash = await asyncio.to_thread(normalise_and_hash, html_str)
 
         state = State(
             target_id=self.target.id,  # type: ignore[union-attr]
@@ -950,6 +943,7 @@ class StateGraphExplorer:
             dom_hash=dom_hash,
             depth=depth,
         )
+        await self._scan_forms(state, page)
 
         # --- save artifacts --------------------------------------------------
         if self._capture_artifacts_flag:
@@ -1117,12 +1111,15 @@ class StateGraphExplorer:
         try:
             # Replay the full transition path to reach *from_state*'s DOM.
             # This correctly handles states reached via click where the URL
-            # never changed (SPA, multi-step forms).
-            await self._replay_to_state(new_page, from_state)
+            # never changed (SPA, multi-step forms).  If the replay fell
+            # back (the page is NOT on from_state's DOM), clicking here
+            # would attribute an unrelated page to from_state: skip.
+            if not await self._replay_to_state(new_page, from_state):
+                return None
 
             # Pre-click snapshot.
             pre_html = await new_page.content()
-            pre_hash = normalise_and_hash(pre_html)
+            pre_hash = await asyncio.to_thread(normalise_and_hash, pre_html)
             pre_url = new_page.url
 
             # Click.
@@ -1144,7 +1141,7 @@ class StateGraphExplorer:
             # Post-click snapshot.
             post_url = new_page.url
             post_html = await new_page.content()
-            post_hash = normalise_and_hash(post_html)
+            post_hash = await asyncio.to_thread(normalise_and_hash, post_html)
 
             # --- no observable change → discard branch -----------------------
             if post_url.rstrip("/") == pre_url.rstrip("/") and post_hash == pre_hash:
@@ -1162,6 +1159,7 @@ class StateGraphExplorer:
                 dom_hash=post_hash,
                 depth=from_state.depth + 1,
             )
+            await self._scan_forms(new_state, new_page)
 
             # Capture artifacts using the current page (no re-navigation).
             if self._capture_artifacts_flag:
@@ -1372,7 +1370,7 @@ class StateGraphExplorer:
         return {
             "log": {
                 "version": "1.2",
-                "creator": {"name": "IVX-GraphEngine", "version": "0.1.0"},
+                "creator": {"name": "GraphEngine", "version": "0.1.0"},
                 "pages": [{
                     "id": "page_1",
                     "title": page_url,
@@ -1381,6 +1379,19 @@ class StateGraphExplorer:
                 "entries": har_entries,
             }
         }
+
+    async def _scan_forms(self, state: State, page: Page) -> None:
+        """Inventario passivo dei campi form di *state* (mai fill/click).
+
+        Best-effort: un errore lascia la lista vuota, non blocca il BFS.
+        """
+        try:
+            fields = await scan_form_fields(page)
+        except Exception:
+            fields = []
+        self.form_fields_by_state[str(state.id)] = (
+            fields if isinstance(fields, list) else []
+        )
 
     async def _save_artifacts(
         self,

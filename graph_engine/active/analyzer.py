@@ -3,12 +3,18 @@
 Coordina redirect_chain, favicon, jarm, differential_fetch IN PARALLELO.
 Un fallimento su un modulo non blocca mai gli altri
 (``asyncio.gather`` con ``return_exceptions=True``).
+
+``probe_profile`` espone da solo il differential fetch: è l'unico dato
+L3 di cui L4 ha bisogno (profilo browser + eventuale ramo cloaking), e
+la pipeline lo usa per far partire L4 senza aspettare JARM, favicon e
+redirect chain.  Il risultato si passa poi ad ``analyze`` per non
+ripetere le richieste.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -53,6 +59,56 @@ def _make_evidence(
     }
 
 
+def _default_profile() -> dict:
+    return {
+        "user_agent": PROFILES["desktop_chrome"]["user_agent"],
+        "headers": dict(PROFILES["desktop_chrome"].get("headers", {})),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Sonda profilo (differential fetch) — l'unico input di L4
+# ---------------------------------------------------------------------------
+
+
+async def probe_profile(canonical_url: str) -> dict:
+    """Esegue SOLO il differential fetch e ne ricava i profili per L4.
+
+    Non solleva mai: un fallimento diventa ``diff_result`` = eccezione
+    e i profili restano quelli di default.
+
+    Returns:
+        dict con chiavi ``diff_result`` (dict o eccezione),
+        ``cloaking`` (esito di ``detect_cloaking`` o ``None``),
+        ``recommended_profile`` e ``cloaking_profile`` (o ``None``).
+    """
+    if not urlparse(canonical_url).hostname:
+        return {
+            "diff_result": None,
+            "cloaking": None,
+            "recommended_profile": _default_profile(),
+            "cloaking_profile": None,
+        }
+    try:
+        diff_result: Any = await differential_fetch(canonical_url)
+    except Exception as exc:  # noqa: BLE001 — la sonda non deve mai rompere L3/L4
+        diff_result = exc
+
+    recommended_profile = _default_profile()
+    cloaking_profile = None
+    cloaking = None
+    if isinstance(diff_result, dict) and "results" in diff_result:
+        cloaking = detect_cloaking(diff_result["results"])
+        recommended_profile = recommend_profile(diff_result["results"], cloaking)
+        cloaking_profile = cloaking_probe_profile(diff_result["results"], cloaking)
+    return {
+        "diff_result": diff_result,
+        "cloaking": cloaking,
+        "recommended_profile": recommended_profile,
+        "cloaking_profile": cloaking_profile,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Orchestratore principale
 # ---------------------------------------------------------------------------
@@ -61,6 +117,7 @@ def _make_evidence(
 async def analyze(
     canonical_url: str,
     timeout_s: float | None = None,
+    profile_probe: Optional[Awaitable[dict]] = None,
 ) -> dict:
     """Esegue tutte le sonde L3 su *canonical_url* IN PARALLELO.
 
@@ -73,6 +130,10 @@ async def analyze(
                    HTTP condiviso (redirect_chain, favicon).  Se
                    ``None``, usa i default (10s per JARM, 30s per il
                    client).
+        profile_probe: Awaitable (tipicamente un Task) di
+                   ``probe_profile`` già avviato dal chiamante: il
+                   differential fetch NON viene ripetuto.  Se ``None``,
+                   viene eseguito qui.
 
     Returns:
         dict con chiavi:
@@ -90,17 +151,13 @@ async def analyze(
     if not hostname:
         return {
             "evidence": evidence,
-            "recommended_profile": {
-                "user_agent": PROFILES["desktop_chrome"]["user_agent"],
-                "headers": dict(PROFILES["desktop_chrome"].get("headers", {})),
-            },
+            "recommended_profile": _default_profile(),
             "cloaking_profile": None,
         }
 
-    # Il ceiling del client condiviso segue il timeout dell'analisi:
-    # nel fast path (timeout_s=5.0) redirect_chain e favicon sono
-    # cappate a 5s per richiesta invece dei 30s di default.
-    # differential_fetch usa un client proprio (15s per profilo).
+    # Il ceiling del client condiviso segue timeout_s se passato
+    # (redirect_chain, favicon), altrimenti 30s.  differential_fetch
+    # usa un client proprio (15s per profilo).
     async with httpx.AsyncClient(
         timeout=timeout_s if timeout_s is not None else _HTTPX_TIMEOUT
     ) as client:
@@ -112,12 +169,20 @@ async def analyze(
             if timeout_s is not None
             else compute_jarm(hostname)
         )
-        diff_task = differential_fetch(canonical_url)
+        probe_task = (
+            profile_probe
+            if profile_probe is not None
+            else probe_profile(canonical_url)
+        )
 
         results = await _gather_ignore_exceptions(
-            redirect_task, favicon_task, jarm_task, diff_task,
+            redirect_task, favicon_task, jarm_task, probe_task,
         )
-        redirect_result, favicon_result, jarm_result, diff_result = results
+        redirect_result, favicon_result, jarm_result, probe_result = results
+        if isinstance(probe_result, dict):
+            diff_result = probe_result.get("diff_result")
+        else:
+            diff_result = probe_result
 
         # ── Redirect chain ──────────────────────────────────────────────
         # trace_redirect_chain NON produce mai una chiave top-level
@@ -209,17 +274,19 @@ async def analyze(
             ))
 
         # ── Differential fetch ──────────────────────────────────────────
-        recommended_profile: dict = {
-            "user_agent": PROFILES["desktop_chrome"]["user_agent"],
-            "headers": dict(PROFILES["desktop_chrome"].get("headers", {})),
-        }
+        recommended_profile: dict = _default_profile()
         cloaking_profile = None
+        if isinstance(probe_result, dict):
+            recommended_profile = probe_result["recommended_profile"]
+            cloaking_profile = probe_result["cloaking_profile"]
 
         if isinstance(diff_result, dict) and "results" in diff_result:
             diff_results = diff_result["results"]
-            cloaking = detect_cloaking(diff_results)
-            recommended_profile = recommend_profile(diff_results, cloaking)
-            cloaking_profile = cloaking_probe_profile(diff_results, cloaking)
+            cloaking = (
+                probe_result.get("cloaking")
+                if isinstance(probe_result, dict)
+                else None
+            ) or detect_cloaking(diff_results)
 
             if cloaking.get("cloaking_detected"):
                 evidence.append(_make_evidence(

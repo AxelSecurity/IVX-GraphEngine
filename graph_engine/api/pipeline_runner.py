@@ -2,12 +2,13 @@
 
 Usabile in tre modi:
 
-1. **Standalone** (es. wrapper Trellix):
+1. **Standalone** (es. CLI o script):
    ``target_id = await run_full_analysis("https://example.com")``
 
 2. **Con target pre-creato** (usato dalla route POST /analyses per eliminare
    la race 202→GET 404):
-   ``target = AnalysisTarget(input_url=url); await save_target(target, ...); task = asyncio.create_task(run_full_analysis(url, target=target))``
+   ``target = AnalysisTarget(input_url=url); await save_target(target, ...)``
+   seguito da ``AnalysisJobs.start(url, target)`` (vedi ``graph_engine.api.jobs``)
 
 3. **Con budget personalizzato**:
    ``target_id = await run_full_analysis(url, budget=Budget(max_depth=3))``
@@ -42,7 +43,7 @@ from graph_engine.models import (
     Transition,
     Verdict,
 )
-from graph_engine.storage.repository import get_target_by_id, save_target
+from graph_engine.storage.repository import save_target
 from graph_engine.storage.schema import DEFAULT_DB_PATH
 
 logger = logging.getLogger("graph_engine.api")
@@ -77,11 +78,13 @@ async def _run_classification(
     evidence: list[Evidence],
     lexical_risk_score: Optional[float] = None,
     passive_risk_score: Optional[float] = None,
+    form_fields_by_state: Optional[dict[str, list[dict]]] = None,
 ) -> Optional[Verdict]:
     """Build evidence bundle, run prefilter + classifier, return Verdict.
 
-    Estratta da ``cli.py:_run_classification`` per essere riusabile sia
-    dalla CLI che dall'API.
+    Usata sia dalla CLI che dall'API.  ``form_fields_by_state`` è
+    l'inventario passivo dei campi raccolto dall'explorer durante L4
+    (``StateGraphExplorer.form_fields_by_state``).
     """
     from graph_engine.classifier.evidence_bundle import build_evidence_bundle
     from graph_engine.classifier.prefilter import prefilter
@@ -90,13 +93,14 @@ async def _run_classification(
     # foglie — una pagina di phishing con una transizione in uscita
     # (es. un link legittimo verso il sito ufficiale) deve restare nel
     # bundle per il classificatore.
-    form_fields_by_state: dict[str, list[dict]] = {}
+    collected_fields = form_fields_by_state or {}
+    form_fields_by_state = {}
     visible_text_by_state: dict[str, str] = {}
     titles_by_state: dict[str, str] = {}
 
     for s in states:
         sid = str(s.id)
-        form_fields_by_state[sid] = []
+        form_fields_by_state[sid] = list(collected_fields.get(sid, []))
         visible_text_by_state[sid] = ""
         titles_by_state[sid] = ""
 
@@ -289,6 +293,9 @@ async def run_full_analysis(
     # resta raggiungibile nel ramo except anche se l'esplorazione esplode
     # a metà, così gli stati parziali sopravvivono.
     explorer_holder: list = []
+    # Task di rete L2/L3 che corrono IN PARALLELO a L4: vanno cancellati
+    # se la pipeline fallisce prima di raccoglierli.
+    background: list[asyncio.Task] = []
 
     try:
         # ── L0 ingestion (sync, puro — refang/unwrap/canonicalize) ────────
@@ -304,17 +311,34 @@ async def run_full_analysis(
             ingested["nested_payloads"],
         )
 
-        # ── L2 passive OSINT ∥ L3 active low-interaction (async, rete) ───
-        # Nessuno scambio dati tra i due strati → corrono in PARALLELO
-        # (gather, non sequenziali): il tempo L2+L3 si dimezza rispetto
-        # all'esecuzione sequenziale.
+        # ── L2 ∥ L3 ∥ L4 ─────────────────────────────────────────────────
+        # L4 ha bisogno di UN solo dato L3: il profilo browser ricavato
+        # dal differential fetch (+ l'eventuale ramo cloaking).  Tutto il
+        # resto di L2 (DNS, ctlogs, RDAP, reputation) e di L3 (redirect
+        # chain, favicon, JARM) serve solo a L5.  Quindi:
+        #   1. differential fetch, L2 e L3 partono insieme;
+        #   2. L4 parte appena il profilo è pronto — senza aspettare
+        #      JARM o un RDAP lento;
+        #   3. L2/L3 vengono raccolti DOPO L4, prima di L5.
+        # L3 riceve il task del profilo e non ripete il differential fetch.
+        from graph_engine.active import analyzer as l3_module
         from graph_engine.osint.analyzer import analyze as l2_analyze
-        from graph_engine.active.analyzer import analyze as l3_analyze
 
-        l2_result, l3_result = await asyncio.gather(
-            l2_analyze(ingested["canonical_url"], timeout_s=l2_timeout_s),
-            l3_analyze(ingested["canonical_url"], timeout_s=l3_timeout_s),
+        canonical_url = ingested["canonical_url"]
+        probe_task = asyncio.ensure_future(l3_module.probe_profile(canonical_url))
+        l2_task = asyncio.ensure_future(
+            l2_analyze(canonical_url, timeout_s=l2_timeout_s)
         )
+        l3_task = asyncio.ensure_future(
+            l3_module.analyze(
+                canonical_url,
+                timeout_s=l3_timeout_s,
+                profile_probe=probe_task,
+            )
+        )
+        background.extend([probe_task, l2_task, l3_task])
+
+        probe = await probe_task
 
         budget_obj = budget or Budget()
 
@@ -334,9 +358,9 @@ async def run_full_analysis(
             captcha_wait_s=captcha_wait_s,
             settle_max_wait_s=settle_max_wait_s,
             page_timeout_ms=page_timeout_ms,
-            profile=l3_result["recommended_profile"],
+            profile=probe["recommended_profile"],
             target_id=analysis_target.id,
-            cloaking_profile=l3_result.get("cloaking_profile"),
+            cloaking_profile=probe.get("cloaking_profile"),
         )
         shared_browser = (
             await browser_pool.acquire() if browser_pool is not None else None
@@ -352,6 +376,9 @@ async def run_full_analysis(
         states = explorer.states
         transitions = explorer.transitions
         evidence = explorer.evidence
+
+        # ── Raccolta L2/L3 (hanno girato in parallelo a L4) ───────────────
+        l2_result, l3_result = await asyncio.gather(l2_task, l3_task)
 
         # ── Patch L0 fields sull'AnalysisTarget ─────────────────────────
         analysis_target.input_url = ingested["input_url"]
@@ -415,6 +442,9 @@ async def run_full_analysis(
                 analysis_target, states, transitions, evidence,
                 lexical_risk_score=l1_result["lexical_risk_score"],
                 passive_risk_score=l2_result["passive_risk_score"],
+                form_fields_by_state=getattr(
+                    explorer, "form_fields_by_state", None
+                ),
             )
 
         # ── Final save ────────────────────────────────────────────────────
@@ -430,6 +460,14 @@ async def run_full_analysis(
 
     except Exception as exc:
         logger.exception("Pipeline failed for %s", analysis_target.id)
+
+        # I task L2/L3 ancora in volo non servono più: niente lavoro di
+        # rete orfano né "Task exception was never retrieved".
+        for task in background:
+            if not task.done():
+                task.cancel()
+        if background:
+            await asyncio.gather(*background, return_exceptions=True)
 
         # Ora che target_id viene iniettato in explorer.run(), tutti i
         # record figli (states, transitions, evidence) nascono già con
@@ -481,3 +519,10 @@ async def run_full_analysis(
                 "Failed to persist error status for %s", analysis_target.id,
             )
         raise
+
+    finally:
+        # Cancellazione dall'esterno (es. shutdown): nessun task L2/L3
+        # deve sopravvivere alla pipeline che lo ha avviato.
+        for task in background:
+            if not task.done():
+                task.cancel()

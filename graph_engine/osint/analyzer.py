@@ -1,16 +1,14 @@
 """Orchestratore L2 — analisi passiva / OSINT.
 
-Sequenza: DNS PRIMA (gli IP risolti alimentano i reputation
-provider, es. MISP cerca anche per ``ip-dst``), poi ctlogs.dev,
-RDAP e tutti i provider di reputazione abilitati IN PARALLELO.  Un
-fallimento su una fonte non blocca mai le altre (``asyncio.gather``
-con ``return_exceptions=True``).
+DNS, ctlogs.dev, RDAP e tutti i provider di reputazione abilitati
+partono IN PARALLELO.  Un fallimento su una fonte non blocca mai le
+altre (``asyncio.gather`` con ``return_exceptions=True``).
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -38,12 +36,6 @@ _W_FRESH_CERT = 0.15           # cert più recente emesso da < 30 giorni nel
                                # fallback ctlogs senza SAN (infrastruttura
                                # appena messa in piedi — indizio debole)
 _W_REPUTATION_HIT = 0.50       # URL presente in un feed di minacce (peso alto)
-_W_MISP_IDS_HIT = 0.55         # hit MISP con to_ids=true — feed curato
-                               # manualmente dagli analisti, vale
-                               # leggermente più di un feed automatizzato
-_W_OPENCTI_ACTIVE_HIT = 0.55   # IOC attivo su OpenCTI (non revoked, non
-                               # scaduto) — stessa decisione deterministica
-                               # del MISP to_ids: segnale malevolo verificato
 
 # Soglie età dominio
 _AGE_YOUNG_DAYS = 30     # sotto questa soglia → young (molto sospetto)
@@ -86,21 +78,16 @@ async def analyze(
 ) -> dict:
     """Esegue tutte le query OSINT L2 su *canonical_url*.
 
-    La risoluzione DNS avviene PRIMA; ctlogs.dev, RDAP e i reputation
-    provider partono POI in parallelo.  La sequenza non è più
-    interamente parallela perché gli IP risolti alimentano i provider
-    (MISP cerca anche per ``ip-dst``): senza di essi una query MISP
-    coprirebbe solo URL/dominio e perderebbe i match per IP.  Il costo
-    è un round-trip DNS sul cammino critico; il guadagno è il valore
-    informativo della query MISP.  Se una fonte fallisce, le altre
-    continuano — ``return_exceptions=True`` su ``asyncio.gather``.
+    DNS, ctlogs.dev, RDAP e i reputation provider partono tutti in
+    parallelo.  Se una fonte fallisce, le altre continuano —
+    ``return_exceptions=True`` su ``asyncio.gather``.
 
     Args:
         canonical_url: URL normalizzato (output di L0 canonicalize).
         timeout_s: Timeout HTTP in secondi per ctlogs.dev, RDAP, DNS e
-                   i reputation provider (MISP/OpenCTI/URLhaus).  Se
-                   ``None``, ogni fonte usa il proprio default
-                   (15s, 15s, 5s, 15s, 15s, 10s rispettivamente).
+                   i reputation provider (URLhaus).  Se ``None``, ogni
+                   fonte usa il proprio default (15s, 15s, 5s, 10s
+                   rispettivamente).
 
     Returns:
         dict con chiavi:
@@ -115,59 +102,33 @@ async def analyze(
 
     evidence: list[dict] = []
 
-    # Client HTTP condiviso: il ceiling segue timeout_s, così nel fast
-    # path (timeout_s=5.0) ogni richiesta è cappata a 5s invece dei 30s
-    # di default (i provider hanno anche il proprio timeout
+    # Client HTTP condiviso: il ceiling segue timeout_s se passato,
+    # altrimenti 30s (i provider hanno anche il proprio timeout
     # per-chiamata, ugualmente parametrizzato).
     async with httpx.AsyncClient(
         timeout=timeout_s if timeout_s is not None else _HTTPX_TIMEOUT
     ) as client:
         providers = get_enabled_providers()
 
-        # ── DNS PRIMA — poi il resto in parallelo ────────────────────────
-        # Questa parte NON è più interamente parallela, per scelta:
-        # gli IP risolti devono raggiungere i reputation provider
-        # (MISP include gli ``ip-dst`` nella query restSearch).  Una
-        # query MISP senza IP coprirebbe solo URL/hostname/dominio e
-        # perderebbe i match su infrastruttura condivisa.  Il costo è
-        # un round-trip DNS sul cammino critico (cache 1h mitiga).
+        # ── DNS + ctlogs.dev + RDAP + reputation provider IN PARALLELO ──
         # resolve_dns non rilancia MAI: gli errori diventano ``error``
         # popolato (vedi dns_resolve.py).
-        dns_result = await resolve_dns(hostname, timeout=timeout_s)
-
-        known_ips: list[str] = []
-        if isinstance(dns_result, dict) and not dns_result.get("error"):
-            raw_ips = (
-                dns_result.get("a_records", [])
-                + dns_result.get("aaaa_records", [])
-            )
-            # Solo gli indirizzi validi: stringhe non vuote (i resolver
-            # possono sporcare le liste con None o stringhe bianche).
-            known_ips = [
-                ip for ip in raw_ips
-                if isinstance(ip, str) and ip.strip()
-            ]
-
-        # ── ctlogs.dev + RDAP + reputation provider IN PARALLELO ────────
+        dns_task = resolve_dns(hostname, timeout=timeout_s)
         ctlogs_task = query_ctlogs(hostname, client, timeout=timeout_s)
         rdap_task = query_rdap(hostname, client, timeout=timeout_s)
         rep_tasks = [
-            p.check(
-                canonical_url,
-                client,
-                timeout_s=timeout_s,
-                known_ips=known_ips,
-            )
+            p.check(canonical_url, client, timeout_s=timeout_s)
             for p in providers
         ]
 
         results = await _gather_ignore_exceptions(
-            ctlogs_task, rdap_task, *rep_tasks
+            dns_task, ctlogs_task, rdap_task, *rep_tasks
         )
 
-        ctlogs_result = results[0]
-        rdap_result = results[1]
-        rep_results = results[2:]
+        dns_result = results[0]
+        ctlogs_result = results[1]
+        rdap_result = results[2]
+        rep_results = results[3:]
 
         # ── ctlogs.dev: domini fratelli / cronologia certificati ───────
         if not isinstance(ctlogs_result, dict) or "error" in ctlogs_result:
@@ -328,33 +289,10 @@ async def analyze(
                 # Provider disabilitato — nessuna evidenza, è volontario
                 pass
             elif rep_result.get("listed"):
-                details = rep_result["details"]
-                # Gli hit "verificati" valgono più di un feed
-                # automatizzato (URLhaus): MISP to_ids=true (feed curato
-                # manualmente per gli IDS) e IOC attivo su OpenCTI
-                # (non revoked, non scaduto) decidono malevolo anche
-                # nel prefilter.
-                weight = (
-                    _W_MISP_IDS_HIT
-                    if details.get("to_ids_match")
-                    else _W_OPENCTI_ACTIVE_HIT
-                    if details.get("active_ioc_match")
-                    else _W_REPUTATION_HIT
-                )
                 evidence.append(_make_evidence(
                     key="reputation_hit",
-                    value=details,
-                    weight=weight,
-                ))
-            elif rep_result.get("details", {}).get("context_only"):
-                # Match informativo: MISP con SOLO to_ids=false, oppure
-                # osservabile OpenCTI senza Indicator attivo.  Mai
-                # penalizzare per segnale debole → weight 0.0, ma
-                # l'evidenza resta visibile per il classificatore.
-                evidence.append(_make_evidence(
-                    key=f"{provider_name}_context_match",
                     value=rep_result["details"],
-                    weight=0.0,
+                    weight=_W_REPUTATION_HIT,
                 ))
             # else: listed=False, nessun segnale → no evidence (principio:
             # l'assenza di segnale non è un segnale)

@@ -13,12 +13,12 @@ import argparse
 import asyncio
 import json
 import logging
-import re
 import sys
 from typing import Optional
 
 from playwright.async_api import async_playwright
 
+from graph_engine.api.pipeline_runner import _run_classification
 from graph_engine.budget import Budget
 from graph_engine.explorer import StateGraphExplorer
 from graph_engine.models import AnalysisTarget, Evidence, EvidenceScope, State, Transition, Verdict
@@ -42,105 +42,6 @@ def _serialise(target: AnalysisTarget, states: list[State],
     if verdict is not None:
         payload["verdict"] = verdict.model_dump(mode="json")
     return json.dumps(payload, indent=2, ensure_ascii=False)
-
-
-# ---------------------------------------------------------------------------
-# L5 classification helpers (only imported / used when --classify is set)
-# ---------------------------------------------------------------------------
-
-
-def _extract_visible_text(html: str) -> str:
-    """Strip scripts, styles, tags, and extra whitespace; truncate to ~1500 chars."""
-    # Remove <script>, <style>, <noscript> blocks entirely
-    text = re.sub(r'<(script|style|noscript)\b[^>]*>.*?</\1>', '', html,
-                  flags=re.DOTALL | re.IGNORECASE)
-    # Remove remaining HTML tags
-    text = re.sub(r'<[^>]+>', ' ', text)
-    # Decode common entities
-    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-    text = text.replace('&quot;', '"').replace('&#x27;', "'").replace('&nbsp;', ' ')
-    # Collapse whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text[:1500]
-
-
-async def _run_classification(
-    target: AnalysisTarget,
-    states: list[State],
-    transitions: list[Transition],
-    evidence: list[Evidence],
-    lexical_risk_score: Optional[float] = None,
-    passive_risk_score: Optional[float] = None,
-) -> Optional[Verdict]:
-    """Build evidence bundle, run prefilter + classifier, return Verdict."""
-    import os
-
-    from graph_engine.classifier.evidence_bundle import build_evidence_bundle
-    from graph_engine.classifier.prefilter import prefilter
-
-    # ---- per-state content extraction (EVERY graph state) -----------------
-    # Non estraiamo più solo le foglie: ogni stato del grafo finisce nel
-    # bundle, altrimenti una pagina di phishing con una transizione in
-    # uscita (es. un link legittimo "Serve aiuto?") sparirebbe dal
-    # prompt del classificatore.
-    form_fields_by_state: dict[str, list[dict]] = {}
-    visible_text_by_state: dict[str, str] = {}
-    titles_by_state: dict[str, str] = {}
-
-    # For the CLI we read DOM snapshots from disk when available;
-    # otherwise we leave fields/text empty (still useful with URLs + titles).
-    for s in states:
-        sid = str(s.id)
-        form_fields_by_state[sid] = []
-        visible_text_by_state[sid] = ""
-        titles_by_state[sid] = ""
-
-        # Try to read DOM snapshot from disk
-        if s.har_ref:
-            dom_path = os.path.join(
-                os.path.dirname(s.har_ref), "dom.html"
-            )
-            if os.path.isfile(dom_path):
-                try:
-                    with open(dom_path, encoding="utf-8") as fh:
-                        html = fh.read()
-                except Exception:
-                    html = ""
-                if html:
-                    # Extract title
-                    title_match = re.search(r'<title[^>]*>(.*?)</title>',
-                                            html, re.DOTALL | re.IGNORECASE)
-                    if title_match:
-                        titles_by_state[sid] = title_match.group(1).strip()
-                    visible_text_by_state[sid] = _extract_visible_text(html)
-
-    # ---- bundle -----------------------------------------------------------
-    bundle = await build_evidence_bundle(
-        target_url=target.input_url,
-        canonical_url=target.final_url,
-        states=states,
-        transitions=transitions,
-        evidence=evidence,
-        form_fields_by_state=form_fields_by_state,
-        visible_text_by_state=visible_text_by_state,
-        titles_by_state=titles_by_state,
-        lexical_risk_score=lexical_risk_score,
-        passive_risk_score=passive_risk_score,
-    )
-    # Inject target_id for the classifier
-    bundle["target_id"] = str(target.id)
-
-    # ---- prefilter → classifier -------------------------------------------
-    verdict = prefilter(bundle)
-    if verdict is not None:
-        return verdict
-
-    from graph_engine.classifier.foundry_classifier import classify
-
-    # Nota: il contenuto visivo raggiunge il modello come TESTO nel
-    # bundle (OCR + Brand Detection via Azure AI Vision) — nessuno
-    # screenshot viene allegato alla chiamata Foundry.
-    return await classify(bundle)
 
 
 # ---------------------------------------------------------------------------
@@ -198,8 +99,6 @@ async def _main(args: argparse.Namespace) -> None:
             target.url_hash = ingested["url_hash"]
 
             # ── Register L0 Evidence ─────────────────────────────────────
-            import uuid as _uuid  # alias to avoid collision with the stdlib
-
             tid = target.id
             for i, step in enumerate(ingested["unwrap_chain"]):
                 explorer.evidence.append(Evidence(
@@ -275,6 +174,9 @@ async def _main(args: argparse.Namespace) -> None:
                     explorer.evidence,
                     lexical_risk_score=l1_result["lexical_risk_score"],
                     passive_risk_score=l2_result["passive_risk_score"],
+                    form_fields_by_state=getattr(
+                        explorer, "form_fields_by_state", None
+                    ),
                 )
                 if verdict:
                     logging.info(
@@ -332,7 +234,7 @@ async def _print_history(history_input: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="IVX GraphEngine — BFS state-graph explorer",
+        description="GraphEngine — BFS state-graph explorer",
     )
     parser.add_argument(
         "url",

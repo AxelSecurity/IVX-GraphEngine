@@ -57,7 +57,7 @@ class TestSameLogicalUrlProducesSameHash:
     def test_empty_path_normalized_to_slash(self):
         """https://example.org e https://example.org/ → stesso hash
         (RFC 3986 §6.2.3 — il path vuoto è equivalente a "/").
-        Regressione del collaudo Trellix (2026-08-27): la cache 24h
+        Regressione del collaudo (2026-08-27): la cache 24h
         non riconosceva le due scritture come la stessa analisi e
         rilanciare una seconda esplorazione completa."""
         c1, h1 = canonicalize_and_hash("https://example.org")

@@ -595,3 +595,40 @@ class TestRealExplorer:
                 assert len(explorer.states) >= 1
             finally:
                 await browser.close()
+
+
+class TestClickSkippedWhenReplayFails:
+    """Se il replay verso lo stato di partenza fallisce, il click NON va
+    eseguito: la pagina non mostra il DOM di from_state e il nuovo stato
+    verrebbe attribuito al genitore sbagliato."""
+
+    async def test_no_click_after_failed_replay(self, monkeypatch):
+        import uuid
+        from unittest.mock import AsyncMock, MagicMock
+
+        from graph_engine.explorer import StateGraphExplorer
+        from graph_engine.models import AnalysisTarget, State
+
+        explorer = StateGraphExplorer(MagicMock())
+        explorer.target = AnalysisTarget(input_url="https://e.example")
+        from_state = State(
+            target_id=explorer.target.id, url="https://e.example/a",
+            dom_hash="h", depth=1,
+        )
+        page = MagicMock()
+        page.click = AsyncMock()
+        page.close = AsyncMock()
+        page.content = AsyncMock(return_value="<html></html>")
+        context = MagicMock()
+        context.new_page = AsyncMock(return_value=page)
+
+        monkeypatch.setattr(
+            explorer, "_replay_to_state", AsyncMock(return_value=False),
+        )
+
+        result = await explorer._execute_click_action(
+            context, from_state, {"selector": "#go", "text": "Go"},
+        )
+
+        assert result is None
+        page.click.assert_not_called()

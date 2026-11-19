@@ -9,7 +9,6 @@ the list sorted by combined score descending.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 from playwright.async_api import Page
 

@@ -2,7 +2,7 @@
 
 URLhaus richiede ora una Auth-Key gratuita (header ``Auth-Key``):
 senza ``URLHAUS_API_KEY`` il provider è disabilitato (skip pulito,
-zero chiamate HTTP), come MISP/OpenCTI.
+zero chiamate HTTP).
 """
 
 from __future__ import annotations
@@ -200,8 +200,7 @@ class TestUrlhausNotConfigured:
 
     async def test_no_network_when_disabled(self, monkeypatch):
         """Blocco rete esplicito: se il provider tentasse comunque una
-        richiesta httpx, il mock solleverebbe e il test fallirebbe
-        (stesso pattern di test_reputation_misp_opencti_disabled.py)."""
+        richiesta httpx, il mock solleverebbe e il test fallirebbe."""
         monkeypatch.setattr(settings, "urlhaus_api_key", None)
 
         mock_client = MagicMock()

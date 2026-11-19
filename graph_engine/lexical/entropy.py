@@ -7,7 +7,6 @@ generato algoritmicamente (tipico di malware / botnet).
 from __future__ import annotations
 
 import math
-import re
 
 # ---------------------------------------------------------------------------
 # Shannon entropy

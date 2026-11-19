@@ -5,7 +5,7 @@ reale) e una pipeline completamente mockata (nessun browser Playwright,
 nessuna rete).
 
 Il middleware di sessione protegge TUTTE le route (tranne health,
-auth/login|logout, trellix e la dashboard statica): la fixture ``client``
+auth/login|logout, /api/v1 e la dashboard statica): la fixture ``client``
 è quindi già autenticata — bootstrap dell'admin + cookie di sessione.
 Per i test che verificano il comportamento anonimo c'è ``anon_client``.
 """
@@ -168,6 +168,7 @@ class ExplodingAfterExplorer(PartialExplodingExplorer):
 async def _fake_classification(
     target, states, transitions, evidence,
     lexical_risk_score=None, passive_risk_score=None,
+    form_fields_by_state=None,
 ) -> Verdict:
     """Classificazione finta — restituisce sempre suspicious con conf 0.5."""
     return Verdict(
@@ -271,8 +272,18 @@ def fake_pipeline(monkeypatch):
     async def _fake_l2(url, timeout_s=None):
         return {"evidence": [], "passive_risk_score": 0.0}
 
-    async def _fake_l3(url, timeout_s=None):
+    async def _fake_l3(url, timeout_s=None, profile_probe=None):
+        if profile_probe is not None:
+            await profile_probe
         return {"evidence": [], "recommended_profile": {}}
+
+    async def _fake_probe(url):
+        return {
+            "diff_result": None,
+            "cloaking": None,
+            "recommended_profile": {},
+            "cloaking_profile": None,
+        }
 
     monkeypatch.setattr(
         "graph_engine.osint.analyzer.analyze",
@@ -281,6 +292,10 @@ def fake_pipeline(monkeypatch):
     monkeypatch.setattr(
         "graph_engine.active.analyzer.analyze",
         _fake_l3,
+    )
+    monkeypatch.setattr(
+        "graph_engine.active.analyzer.probe_profile",
+        _fake_probe,
     )
     monkeypatch.setattr(
         "graph_engine.api.pipeline_runner._run_classification",

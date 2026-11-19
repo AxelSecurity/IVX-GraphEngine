@@ -7,8 +7,7 @@ e server header. Non solleva mai eccezioni verso il chiamante.
 
 from __future__ import annotations
 
-from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import httpx
 
@@ -52,7 +51,6 @@ async def trace_redirect_chain(
     hops: list[dict] = []
     current_url = url
     redirect_count = 0
-    truncated = False
 
     for _ in range(max_hops):
         hop: dict = {
@@ -136,7 +134,6 @@ async def trace_redirect_chain(
             }
 
     # Abbiamo raggiunto max_hops — l'ultimo hop potrebbe essere ancora un redirect
-    truncated = True
     return {
         "hops": hops,
         "final_url": current_url,

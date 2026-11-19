@@ -1,7 +1,7 @@
 "use strict";
 
 /**
- * IVX GraphEngine — Dashboard
+ * GraphEngine — Dashboard
  *
  * Nessun framework, nessuna build: HTML/CSS/JS puri che consumano l'API
  * REST già esposta da graph_engine.api (stesso container Docker del tool).
@@ -863,7 +863,7 @@ async function renderLists() {
     <div class="page-head">
       <div>
         <div class="page-title">Whitelist / Blacklist</div>
-        <div class="page-hint">Forza la reputazione di un dominio o di una URL: l'analisi viene bypassata e Trellix riceve il verdetto forzato</div>
+        <div class="page-hint">Forza la reputazione di un dominio o di una URL: l'analisi viene bypassata e il servizio chiamante riceve il verdetto forzato</div>
       </div>
     </div>
     <button class="back-link" id="back-link">
@@ -1204,12 +1204,12 @@ async function renderDetail(id) {
   root.innerHTML = `<button class="back-link" id="back-link">← Torna alle sottomissioni</button><div class="loading-state">Caricamento analisi…</div>`;
   document.getElementById("back-link").addEventListener("click", () => navigate("#/"));
 
-  let graph, artifacts, trellix;
+  let graph, artifacts, extResp;
   try {
-    [graph, artifacts, trellix] = await Promise.all([
+    [graph, artifacts, extResp] = await Promise.all([
       fetchJSON(`/analyses/${id}/graph`),
       fetchJSON(`/analyses/${id}/artifacts`).catch(() => ({ files: [] })),
-      fetchJSON(`/analyses/${id}/trellix`).catch(() => null),
+      fetchJSON(`/analyses/${id}/verdict`).catch(() => null),
     ]);
   } catch (e) {
     root.querySelector(".loading-state").outerHTML =
@@ -1217,7 +1217,7 @@ async function renderDetail(id) {
     return;
   }
 
-  root.innerHTML = buildDetailHtml(id, graph, artifacts, trellix);
+  root.innerHTML = buildDetailHtml(id, graph, artifacts, extResp);
   wireDetail(id, graph);
 
   // Se l'analisi è ancora in corso, ricontrolla periodicamente
@@ -1229,8 +1229,8 @@ async function renderDetail(id) {
           clearInterval(detailPollTimer);
         }
         const freshArtifacts = await fetchJSON(`/analyses/${id}/artifacts`).catch(() => ({ files: [] }));
-        const freshTrellix = await fetchJSON(`/analyses/${id}/trellix`).catch(() => null);
-        root.innerHTML = buildDetailHtml(id, fresh, freshArtifacts, freshTrellix);
+        const freshVerdict = await fetchJSON(`/analyses/${id}/verdict`).catch(() => null);
+        root.innerHTML = buildDetailHtml(id, fresh, freshArtifacts, freshVerdict);
         wireDetail(id, fresh);
       } catch (_) {
         /* riprova al prossimo tick */
@@ -1239,7 +1239,7 @@ async function renderDetail(id) {
   }
 }
 
-function buildDetailHtml(id, graph, artifacts, trellix) {
+function buildDetailHtml(id, graph, artifacts, extResp) {
   const t = graph.target;
   const v = graph.verdict;
   const states = graph.states || [];
@@ -1280,15 +1280,15 @@ function buildDetailHtml(id, graph, artifacts, trellix) {
       ${v?.rationale ? `<div class="rationale"><b>Motivazione:</b> ${escapeHtml(v.rationale)}</div>` : ""}
     </div>
 
-    ${trellix ? `
+    ${extResp ? `
     <div class="section">
-      <div class="section-title">Risposta restituita a Trellix IVX</div>
-      <div class="card trellix-box">
-        <div class="trellix-head">
-          <span class="trellix-verdict trellix-${escapeHtml(trellix.result.verdict)}">${escapeHtml(trellix.result.verdict)}</span>
-          <button class="btn-copy" id="copy-trellix-btn" type="button">Copia JSON</button>
+      <div class="section-title">Risposta API esterna (/api/v1/analyze)</div>
+      <div class="card ext-box">
+        <div class="ext-head">
+          <span class="ext-verdict ${escapeHtml(extResp.result.verdict)}">${escapeHtml(extResp.result.verdict)}</span>
+          <button class="btn-copy" id="copy-verdict-btn" type="button">Copia JSON</button>
         </div>
-        <pre class="trellix-json" id="trellix-json">${escapeHtml(JSON.stringify(trellix, null, 2))}</pre>
+        <pre class="ext-json" id="verdict-json">${escapeHtml(JSON.stringify(extResp, null, 2))}</pre>
       </div>
     </div>` : ""}
 
@@ -1562,10 +1562,10 @@ function buildGraphSvg(states, transitions) {
 function wireDetail(targetId, graph) {
   document.getElementById("back-link")?.addEventListener("click", () => navigate("#/"));
 
-  const copyBtn = document.getElementById("copy-trellix-btn");
+  const copyBtn = document.getElementById("copy-verdict-btn");
   if (copyBtn) {
     copyBtn.addEventListener("click", async () => {
-      const pre = document.getElementById("trellix-json");
+      const pre = document.getElementById("verdict-json");
       if (!pre) return;
       const text = pre.textContent;
       let ok = false;

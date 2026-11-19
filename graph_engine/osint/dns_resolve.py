@@ -13,9 +13,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
-from typing import Optional
 
-from graph_engine.osint.cache import TTL_DNS, cache_get, cache_set
+from graph_engine.osint.cache import TTL_DNS, TTL_ERROR, cache_get, cache_set
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +114,7 @@ async def resolve_dns(
             "error": f"DNS resolution failed: {exc}",
             "unexpected": True,
         }
-        cache_set("dns", hostname, result)
+        cache_set("dns", hostname, result, ttl_seconds=TTL_ERROR)
         return result
 
     # ── Interpretazione risultato ──────────────────────────────────────
@@ -132,5 +131,10 @@ async def resolve_dns(
             "error": None,
         }
 
-    cache_set("dns", hostname, result)
+    # "Nessun record" include i timeout del resolver (_resolve li
+    # trasforma in lista vuota): esito potenzialmente transitorio.
+    cache_set(
+        "dns", hostname, result,
+        ttl_seconds=TTL_ERROR if result["error"] else None,
+    )
     return result

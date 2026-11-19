@@ -1,9 +1,9 @@
-"""Fixture condivise per i test del wrapper Trellix.
+"""Fixture condivise per i test dell'API esterna.
 
 Oltre all'app col db isolato, il conftest configura la API key di
-default: la route Trellix è OBBLIGATORIAMENTE protetta (503 senza
-chiave), quindi ogni test la trova impostata a ``test-key`` e il client
-la invia nell'header ``X-API-Key``.  I test di auth la sovrascrivono
+default: l'API esterna è OBBLIGATORIAMENTE protetta (503 senza chiave),
+quindi ogni test la trova impostata a ``test-key`` e il client la invia
+nell'header ``X-API-Key``.  I test di auth la sovrascrivono
 esplicitamente via monkeypatch per i casi 503/401.
 """
 
@@ -17,16 +17,15 @@ from graph_engine.config import settings
 
 
 @pytest.fixture(autouse=True)
-def _trellix_test_key(_isolate_config_from_environment, monkeypatch):
-    """API key di default per la route Trellix nei test.
+def _api_test_key(_isolate_config_from_environment, monkeypatch):
+    """API key di default per l'API esterna nei test.
 
     Dipende esplicitamente dall'isolamento della configurazione (root
     conftest) così l'ordine è garantito: prima i campi vengono azzerati,
     poi qui si imposta la chiave di test.  Il monkeypatch la ripristina
     a fine test.
     """
-    monkeypatch.setattr(settings, "trellix_api_key", "test-key")
-    monkeypatch.setattr(settings, "trellix_api_token", None)
+    monkeypatch.setattr(settings, "api_key", "test-key")
 
 
 @pytest.fixture
