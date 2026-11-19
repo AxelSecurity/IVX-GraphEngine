@@ -11,7 +11,6 @@ import re
 from pathlib import Path
 from typing import Optional
 
-import aiosqlite
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
@@ -53,6 +52,7 @@ from graph_engine.api.verdict_response import build_verdict_response
 from graph_engine.budget import Budget
 from graph_engine.models import AnalysisTarget, Classification, TargetStatus, Verdict
 from graph_engine.storage.repository import (
+    count_running,
     count_targets,
     delete_targets,
     get_history_for_url_hash,
@@ -60,7 +60,7 @@ from graph_engine.storage.repository import (
     list_targets,
     save_target,
 )
-from graph_engine.storage.schema import DEFAULT_DB_PATH, DDL, ensure_data_dir
+from graph_engine.storage.schema import DEFAULT_DB_PATH
 
 logger = logging.getLogger("graph_engine.api")
 
@@ -559,15 +559,7 @@ def build_router(
     @router.get("/health", response_model=HealthResponse)
     async def health():
         """Health check — conta i job in esecuzione."""
-        ensure_data_dir(db_path)
-        async with aiosqlite.connect(db_path) as conn:
-            await conn.executescript(DDL)
-            async with conn.execute(
-                "SELECT COUNT(*) FROM analysis_target WHERE status = 'running'"
-            ) as cur:
-                row = await cur.fetchone()
-
-        running = row[0] if row else 0
+        running = await count_running(db_path=db_path)
         return HealthResponse(status="ok", running_jobs=running)
 
     return router

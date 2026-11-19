@@ -27,6 +27,8 @@ from typing import Any, Optional
 from graph_engine.api.pipeline_runner import run_full_analysis
 from graph_engine.config import settings
 from graph_engine.models import AnalysisTarget
+from graph_engine.storage.repository import save_target
+from graph_engine.storage.schema import DEFAULT_DB_PATH
 
 logger = logging.getLogger("graph_engine.api.jobs")
 
@@ -64,15 +66,25 @@ class AnalysisJobs:
         target: AnalysisTarget,
         *,
         url_hash: Optional[str] = None,
+        save_queued: bool = False,
         **run_kwargs: Any,
     ) -> asyncio.Task:
         """Avvia la pipeline per *target* e restituisce il task.
 
+        Metodo SINCRONO: tra un ``inflight()`` che restituisce ``None`` e
+        la registrazione fatta qui non c'è alcun ``await``, quindi due
+        richieste concorrenti non possono avviare due analisi dello
+        stesso URL.
+
         Args:
             raw_url: URL da analizzare (input della pipeline).
-            target: Target già persistito come ``queued``.
+            target: Target dell'analisi.
             url_hash: Se passato, il task viene registrato per la dedup
                 (``inflight``) fino al suo completamento.
+            save_queued: Se True, il task persiste il target come
+                ``queued`` prima di attendere lo slot (il chiamante non
+                deve fare ``await`` prima di registrare il job).  Se
+                False, il chiamante lo ha già salvato.
             **run_kwargs: Inoltrati a ``run_full_analysis``.
         """
         if self._semaphore is None:
@@ -80,6 +92,11 @@ class AnalysisJobs:
         semaphore = self._semaphore
 
         async def _run() -> str:
+            if save_queued:
+                await save_target(
+                    target, [], [], [], None,
+                    db_path=run_kwargs.get("db_path", DEFAULT_DB_PATH),
+                )
             async with semaphore:
                 return await run_full_analysis(
                     raw_url, target=target, **run_kwargs

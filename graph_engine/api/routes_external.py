@@ -45,7 +45,6 @@ from graph_engine.models import AnalysisTarget
 from graph_engine.storage.repository import (
     get_latest_for_url_hash,
     get_target_by_id,
-    save_target,
 )
 from graph_engine.storage.schema import DEFAULT_DB_PATH
 
@@ -153,15 +152,17 @@ def build_external_router(
                 canonical_url=ingested["canonical_url"],
                 url_hash=url_hash,
             )
-            await save_target(target, [], [], [], None, db_path=db_path)
             target_id = str(target.id)
-            # Browser condiviso dal lifespan dell'app
-            # (app.state.browser_pool); senza lifespan (test) il getattr
-            # dà None e la pipeline usa un browser effimero.
+            # Nessun await tra inflight() e start(): il target viene
+            # salvato "queued" DENTRO il task (save_queued), così la
+            # registrazione per la dedup è atomica.  Browser condiviso
+            # dal lifespan dell'app (app.state.browser_pool); senza
+            # lifespan (test) il getattr dà None → browser effimero.
             task = jobs.start(
                 target_url,
                 target,
                 url_hash=url_hash,
+                save_queued=True,
                 classify=True,
                 db_path=db_path,
                 browser_pool=getattr(request.app.state, "browser_pool", None),

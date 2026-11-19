@@ -1,15 +1,23 @@
 """Async repository — save and load full analysis graphs via aiosqlite.
 
 Every ``save_target()`` call is a single transaction.  The operation is
-**idempotent** on the target UUID: ``INSERT OR REPLACE`` ensures that
-re-saving the same target object does not create duplicate rows.
+**idempotent** on the target UUID: the target row is upserted and its
+graph (states, transitions, evidence, verdict) replaced, so re-saving
+the same target object never creates duplicate rows.
+
+Connections go through ``_connect``: foreign keys ON on every
+connection, WAL journal + ``synchronous=NORMAL`` (dashboard readers no
+longer block the pipeline writer), schema DDL executed once per
+database file per process instead of on every connection.
 """
 
 from __future__ import annotations
 
 import json
+import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import aiosqlite
 
@@ -25,6 +33,41 @@ from graph_engine.models import (
     Verdict,
 )
 from graph_engine.storage.schema import DDL, DEFAULT_DB_PATH, ensure_data_dir
+
+# ---------------------------------------------------------------------------
+# Connection helper
+# ---------------------------------------------------------------------------
+
+# Database (path assoluto) su cui schema e WAL sono già stati applicati
+# in questo processo.
+_schema_ready: set[str] = set()
+
+
+@asynccontextmanager
+async def _connect(
+    db_path: str, *, rows: bool = False,
+) -> AsyncIterator[aiosqlite.Connection]:
+    """Apre una connessione configurata sul database *db_path*.
+
+    - ``foreign_keys`` è per-connessione in SQLite: sempre attivo;
+    - ``synchronous=NORMAL`` è sicuro in WAL e riduce gli fsync;
+    - WAL (persistente nel file) e DDL solo alla prima apertura del file
+      in questo processo — o se il file è stato rimosso nel frattempo.
+    """
+    ensure_data_dir(db_path)
+    key = os.path.abspath(db_path)
+    needs_schema = key not in _schema_ready or not os.path.exists(db_path)
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute("PRAGMA foreign_keys = ON")
+        await conn.execute("PRAGMA synchronous = NORMAL")
+        if needs_schema:
+            await conn.execute("PRAGMA journal_mode = WAL")
+            await conn.executescript(DDL)
+            _schema_ready.add(key)
+        if rows:
+            conn.row_factory = aiosqlite.Row
+        yield conn
+
 
 # ---------------------------------------------------------------------------
 # Helpers — model ↔ SQL row
@@ -208,53 +251,67 @@ async def save_target(
 ) -> None:
     """Persist an entire analysis graph inside a single transaction.
 
-    **Idempotent** on *target.id* — calling twice with the same target
-    UUID replaces rows via ``INSERT OR REPLACE``, it does not duplicate.
+    **Idempotent** on *target.id*: the target row is upserted (``ON
+    CONFLICT DO UPDATE`` — never ``INSERT OR REPLACE``, which with
+    ``ON DELETE CASCADE`` silently deletes and re-creates the whole
+    graph) and the graph rows of that target are replaced explicitly
+    with the ones passed in.  Calling twice never duplicates rows.
     """
-    ensure_data_dir(db_path)
-
-    async with aiosqlite.connect(db_path) as conn:
-        await conn.execute("PRAGMA foreign_keys = ON")
-        await conn.executescript(DDL)
-
+    async with _connect(db_path) as conn:
         await conn.execute("BEGIN")
         try:
             await conn.execute(
-                """INSERT OR REPLACE INTO analysis_target
+                """INSERT INTO analysis_target
                    (id, input_url, canonical_url, url_hash, final_url,
                     status, root_state_id, created_at)
                    VALUES (:id, :input_url, :canonical_url, :url_hash, :final_url,
-                           :status, :root_state_id, :created_at)""",
+                           :status, :root_state_id, :created_at)
+                   ON CONFLICT(id) DO UPDATE SET
+                       input_url = excluded.input_url,
+                       canonical_url = excluded.canonical_url,
+                       url_hash = excluded.url_hash,
+                       final_url = excluded.final_url,
+                       status = excluded.status,
+                       root_state_id = excluded.root_state_id,
+                       created_at = excluded.created_at""",
                 _target_row(target),
             )
 
-            for s in states:
+            # Il grafo salvato è SEMPRE quello passato: le righe figlie
+            # precedenti di questo target vengono sostituite.
+            target_id = str(target.id)
+            for table in ("evidence", "transition", "state", "verdict"):
                 await conn.execute(
+                    f"DELETE FROM {table} WHERE target_id = ?", (target_id,)
+                )
+
+            if states:
+                await conn.executemany(
                     """INSERT OR REPLACE INTO state
                        (id, target_id, url, dom_hash, depth,
                         screenshot_ref, har_ref)
                        VALUES (:id, :target_id, :url, :dom_hash, :depth,
                                :screenshot_ref, :har_ref)""",
-                    _state_row(s),
+                    [_state_row(st) for st in states],
                 )
 
-            for t in transitions:
-                await conn.execute(
+            if transitions:
+                await conn.executemany(
                     """INSERT OR REPLACE INTO transition
                        (id, target_id, from_state, to_state, kind, trigger, ts)
                        VALUES (:id, :target_id, :from_state, :to_state,
                                :kind, :trigger, :ts)""",
-                    _transition_row(t),
+                    [_transition_row(t) for t in transitions],
                 )
 
-            for e in evidence:
-                await conn.execute(
+            if evidence:
+                await conn.executemany(
                     """INSERT OR REPLACE INTO evidence
                        (id, target_id, scope, scope_id, layer, key, value,
                         weight, produced_by, ts)
                        VALUES (:id, :target_id, :scope, :scope_id, :layer,
                                :key, :value, :weight, :produced_by, :ts)""",
-                    _evidence_row(e),
+                    [_evidence_row(e) for e in evidence],
                 )
 
             if verdict is not None:
@@ -283,12 +340,7 @@ async def get_target_by_id(
     The returned dict has keys ``target``, ``states``, ``transitions``,
     ``evidence``, ``verdict`` — verdict is ``None`` if not present.
     """
-    ensure_data_dir(db_path)
-
-    async with aiosqlite.connect(db_path) as conn:
-        await conn.execute("PRAGMA foreign_keys = ON")
-        await conn.executescript(DDL)
-        conn.row_factory = aiosqlite.Row
+    async with _connect(db_path, rows=True) as conn:
 
         # Target
         async with conn.execute(
@@ -351,12 +403,7 @@ async def get_history_for_url_hash(
 
     Each entry is a compact summary — not the full graph.
     """
-    ensure_data_dir(db_path)
-
-    async with aiosqlite.connect(db_path) as conn:
-        await conn.execute("PRAGMA foreign_keys = ON")
-        await conn.executescript(DDL)
-        conn.row_factory = aiosqlite.Row
+    async with _connect(db_path, rows=True) as conn:
 
         async with conn.execute(
             """SELECT at.id, at.input_url, at.final_url, at.status,
@@ -396,8 +443,6 @@ async def list_targets(
     - ``search``: sottostringa case-insensitive su ``input_url`` o
       ``final_url``.
     """
-    ensure_data_dir(db_path)
-
     clauses: list[str] = []
     params: list = []
     if status is not None:
@@ -412,10 +457,7 @@ async def list_targets(
         params.extend([like, like])
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
-    async with aiosqlite.connect(db_path) as conn:
-        await conn.execute("PRAGMA foreign_keys = ON")
-        await conn.executescript(DDL)
-        conn.row_factory = aiosqlite.Row
+    async with _connect(db_path, rows=True) as conn:
 
         async with conn.execute(
             f"""SELECT at.id, at.input_url, at.final_url, at.status,
@@ -446,8 +488,6 @@ async def count_targets(
 
     Usato dalla dashboard per la paginazione (``total``).
     """
-    ensure_data_dir(db_path)
-
     clauses: list[str] = []
     params: list = []
     if status is not None:
@@ -462,9 +502,7 @@ async def count_targets(
         params.extend([like, like])
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
-    async with aiosqlite.connect(db_path) as conn:
-        await conn.execute("PRAGMA foreign_keys = ON")
-        await conn.executescript(DDL)
+    async with _connect(db_path) as conn:
 
         async with conn.execute(
             f"""SELECT COUNT(*) FROM analysis_target at
@@ -495,16 +533,12 @@ async def delete_targets(
     ``{"deleted_count": 0, "not_found": []}`` (il rifiuto esplicito
     della lista vuota è compito della route API).
     """
-    ensure_data_dir(db_path)
-
     # Dedup preservando l'ordine di richiesta
     requested = list(dict.fromkeys(str(i) for i in target_ids))
     if not requested:
         return {"deleted_count": 0, "not_found": []}
 
-    async with aiosqlite.connect(db_path) as conn:
-        await conn.execute("PRAGMA foreign_keys = ON")
-        await conn.executescript(DDL)
+    async with _connect(db_path) as conn:
 
         await conn.execute("BEGIN")
         try:
@@ -541,12 +575,7 @@ async def get_latest_for_url_hash(
 
     Same format as :func:`get_target_by_id`.
     """
-    ensure_data_dir(db_path)
-
-    async with aiosqlite.connect(db_path) as conn:
-        await conn.execute("PRAGMA foreign_keys = ON")
-        await conn.executescript(DDL)
-        conn.row_factory = aiosqlite.Row
+    async with _connect(db_path, rows=True) as conn:
 
         async with conn.execute(
             """SELECT id FROM analysis_target
@@ -563,3 +592,13 @@ async def get_latest_for_url_hash(
         target_id = row["id"]
 
     return await get_target_by_id(target_id, db_path=db_path)
+
+
+async def count_running(db_path: str = DEFAULT_DB_PATH) -> int:
+    """Numero di analisi con status ``running`` (health check)."""
+    async with _connect(db_path) as conn:
+        async with conn.execute(
+            "SELECT COUNT(*) FROM analysis_target WHERE status = 'running'"
+        ) as cur:
+            row = await cur.fetchone()
+    return row[0] if row else 0
