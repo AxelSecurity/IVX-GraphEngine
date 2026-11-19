@@ -161,10 +161,10 @@ async def _call_foundry_agent(prompt: str) -> str:
 
     The AgentsClient SDK is fully synchronous: ``create_and_process``
     blocks for the whole run duration.  Running it on the event loop
-    would freeze the entire API server (10-40s+ with a real agent) and
-    prevent the Trellix 48s response timeout from ever firing — the
-    frontdoor deadline would be missed silently.  ``asyncio.to_thread``
-    keeps the loop responsive while the agent runs.
+    would freeze the entire API server (10-40s+ with a real agent):
+    every other request — dashboard, polling, concurrent analyses —
+    would stall.  ``asyncio.to_thread`` keeps the loop responsive while
+    the agent runs.
 
     NO ``asyncio.wait_for`` around the thread: the Foundry run has no
     time cap by design (user decision — L5 must not be limited).  The

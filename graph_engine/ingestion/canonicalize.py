@@ -90,7 +90,7 @@ def canonicalize_and_hash(url: str) -> tuple[str, str]:
     # https://example.org vs https://example.org/).  Normalizzare PRIMA
     # dell'hash fa sì che la cache 24h e il dedup dei target trattino le
     # due scritture come la STESSA analisi (regressione del collaudo
-    # Trellix 2026-08-27).  Path NON vuoti non vengono toccati: /path e
+    # 2026-08-27).  Path NON vuoti non vengono toccati: /path e
     # /path/ possono essere risorse diverse.  Guard su hostname: URL non
     # gerarchici (es. mailto:) non hanno il concetto di path vuoto.
     if not path and hostname:

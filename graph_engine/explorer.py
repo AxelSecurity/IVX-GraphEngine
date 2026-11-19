@@ -110,7 +110,7 @@ _SETTLE_QUIET_CYCLES = 2       # consecutive mature cycles with nothing
 # ---------------------------------------------------------------------------
 # Gate settle — fase 3 di try_pass_gate() (attesa post-click del checkbox)
 # ---------------------------------------------------------------------------
-# Ridotta nel fast path (captcha_wait_s <= 4, es. Trellix) per non bruciare
+# Ridotta nel fast path (captcha_wait_s <= 4) per non bruciare
 # budget sul secondo rilevamento; standard altrimenti.
 
 _GATE_SETTLE_FAST_S = 1.5
@@ -1372,7 +1372,7 @@ class StateGraphExplorer:
         return {
             "log": {
                 "version": "1.2",
-                "creator": {"name": "IVX-GraphEngine", "version": "0.1.0"},
+                "creator": {"name": "GraphEngine", "version": "0.1.0"},
                 "pages": [{
                     "id": "page_1",
                     "title": page_url,

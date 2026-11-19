@@ -1,7 +1,7 @@
-"""Costruzione della risposta binaria Trellix (safe/malicious).
+"""Costruzione della risposta binaria dell'API esterna (safe/malicious).
 
 Mappa il Classification ternario interno (benign/suspicious/phishing)
-nel verdetto binario atteso da Trellix, e produce la firma testuale
+nel verdetto binario atteso dal servizio chiamante, e produce la firma testuale
 ("signature") e l'azione raccomandata ("recommended_action").
 
 Principio guida: **onestà**.  Se l'analisi non è completa, la risposta
@@ -22,7 +22,7 @@ from graph_engine.models import Classification
 # Mapping binario
 # ---------------------------------------------------------------------------
 
-# Trellix si aspetta solo "safe" o "malicious".
+# Il chiamante si aspetta solo "safe" o "malicious".
 # In dubbio (suspicious) → safe: meglio un falso negativo che bloccare
 # un sito legittimo.  La confidenza bassa e il rationale nel "reason"
 # rendono trasparente l'incertezza.
@@ -31,7 +31,7 @@ from graph_engine.models import Classification
 # ``_SUSPICIOUS_BLOCK_THRESHOLD`` (segnali deterministici FORTI e
 # misurati — es. cloaking rilevato + infrastruttura abuse-prone, o TLS
 # failure su hosting condiviso) vengono promossi a "malicious" in
-# ``build_trellix_response``: mandare safe/allow su un quasi certo
+# ``build_verdict_response``: mandare safe/allow su un quasi certo
 # phishing è più costoso del raro falso positivo su un caso misurato.
 VERDICT_MAP: dict = {
     Classification.benign: "safe",
@@ -102,7 +102,7 @@ def build_signature(
     *,
     mapped: str = "safe",
 ) -> str:
-    """Costruisce la firma testuale per il verdetto Trellix.
+    """Costruisce la firma testuale per il verdetto binario.
 
     Le firme specifiche (brand impersonation, gate bypass, credential
     harvesting) descrivono un ATTACCO: vengono cercate SOLO quando il
@@ -185,14 +185,14 @@ def build_signature(
 
 
 # ---------------------------------------------------------------------------
-# build_trellix_response
+# build_verdict_response
 # ---------------------------------------------------------------------------
 
 
 def _wrap_result(payload: dict) -> dict:
-    """Avvolge il payload nella chiave ``result`` attesa da Trellix IVX.
+    """Avvolge il payload nella chiave ``result`` del contratto.
 
-    L'integrazione IVX legge il verdetto come ``result.verdict`` /
+    Il servizio chiamante legge il verdetto come ``result.verdict`` /
     ``result.signature``: i campi flat al livello superiore non vengono
     visti dal consumatore.  Il wrapper è quindi parte del contratto,
     non un dettaglio cosmetico.
@@ -200,8 +200,8 @@ def _wrap_result(payload: dict) -> dict:
     return {"result": payload}
 
 
-def build_trellix_response(data: dict | None) -> dict:
-    """Costruisce la risposta Trellix dal risultato dell'analisi.
+def build_verdict_response(data: dict | None) -> dict:
+    """Costruisce la risposta dell'API esterna dal risultato dell'analisi.
 
     Args:
         data: Dizionario restituito da ``get_target_by_id()``, con chiavi
@@ -210,8 +210,8 @@ def build_trellix_response(data: dict | None) -> dict:
               Può essere ``None`` se l'analisi non è ancora iniziata.
 
     Returns:
-        Un dict con la chiave ``result`` contenente le chiavi attese da
-        Trellix IVX: ``verdict``, ``confidence``, ``signature``,
+        Un dict con la chiave ``result`` contenente le chiavi attese dal
+        servizio chiamante: ``verdict``, ``confidence``, ``signature``,
         ``recommended_action``, ``reason``.
     """
     # ── Nessun dato ────────────────────────────────────────────────────
@@ -341,7 +341,7 @@ def build_trellix_response(data: dict | None) -> dict:
 
 
 def entry_response(entry: dict) -> dict:
-    """Costruisce una risposta Trellix immediata da un hit allowlist/blacklist.
+    """Costruisce una risposta immediata da un hit allowlist/blacklist.
 
     Args:
         entry: Dizionario restituito da ``allowlist.check_domain()`` /
@@ -351,12 +351,12 @@ def entry_response(entry: dict) -> dict:
                firme storiche restano invariate.
 
     Returns:
-        Dict Trellix pronto per essere restituito come JSON.
+        Dict pronto per essere restituito come JSON.
     """
     list_type = entry["list_type"]
     note = entry.get("note")
     # Livello del match ("url" | "domain"): le firme restano in inglese
-    # (contratto con Trellix), il reason di default in italiano.
+    # (contratto col chiamante), il reason di default in italiano.
     level = "URL" if entry.get("matched") == "url" else "Domain"
     level_it = "URL" if level == "URL" else "Dominio"
 

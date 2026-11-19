@@ -229,12 +229,12 @@ class AnalysesDeleteResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Response — GET /analyses/{id}/trellix
+# Response — GET /analyses/{id}/verdict (stesso contratto di /api/v1/analyze)
 # ---------------------------------------------------------------------------
 
 
-class TrellixResult(BaseModel):
-    """Contenuto del verdetto — letto da Trellix IVX come
+class ExternalResult(BaseModel):
+    """Contenuto del verdetto — letto dal servizio chiamante come
     ``result.verdict`` / ``result.signature``."""
 
     verdict: str  # "safe" | "malicious"
@@ -244,17 +244,16 @@ class TrellixResult(BaseModel):
     reason: str
 
 
-class TrellixVerdictResponse(BaseModel):
-    """Il JSON che la route Trellix IVX restituisce per questa analisi.
+class ExternalVerdictResponse(BaseModel):
+    """Il JSON che ``GET /api/v1/analyze`` restituisce per questa analisi.
 
-    Rigenerato on-demand da ``build_trellix_response`` (la stessa funzione
-    della route ``GET /trellix/analyze``): ciò che la dashboard mostra è
-    ciò che Trellix ha ricevuto o riceverebbe in questo momento.  Il
-    payload è avvolto nella chiave ``result``: è il formato con cui
-    l'integrazione Trellix IVX legge il verdetto.
+    Rigenerato on-demand da ``build_verdict_response`` (la stessa
+    funzione della route sincrona): ciò che la dashboard mostra è ciò
+    che il chiamante ha ricevuto o riceverebbe in questo momento.  Il
+    payload è avvolto nella chiave ``result``, parte del contratto.
     """
 
-    result: TrellixResult
+    result: ExternalResult
 
 
 # ---------------------------------------------------------------------------

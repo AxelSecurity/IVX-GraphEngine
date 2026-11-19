@@ -2,12 +2,13 @@
 
 Usabile in tre modi:
 
-1. **Standalone** (es. wrapper Trellix):
+1. **Standalone** (es. CLI o script):
    ``target_id = await run_full_analysis("https://example.com")``
 
 2. **Con target pre-creato** (usato dalla route POST /analyses per eliminare
    la race 202→GET 404):
-   ``target = AnalysisTarget(input_url=url); await save_target(target, ...); task = asyncio.create_task(run_full_analysis(url, target=target))``
+   ``target = AnalysisTarget(input_url=url); await save_target(target, ...)``
+   seguito da ``AnalysisJobs.start(url, target)`` (vedi ``graph_engine.api.jobs``)
 
 3. **Con budget personalizzato**:
    ``target_id = await run_full_analysis(url, budget=Budget(max_depth=3))``

@@ -1,4 +1,4 @@
-"""FastAPI application for IVX-GraphEngine.
+"""FastAPI application for GraphEngine.
 
 Avvio::
 
@@ -23,9 +23,10 @@ from fastapi.staticfiles import StaticFiles
 from graph_engine.api import auth
 from graph_engine.api.auth_routes import build_auth_router
 from graph_engine.api.browser_pool import BrowserPool
+from graph_engine.api.jobs import AnalysisJobs
 from graph_engine.api.pipeline_runner import DEFAULT_ARTIFACT_ROOT
 from graph_engine.api.routes import build_router
-from graph_engine.api.routes_trellix import build_trellix_router
+from graph_engine.api.routes_external import build_external_router
 from graph_engine.storage.schema import DEFAULT_DB_PATH
 
 # Dashboard statica (HTML/CSS/JS puri, nessuna build): consuma le stesse
@@ -47,10 +48,15 @@ logging.basicConfig(
 #   - /health             probe di Front Door / container
 #   - /auth/login|logout  il login va raggiunto anonimo, il logout deve
 #                         sempre ripulire il cookie
-#   - /trellix            protetta dalla propria API key (X-API-Key)
+#   - /api/v1             API esterna, protetta dalla propria API key
+#                         (X-API-Key)
 #   - /dashboard          codice statico della SPA: è il frontend che
 #                         mostra il form di login quando /auth/me dà 401
-_EXEMPT_PREFIXES = ("/health", "/auth/login", "/auth/logout", "/trellix", "/dashboard")
+_EXEMPT_PREFIXES = ("/health", "/auth/login", "/auth/logout", "/api/v1", "/dashboard")
+
+# Utente sintetico esposto in ``request.state.user`` per le richieste
+# autenticate con API key invece che con la sessione.
+_API_KEY_USER = {"username": "api-key", "role": "api"}
 
 
 def _is_exempt(path: str) -> bool:
@@ -61,6 +67,19 @@ def _is_exempt(path: str) -> bool:
         if path == prefix or path.startswith(prefix + "/"):
             return True
     return False
+
+
+def _api_key_allowed(method: str, path: str) -> bool:
+    """True se la route accetta la API key in alternativa alla sessione.
+
+    Solo il ciclo di vita di un'analisi, per i client machine-to-machine:
+    sottomissione (``POST /analyses``) e lettura/polling (``GET
+    /analyses`` e sotto-risorse).  Cancellazioni, liste forzate e
+    gestione utenti restano riservate alla sessione della dashboard.
+    """
+    if path == "/analyses":
+        return method in ("GET", "POST")
+    return method == "GET" and path.startswith("/analyses/")
 
 
 def _make_lifespan(enable_browser_pool: bool):
@@ -114,7 +133,7 @@ def create_app(
                              disponibile per disattivarlo esplicitamente.
     """
     app = FastAPI(
-        title="IVX GraphEngine API",
+        title="GraphEngine API",
         version="0.1.0",
         description=(
             "Interfaccia HTTP asincrona per la pipeline L0→L5 di analisi "
@@ -126,16 +145,24 @@ def create_app(
     # Riferimento per lifespan e test: il middleware di sessione non
     # accede al DB (sessioni in memoria), le route /auth sì.
     app.state.db_path = db_path
+    # Registro dei job: limite di concorrenza, dedup in-flight e
+    # riferimenti forti ai task di analisi (vedi graph_engine.api.jobs).
+    app.state.jobs = AnalysisJobs()
 
     # Middleware di sessione: protegge TUTTO tranne health, login/logout,
-    # la route Trellix (API key propria) e il codice statico della
-    # dashboard.  La sessione valida viene esposta alle route in
-    # ``request.state.user``.
+    # l'API esterna (API key propria) e il codice statico della
+    # dashboard.  Sulle route del ciclo di vita delle analisi la API key
+    # vale in alternativa al cookie (client machine-to-machine).  Chi è
+    # autenticato viene esposto alle route in ``request.state.user``.
     @app.middleware("http")
     async def _session_auth_middleware(request: Request, call_next):
-        if _is_exempt(request.url.path):
+        path = request.url.path
+        if _is_exempt(path):
             return await call_next(request)
         session = auth.get_session(auth.read_session_cookie(request))
+        if session is None and _api_key_allowed(request.method, path):
+            if auth.api_key_valid(request):
+                session = _API_KEY_USER
         if session is None:
             return JSONResponse(
                 {"detail": "Autenticazione richiesta"},
@@ -148,7 +175,7 @@ def create_app(
         build_router(db_path=db_path, artifact_root=artifact_root)
     )
     app.include_router(
-        build_trellix_router(db_path=db_path)
+        build_external_router(db_path=db_path)
     )
     app.include_router(
         build_auth_router(db_path=db_path)

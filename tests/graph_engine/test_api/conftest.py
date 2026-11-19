@@ -5,7 +5,7 @@ reale) e una pipeline completamente mockata (nessun browser Playwright,
 nessuna rete).
 
 Il middleware di sessione protegge TUTTE le route (tranne health,
-auth/login|logout, trellix e la dashboard statica): la fixture ``client``
+auth/login|logout, /api/v1 e la dashboard statica): la fixture ``client``
 è quindi già autenticata — bootstrap dell'admin + cookie di sessione.
 Per i test che verificano il comportamento anonimo c'è ``anon_client``.
 """

@@ -3,7 +3,7 @@
 Opera sullo stesso SQLite dell'API (default ``data/graph_engine.db``):
 per il container Docker eseguirla dall'interno::
 
-    docker compose exec ivx-graph-engine python -m graph_engine.api.auth_cli list
+    docker compose exec graph-engine python -m graph_engine.api.auth_cli list
 
 Comandi::
 
@@ -28,7 +28,7 @@ from graph_engine.storage.schema import DEFAULT_DB_PATH
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m graph_engine.api.auth_cli",
-        description="Gestione utenti della dashboard IVX-GraphEngine.",
+        description="Gestione utenti della dashboard GraphEngine.",
     )
     parser.add_argument(
         "--db",

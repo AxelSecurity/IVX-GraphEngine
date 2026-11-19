@@ -2,7 +2,7 @@
 
 Copre il contratto deciso il 2026-09-01: il login multi-utente su
 SQLite protegge la UI e TUTTE le API REST, tranne /health, /auth/login,
-/auth/logout, la route Trellix (API key propria) e il codice statico
+/auth/logout, l'API esterna /api/v1 (API key propria) e il codice statico
 della dashboard.  Le sessioni vivono in un cookie HttpOnly in memoria.
 
 Le fixture ``client``/``anon_client`` vengono dal conftest: la prima è
@@ -42,10 +42,10 @@ class TestMiddleware:
         assert res.status_code == 200
         assert "html" in res.headers["content-type"]
 
-    async def test_trellix_route_uses_own_key_not_session(self, anon_client):
+    async def test_external_route_uses_own_key_not_session(self, anon_client):
         """Senza API key configurata risponde 503 (configurazione), non 401
         di sessione — prova che il middleware la lascia passare."""
-        res = await anon_client.get("/trellix/analyze?url=https://example.com")
+        res = await anon_client.get("/api/v1/analyze?url=https://example.com")
         assert res.status_code == 503
 
     async def test_authed_client_passes(self, client):

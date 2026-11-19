@@ -472,11 +472,13 @@ class TestDeleteAnalysesEndpoint:
         assert res.json() == {"deleted_count": 1, "not_found": []}
 
 
-class TestGetAnalysisTrellixResponse:
-    """GET /analyses/{id}/trellix — il JSON restituito a Trellix IVX.
+class TestGetAnalysisVerdictResponse:
+    """GET /analyses/{id}/verdict — il JSON del contratto esterno.
 
     La dashboard usa questo endpoint per mostrare, nel dettaglio di ogni
-    analisi, la risposta esatta che Trellix ha ricevuto (o riceverebbe).
+    analisi, la risposta esatta che il chiamante di /api/v1/analyze ha
+    ricevuto (o riceverebbe); i client in polling lo leggono a fine
+    analisi.
     """
 
     async def test_phishing_verdict_maps_to_malicious_block(self, app, client, tmp_path):
@@ -495,7 +497,7 @@ class TestGetAnalysisTrellixResponse:
         )
         await save_target(target, [], [], [], verdict, db_path=db)
 
-        res = await client.get(f"/analyses/{target.id}/trellix")
+        res = await client.get(f"/analyses/{target.id}/verdict")
 
         assert res.status_code == 200
         body = res.json()
@@ -505,10 +507,10 @@ class TestGetAnalysisTrellixResponse:
         assert body["result"]["signature"] == "Phishing: Microsoft Impersonation"
         assert body["result"]["reason"] == "Pagina di login falsa con logo Microsoft."
 
-    async def test_output_identical_to_trellix_route(self, app, client, tmp_path):
+    async def test_output_identical_to_external_route(self, app, client, tmp_path):
         """Fedeltà: il JSON mostrato in dashboard DEVE essere identico a
-        quello costruito dalla route /trellix/analyze sugli stessi dati."""
-        from graph_engine.api.trellix_verdict import build_trellix_response
+        quello costruito dalla route /api/v1/analyze sugli stessi dati."""
+        from graph_engine.api.verdict_response import build_verdict_response
         from graph_engine.storage.repository import get_target_by_id
 
         db = str(tmp_path / "test.db")
@@ -527,22 +529,22 @@ class TestGetAnalysisTrellixResponse:
         )
         await save_target(target, [], [], [], verdict, db_path=db)
 
-        res = await client.get(f"/analyses/{target.id}/trellix")
+        res = await client.get(f"/analyses/{target.id}/verdict")
         assert res.status_code == 200
 
         data = await get_target_by_id(str(target.id), db_path=db)
-        assert res.json() == build_trellix_response(data)
+        assert res.json() == build_verdict_response(data)
 
     async def test_running_target_shows_analysis_incomplete(self, app, client, tmp_path):
         """Analisi in corso → il ramo Analysis-Incomplete (onesto, come
-        nella route Trellix reale)."""
+        nella route sincrona reale)."""
         db = str(tmp_path / "test.db")
         target = AnalysisTarget(
             input_url="https://run.example.com", status=TargetStatus.running,
         )
         await save_target(target, [], [], [], None, db_path=db)
 
-        res = await client.get(f"/analyses/{target.id}/trellix")
+        res = await client.get(f"/analyses/{target.id}/verdict")
 
         assert res.status_code == 200
         body = res.json()
@@ -553,7 +555,7 @@ class TestGetAnalysisTrellixResponse:
     async def test_unknown_target_returns_404(self, app, client):
         """Target inesistente → 404, come le altre route di dettaglio."""
         res = await client.get(
-            "/analyses/99999999-9999-4999-8999-999999999999/trellix"
+            "/analyses/99999999-9999-4999-8999-999999999999/verdict"
         )
         assert res.status_code == 404
 
@@ -670,7 +672,7 @@ class TestAnalysisBypass:
             nonlocal called
             called = True
 
-        monkeypatch.setattr("graph_engine.api.routes.run_full_analysis", _fake_pipeline)
+        monkeypatch.setattr("graph_engine.api.jobs.run_full_analysis", _fake_pipeline)
 
         res = await client.post(
             "/analyses",
@@ -701,7 +703,7 @@ class TestAnalysisBypass:
             nonlocal called
             called = True
 
-        monkeypatch.setattr("graph_engine.api.routes.run_full_analysis", _fake_pipeline)
+        monkeypatch.setattr("graph_engine.api.jobs.run_full_analysis", _fake_pipeline)
 
         res = await client.post(
             "/analyses",

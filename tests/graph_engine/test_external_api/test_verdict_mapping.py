@@ -1,13 +1,13 @@
-"""Test per trellix_verdict: mapping, firma, risposta."""
+"""Test per verdict_response: mapping, firma, risposta."""
 
 from __future__ import annotations
 
 import uuid
 
-from graph_engine.api.trellix_verdict import (
+from graph_engine.api.verdict_response import (
     VERDICT_MAP,
     build_signature,
-    build_trellix_response,
+    build_verdict_response,
     entry_response,
 )
 from graph_engine.models import Classification, Verdict
@@ -127,17 +127,15 @@ class TestBuildSignature:
         assert "No Threats" in sig
 
 
-class TestBuildTrellixResponse:
-    """Test di build_trellix_response."""
+class TestBuildVerdictResponse:
+    """Test di build_verdict_response."""
 
     def test_result_wrapper_is_contract(self):
-        """Contratto Trellix IVX: il verdetto vive sotto ``result``
+        """Contratto col chiamante: il verdetto vive sotto ``result``
         (letto come ``result.verdict`` / ``result.signature``) — i campi
-        flat al livello superiore non esistono più.
-
-        Regressione dell'integrazione IVX (2026-09-04): l'integrazione
-        legge il JSON come ``result.verdict`` / ``result.signature`` e
-        non vedeva i campi flat della risposta storica.
+        flat al livello superiore non esistono.  Il formato è invariato
+        rispetto all'integrazione storica, così il servizio esterno è
+        un sostituto drop-in.
         """
         from graph_engine.models import AnalysisTarget, TargetStatus
 
@@ -145,7 +143,7 @@ class TestBuildTrellixResponse:
             input_url="https://ok.example",
             status=TargetStatus.done,
         )
-        resp = build_trellix_response(
+        resp = build_verdict_response(
             {"target": target, "verdict": None, "evidence": []},
         )
         assert set(resp.keys()) == {"result"}
@@ -162,7 +160,7 @@ class TestBuildTrellixResponse:
         attende sempre il completamento reale, quindi questo ramo non
         è più raggiungibile dal path principale — resta come rete di
         sicurezza."""
-        resp = build_trellix_response(None)
+        resp = build_verdict_response(None)
         assert resp["result"]["verdict"] == "safe"
         assert resp["result"]["confidence"] == 0.1
         assert "Analysis-Incomplete" in resp["result"]["signature"]
@@ -181,7 +179,7 @@ class TestBuildTrellixResponse:
                 "value": "RuntimeError: something broke",
             },
         ]
-        resp = build_trellix_response(
+        resp = build_verdict_response(
             {"target": target, "verdict": None, "evidence": evidence},
         )
         assert resp["result"]["verdict"] == "safe"
@@ -196,7 +194,7 @@ class TestBuildTrellixResponse:
             input_url="https://ok.example",
             status=TargetStatus.done,
         )
-        resp = build_trellix_response(
+        resp = build_verdict_response(
             {"target": target, "verdict": None, "evidence": []},
         )
         assert resp["result"]["verdict"] == "safe"
@@ -216,7 +214,7 @@ class TestBuildTrellixResponse:
             confidence=0.95,
             brand="IANA",
         )
-        resp = build_trellix_response(
+        resp = build_verdict_response(
             {"target": target, "verdict": verdict, "evidence": []},
         )
         assert resp["result"]["verdict"] == "safe"
@@ -234,7 +232,7 @@ class TestBuildTrellixResponse:
             status=TargetStatus.done,
         )
         verdict = _verdict(brand="Netflix")
-        resp = build_trellix_response(
+        resp = build_verdict_response(
             {"target": target, "verdict": verdict, "evidence": []},
         )
         assert resp["result"]["verdict"] == "malicious"
@@ -259,7 +257,7 @@ class TestSuspiciousBlockThreshold:
             classification=Classification.suspicious,
             confidence=0.6,
         )
-        resp = build_trellix_response(
+        resp = build_verdict_response(
             {"target": target, "verdict": verdict, "evidence": []},
         )
         assert resp["result"]["verdict"] == "malicious"
@@ -280,7 +278,7 @@ class TestSuspiciousBlockThreshold:
                 classification=Classification.suspicious,
                 confidence=conf,
             )
-            resp = build_trellix_response(
+            resp = build_verdict_response(
                 {"target": target, "verdict": verdict, "evidence": []},
             )
             assert resp["result"]["verdict"] == "safe", f"conf={conf}"
@@ -303,7 +301,7 @@ class TestSuspiciousBlockThreshold:
             confidence=0.6,
             brand="Ledger",
         )
-        resp = build_trellix_response(
+        resp = build_verdict_response(
             {"target": target, "verdict": verdict, "evidence": []},
         )
         assert resp["result"]["verdict"] == "malicious"
@@ -321,7 +319,7 @@ class TestSuspiciousBlockThreshold:
             classification=Classification.suspicious,
             confidence=0.5999,
         )
-        resp = build_trellix_response(
+        resp = build_verdict_response(
             {"target": target, "verdict": verdict, "evidence": []},
         )
         assert resp["result"]["verdict"] == "safe"

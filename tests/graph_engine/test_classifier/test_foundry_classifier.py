@@ -693,8 +693,8 @@ def _make_thread_aware_fake_client(idents, create_and_process):
 
 class TestWorkerThreadIsolation:
     """Il corpo SDK di Foundry (create_and_process bloccante) deve girare
-    su un thread worker: sul loop congelerebbe l'intero server API e il
-    timeout Trellix di 48s non potrebbe MAI scattare."""
+    su un thread worker: sul loop congelerebbe l'intero server API
+    (dashboard, polling e analisi concorrenti)."""
 
     async def test_foundry_body_runs_on_worker_thread(self, monkeypatch):
         """``threads.create`` gira su un thread diverso da quello del test."""

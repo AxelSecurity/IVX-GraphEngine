@@ -16,8 +16,7 @@ _ALL_CONFIG_FIELDS = (
     "azure_foundry_endpoint",
     "azure_foundry_agent_id",
     "urlhaus_api_key",
-    "trellix_api_key",
-    "trellix_api_token",
+    "api_key",
     "dashboard_admin_user",
     "dashboard_admin_password",
 )
@@ -30,9 +29,9 @@ def _isolate_config_from_environment():
     Il singleton ``graph_engine.config.settings`` viene creato
     all'import e legge le variabili d'ambiente del processo (o
     ``.env``): se lo sviluppatore ha ``AZURE_FOUNDRY_*``,
-    ``URLHAUS_API_KEY`` o ``TRELLIX_API_TOKEN`` esportate nella
+    ``URLHAUS_API_KEY`` o ``API_KEY`` esportate nella
     propria shell, alcuni test fallirebbero in modo dipendente dalla
-    macchina — es. le route Trellix richiederebbero auth Bearer (401)
+    macchina — es. l'API esterna accetterebbe chiavi reali
     o il registro L2 attiverebbe provider reali (chiamate di rete).
 
     Prima di ogni test tutti i campi vengono azzerati; al termine

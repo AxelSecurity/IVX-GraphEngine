@@ -1,12 +1,12 @@
-# IVX-GraphEngine — deployment single-node (decisione presa all'inizio
+# GraphEngine — deployment single-node (decisione presa all'inizio
 # del progetto): UN solo servizio, SQLite su volume locale, niente
 # orchestrazione multi-nodo.
 
 services:
   graph-engine:
     build: .
-    image: ivx-graph-engine:local
-    container_name: ivx-graph-engine
+    image: graph-engine:local
+    container_name: graph-engine
     ports:
       # Porta host configurabile via variabile d'ambiente HOST_PORT
       # (default 8000):  HOST_PORT=8080 docker compose up -d

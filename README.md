@@ -1,4 +1,4 @@
-# IVX-GraphEngine
+# GraphEngine
 
 Uno strumento che prende in input un URL sospetto (es. segnalato come possibile
 phishing) e lo analizza in automatico, seguendolo passo passo — redirect,
@@ -7,8 +7,11 @@ Il risultato è un **grafo**: ogni pagina incontrata è un nodo, ogni redirect
 o azione è un collegamento tra due nodi. Alla fine lo strumento dice se il
 sito è probabilmente benigno, sospetto o phishing, e perché.
 
-È un componente indipendente della toolchain Horus/IntelIVX: si collega agli
-altri sistemi via HTTP, non viene mai importato direttamente nel loro codice.
+È un servizio indipendente: lo chiamano altri sistemi via HTTP (API
+sincrona `GET /api/v1/analyze` oppure sottomissione asincrona + polling),
+non viene mai importato direttamente nel loro codice. Le lookup su
+piattaforme di threat intelligence interne (MISP/OpenCTI) restano a
+carico del servizio chiamante.
 
 ## Come funziona, in breve
 
@@ -52,7 +55,7 @@ python -m graph_engine.cli <url>
 python -m graph_engine.cli <url> --classify        # con classificazione L5 (AI)
 python -m graph_engine.cli <url> --history <url>   # solo storico, nessuna nuova analisi
 
-# Come servizio HTTP (per integrazioni, es. con IntelIVX/Trellix)
+# Come servizio HTTP (per integrazioni con servizi esterni)
 uvicorn graph_engine.api.app:app --reload
 ```
 
@@ -69,8 +72,8 @@ aggiuntiva): con l'API già avviata, apri `http://localhost:8000/dashboard`.
 Dalla voce **"Whitelist/Blacklist"** si gestiscono le liste forzate per
 **domini** (match sul dominio registrabile, eTLD+1) e per **URL** (match
 sulla URL normalizzata senza query/frammento). Un hit forza subito il
-verdetto e salta l'analisi — sia nella dashboard che nella risposta a
-Trellix; in caso di conflitto vince il match più specifico (URL > dominio).
+verdetto e salta l'analisi — sia nella dashboard che nella risposta
+dell'API esterna; in caso di conflitto vince il match più specifico (URL > dominio).
 
 Dalla voce **"Utenti"** (visibile solo agli amministratori) si gestiscono
 gli account della dashboard: creazione, cambio ruolo
@@ -84,8 +87,11 @@ sessioni attive dell'utente (comprese le proprie).
 La dashboard **richiede il login**: le credenziali sono multi-utente in
 SQLite (ruoli `admin`/`operator`, password con hash PBKDF2) e la sessione
 vive in un cookie HttpOnly di 12h. Il login protegge anche **tutte le API
-REST** (tranne `/health` e la route Trellix, che ha la sua API key): un
-401 riporta alla schermata di accesso.
+REST** (tranne `/health` e l'API esterna `/api/v1`, che ha la sua API
+key): un 401 riporta alla schermata di accesso. Sulle route di
+sottomissione e polling delle analisi (`POST /analyses`, `GET
+/analyses[/...]`) la API key vale in alternativa al login, per i client
+machine-to-machine.
 
 Al primo avvio viene creato l'admin bootstrap: credenziali da
 `DASHBOARD_ADMIN_USER`/`DASHBOARD_ADMIN_PASSWORD` se valorizzate nel
@@ -155,44 +161,54 @@ Note operative:
   Chromium per singola analisi
 - **Autenticazione**: dashboard e API REST richiedono il login (utenti in
   SQLite, admin bootstrap al primo avvio — credenziali nel log se non
-  valorizzate nel `.env`); la route Trellix richiede `X-API-Key`
-  (`TRELLIX_API_KEY` nel `.env`, 503 se assente). Solo `/health` è aperto
-  (probe del container)
+  valorizzate nel `.env`); l'API esterna richiede `X-API-Key`
+  (`API_KEY` nel `.env`, più chiavi separate da virgola, 503 se
+  assente). Solo `/health` è aperto (probe del container)
+- **Concorrenza**: al massimo `MAX_CONCURRENT_ANALYSES` analisi in
+  esecuzione insieme (default 4); le altre restano `queued` finché si
+  libera uno slot
 
-### Le due viste sullo stesso dato
+### Integrazione con un servizio esterno
 
-L'API espone due endpoint che rispondono sulla **stessa analisi** (stesso
+L'API espone due modalità che lavorano sulla **stessa analisi** (stesso
 target, stesso grafo, stesso verdetto in SQLite) — non sono due sistemi
-separati:
+separati. Entrambe si autenticano con l'header `X-API-Key`:
 
 | Endpoint | Uso |
 |---|---|
-| `GET /trellix/analyze?url=...` | Risposta **sincrona** compatibile con Trellix IVX: attende il completamento reale dell'analisi e porta sempre il verdetto finale (nessuna deadline imposta dal modulo — l'unica finestra è quella gestita a monte da Front Door/Trellix) |
-| `POST /analyses` + `GET /analyses/{id}` | Avvio asincrono (202 Accepted) e stato dell'analisi |
+| `GET /api/v1/analyze?url=...` | Risposta **sincrona**: attende il completamento reale dell'analisi e porta sempre il verdetto finale (nessuna deadline imposta dal modulo) |
+| `POST /analyses` + `GET /analyses/{id}` | Avvio asincrono (202 Accepted) e polling dello stato (`queued` → `running` → `done`/`error`) |
+| `GET /analyses/{id}/verdict` | Lo stesso JSON di `/api/v1/analyze` per quell'analisi: da leggere a fine polling |
 | `GET /analyses/{id}/graph` | **Il JSON completo**: target, tutti gli stati del grafo, le transizioni, le evidenze di ogni livello e il verdetto |
 
 Il JSON mostrato dal CLI (`python -m graph_engine.cli <url>`) è lo stesso
 contenuto di `GET /analyses/{id}/graph`.
 
-#### Contratto di `GET /trellix/analyze`
+#### Contratto di `GET /api/v1/analyze`
 
-Trellix chiama il modulo **passando l'URL in query string** e **attendendo
-che la risposta contenga il JSON** del verdetto — non c'è un secondo passo
-asincrono. La route è **protetta da API key**: ogni richiesta deve portare
-`X-API-Key` con il valore di `TRELLIX_API_KEY` (se la variabile non è
+Il chiamante **passa l'URL in query string** e **attende che la risposta
+contenga il JSON** del verdetto — non c'è un secondo passo. Il formato
+della risposta è **identico** a quello della precedente integrazione
+Trellix IVX (`/trellix/analyze`), così il servizio esterno è un
+sostituto drop-in: cambiano solo il path e la variabile della chiave.
+
+La route è **protetta da API key**: ogni richiesta deve portare
+`X-API-Key` con una delle chiavi di `API_KEY` (se la variabile non è
 configurata la route risponde **503** — configurazione mancante, mai
-aperta; il vecchio Bearer `TRELLIX_API_TOKEN` resta accettato per
-retrocompatibilità):
+aperta; chiave assente o errata → **401**):
 
 ```bash
-curl -G http://localhost:8000/trellix/analyze \
-     -H "X-API-Key: $TRELLIX_API_KEY" \
+curl -G http://localhost:8000/api/v1/analyze \
+     -H "X-API-Key: $API_KEY" \
      --data-urlencode "url=https://example.org/"
 ```
 
+Tutto ciò che segue `url=` nella query string è l'URL da analizzare
+(anche con `&`, `?` e `=` propri); il percent-encoding, anche multiplo,
+viene decodificato.
+
 Risposta (200, `Content-Type: application/json`) — verdetto binario avvolto
-nella chiave `result`: è il formato con cui l'integrazione Trellix IVX
-legge il verdetto (`result.verdict` / `result.signature`):
+nella chiave `result` (`result.verdict` / `result.signature`):
 
 ```json
 {
@@ -210,25 +226,31 @@ Campi di `result`:
 
 | Campo | Valori | Significato |
 |---|---|---|
-| `result.verdict` | `safe` \| `malicious` | Il verdetto binario atteso da Trellix |
-| `result.confidence` | 0.0–1.0 | Fiducia del verdetto (≥0.8-0.9 con verdetto definitivo; 0.1 sui rami non conclusivi: analisi in corso, fallita o senza classificazione) |
+| `result.verdict` | `safe` \| `malicious` | Il verdetto binario |
+| `result.confidence` | 0.0–1.0 | Fiducia del verdetto (≥0.8-0.9 con verdetto definitivo; 0.1 sui rami non conclusivi: analisi fallita o senza classificazione) |
 | `result.signature` | testo breve | Firma leggibile; su `safe` è sempre benigna (`No Threats Detected` o simile), mai "Phishing: …" |
-| `result.recommended_action` | `allow` \| `block` | Azione raccomandata a Trellix |
+| `result.recommended_action` | `allow` \| `block` | Azione raccomandata al chiamante |
 | `result.reason` | testo | Motivazione leggibile (il `rationale` del classificatore, se presente) |
 
-Il modulo **non impone alcuna deadline**: la risposta arriva quando
-l'analisi è terminata, con il verdetto finale (il budget di esplorazione
-interno resta comunque limitato). L'unica finestra di tempo è quella
-gestita a monte dal chiamante (Front Door, ~60s di origin timeout): se
-scatta, l'analisi completa comunque in background — il task è creato
-esplicitamente e non dipende dalla connessione del client — e il
-risultato (persistito su SQLite, cache 24h) viene restituito dalla
-chiamata successiva. Una richiesta che arriva mentre un'analisi è già
-in corso risponde onestamente `"result.verdict": "safe"`,
-`"result.confidence": 0.1`, `"result.signature":
-"Analysis-Incomplete — Benign By Default"`; lo stesso vale per
-un'analisi fallita (`Analysis-Failed`) o completata senza
-classificazione.
+Comportamento:
+
+- **Nessuna deadline** imposta dal modulo: la risposta arriva quando
+  l'analisi è terminata, con il verdetto finale (il budget di
+  esplorazione interno resta comunque limitato).
+- **Cache 24h**: un URL già analizzato con successo nelle ultime 24 ore
+  risponde subito con il verdetto salvato.
+- **Richieste concorrenti sullo stesso URL**: la seconda si aggancia
+  all'analisi già in corso invece di avviarne un'altra, ed entrambe
+  ricevono lo stesso verdetto finale.
+- **Disconnessione del chiamante**: se la connessione cade (es. timeout
+  di un proxy), l'analisi completa comunque in background e il
+  risultato viene restituito dalla chiamata successiva (cache).
+- **Onestà**: un'analisi fallita risponde `"verdict": "safe"`,
+  `"confidence": 0.1`, `"signature": "Analysis-Failed"`; una completata
+  senza classificazione risponde `Analysis-Incomplete — Benign By
+  Default`.
+- **Whitelist/Blacklist**: un hit risponde subito con il verdetto
+  forzato (`Whitelist-Override` / `Blacklist-Override`, confidenza 1.0).
 
 ## Test
 

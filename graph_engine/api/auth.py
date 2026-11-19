@@ -1,23 +1,22 @@
-"""Autenticazione dashboard/API e API key Trellix.
-
-Decisioni utente 2026-09-01:
+"""Autenticazione dashboard/API e API key per i servizi esterni.
 
 - **Credenziali del login multi-utente in SQLite** (tabella ``users``):
   username, hash della password (PBKDF2-HMAC-SHA256, solo stdlib) e
   ruolo (``admin``/``operator``).
 - **Il login protegge la UI e TUTTE le API REST**, con le uniche
-  eccezioni di ``/health`` e della route Trellix (protetta dalla sua
-  API key).  Il codice statico della dashboard (``/dashboard``) resta
-  servito senza login: è la SPA stessa a mostrare il form di accesso
-  quando ``/auth/me`` risponde 401.
+  eccezioni di ``/health`` e dell'API esterna ``/api/v1`` (protetta
+  dalla sua API key).  Il codice statico della dashboard
+  (``/dashboard``) resta servito senza login: è la SPA stessa a
+  mostrare il form di accesso quando ``/auth/me`` risponde 401.
 - **Sessioni in memoria** (cookie ``session`` HttpOnly/SameSite=Lax,
   TTL 12h): non persistono tra riavvii del processo — il deployment è
   single-worker, quindi una struttura in-process è sufficiente e non
   richiede pulizia sul DB.
-- **API key su ``/trellix/analyze``**: obbligatoria.  Se
-  ``TRELLIX_API_KEY`` non è configurata la route risponde **503
-  (configurazione mancante)**, mai aperta.  Il vecchio Bearer
-  ``TRELLIX_API_TOKEN`` resta accettato per retrocompatibilità.
+- **API key (``X-API-Key``)**: obbligatoria su ``/api/v1/analyze``.
+  Se ``API_KEY`` non è configurata la route risponde **503
+  (configurazione mancante)**, mai aperta.  La stessa chiave vale,
+  in alternativa al cookie, sulle route di polling ``/analyses``
+  (vedi ``graph_engine.api.app``) per i client machine-to-machine.
 
 Pattern di accesso al DB: aiosqlite, DDL eseguita su ogni connessione
 (coerente con ``graph_engine.api.allowlist`` e lo storage).
@@ -416,49 +415,45 @@ async def ensure_bootstrap_admin(db_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# API key Trellix
+# API key (servizi esterni)
 # ---------------------------------------------------------------------------
 
 
-def require_trellix_api_key(request) -> None:
-    """Autentica la route Trellix con ``X-API-Key`` (o Bearer legacy).
+def api_key_valid(request) -> bool:
+    """True se la richiesta porta in ``X-API-Key`` una chiave configurata.
 
-    Decisione utente 2026-09-01: la route NON deve mai restare aperta.
-    Se nessuna credenziale è configurata → **503** (configurazione
-    mancante, l'operatore deve valorizzare ``TRELLIX_API_KEY``); se è
-    configurata ma la richiesta non presenta la credenziale giusta →
-    **401**.
+    Confronto a tempo costante (``hmac.compare_digest``) contro TUTTE le
+    chiavi configurate, senza uscire al primo match.
+    """
+    provided = request.headers.get("X-API-Key", "")
+    if not provided:
+        return False
+    matched = False
+    for key in settings.api_keys:
+        if hmac.compare_digest(provided.encode(), key.encode()):
+            matched = True
+    return matched
+
+
+def require_api_key(request) -> None:
+    """Autentica l'API esterna con l'header ``X-API-Key``.
+
+    La route NON deve mai restare aperta: se nessuna chiave è
+    configurata → **503** (configurazione mancante, l'operatore deve
+    valorizzare ``API_KEY``); se è configurata ma la richiesta non
+    presenta una chiave valida → **401**.
 
     Raises:
         HTTPException: 503 senza chiave configurata, 401 con chiave
             mancante o errata.
     """
-    api_key = settings.trellix_api_key
-    legacy_token = settings.trellix_api_token
-
-    if not api_key and not legacy_token:
+    if not settings.api_keys:
         raise HTTPException(
             status_code=503,
             detail=(
-                "Endpoint Trellix non configurato: manca TRELLIX_API_KEY "
+                "API esterna non configurata: manca API_KEY "
                 "nell'ambiente del server"
             ),
         )
-
-    provided_key = request.headers.get("X-API-Key", "")
-    if api_key and hmac.compare_digest(provided_key, api_key):
-        return
-
-    auth_header = request.headers.get("Authorization", "")
-    if legacy_token and _bearer_matches(auth_header, legacy_token):
-        return
-
-    raise HTTPException(status_code=401, detail="Unauthorized")
-
-
-def _bearer_matches(auth_header: str, expected_token: str) -> bool:
-    """Verifica un header ``Authorization: Bearer <token>`` (legacy)."""
-    if not auth_header.startswith("Bearer "):
-        return False
-    provided = auth_header[len("Bearer "):]
-    return hmac.compare_digest(provided, expected_token)
+    if not api_key_valid(request):
+        raise HTTPException(status_code=401, detail="Unauthorized")

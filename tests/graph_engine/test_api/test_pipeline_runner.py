@@ -358,7 +358,7 @@ class TestPipelineRunner:
     ):
         """Plumb fast L4: ``page_timeout_ms`` deve arrivare al costruttore
         di StateGraphExplorer e ``settle_max_wait_s`` a ``explorer.run()``
-        (parametri usati dal path Trellix)."""
+        (parametri usati dai chiamanti con budget personalizzato)."""
         from graph_engine.api.pipeline_runner import run_full_analysis
 
         _RecordingExplorer.init_kwargs = {}

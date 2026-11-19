@@ -123,12 +123,13 @@ di default configurabile.
 
 Brand impersonato identificato E endpoint di raccolta isolato, OPPURE budget esaurito.
 
-## Integrazione futura con IntelIVX
+## Integrazione con i servizi chiamanti
 
-Questo motore è un servizio indipendente. L'integrazione con IntelIVX (repo separato) avverrà
-via chiamata HTTP o coda messaggi, mai via import diretto — mantiene i due progetti
-disaccoppiati e permette di far evolvere questo motore senza rischiare regressioni
-sull'analyzer esistente, già in produzione.
+Questo motore è un servizio indipendente: i servizi esterni lo chiamano via HTTP
+(`GET /api/v1/analyze` sincrona, oppure `POST /analyses` + polling), mai via import
+diretto — i progetti restano disaccoppiati e il motore evolve senza rischiare
+regressioni sui chiamanti. Le lookup su piattaforme di threat intelligence interne
+(MISP/OpenCTI) restano a carico del servizio chiamante.
 
 ## Decisioni di scope
 
@@ -384,7 +385,7 @@ corrispondente. Nessuna modifica al codice necessaria: il
 
 - **Record A** (`dns_a_records`): indirizzi IPv4 risolti per il dominio.
   Peso 0.0 (informativo). Colma una lacuna IOC: gli IP servono ai
-  consumatori a valle (Horus/IntelIVX) per correlazione infrastrutturale,
+  consumatori a valle (servizi chiamanti) per correlazione infrastrutturale,
   geolocalizzazione, e lookup ASN.
 
 - **Record AAAA** (`dns_aaaa_records`): indirizzi IPv6 risolti per il
@@ -667,140 +668,89 @@ salvati come TEXT, i datetime in ISO-8601, gli enum come TEXT.
 
 ## API HTTP (FastAPI)
 
-L'API espone la pipeline L0→L5 come endpoint REST asincroni. È il punto
-d'ingresso per tutti i consumatori futuri (dashboard web, tool interni)
-diversi dal wrapper Trellix.
+L'API espone la pipeline L0→L5 a due tipi di consumatori: i **servizi
+esterni** (API key) e la **dashboard** (login). Entrambi lavorano sulle
+stesse analisi persistite su SQLite.
 
 ### Design
 
 - **Nessuna coda esterna** (no Redis, no Celery). Lo stato dei job è
   persistito su SQLite tramite `AnalysisTarget.status`.
 - **Lifecycle**: `queued` → `running` → `done` | `error`.
-- **Fire-and-forget**: la POST risponde subito con 202; il job gira in
-  background via `asyncio.create_task`.
+- **Registro dei job** (`api/jobs.py`, `AnalysisJobs` su `app.state.jobs`):
+  unico punto da cui le route avviano le pipeline. Tiene un riferimento
+  forte ai task (l'event loop ne tiene solo di deboli), applica il limite
+  `MAX_CONCURRENT_ANALYSES` (le analisi oltre il limite restano `queued`)
+  e registra le analisi in corso per `url_hash` (dedup delle richieste
+  sincrone concorrenti).
 - **Race-free**: il target viene salvato come `queued` (con `await`) prima
-  di lanciare il task — un GET immediato sull'id restituito non darà mai 404.
-- **Browser Playwright**: aperto solo durante L4 e chiuso prima di L5 (il
-  classificatore non ha bisogno del browser).
-- **Runner riusabile**: `run_full_analysis(raw_url, budget, classify)` è
-  usato sia dalla route POST che dal wrapper Trellix.
+  di avviare il task — un GET immediato sull'id restituito non darà mai 404.
+- **Browser Playwright condiviso**: un solo Chromium avviato dal lifespan
+  (`api/browser_pool.py`), un context fresco per analisi.
+- **Runner riusabile**: `run_full_analysis(raw_url, ...)` è usato dal
+  registro dei job (route sincrona e POST) e dal CLI.
 
 ### Endpoint
 
-| Metodo | Path | Descrizione | Status code |
+| Metodo | Path | Auth | Descrizione |
 |---|---|---|---|
-| `POST` | `/analyses` | Submit a new analysis | 202 |
-| `GET` | `/analyses/{id}` | Analysis status + counts | 200 / 404 |
-| `GET` | `/analyses/{id}/graph` | Full graph (states, transitions, evidence, verdict) | 200 / 404 |
-| `GET` | `/analyses/{id}/artifacts` | List artifact files (screenshot, DOM, HAR) | 200 / 404 |
-| `GET` | `/analyses/history?url=` or `?url_hash=` | Past analyses for the same URL | 200 / 422 |
-| `GET` | `/health` | Health check + running job count | 200 |
+| `GET` | `/api/v1/analyze?url=` | API key | Analisi sincrona, risposta binaria `{"result": {...}}` |
+| `POST` | `/analyses` | sessione o API key | Sottomissione asincrona (202) |
+| `GET` | `/analyses`, `/analyses/{id}` | sessione o API key | Elenco, stato + conteggi |
+| `GET` | `/analyses/{id}/graph` | sessione o API key | Grafo completo (stati, transizioni, evidenze, verdetto) |
+| `GET` | `/analyses/{id}/verdict` | sessione o API key | Lo stesso JSON di `/api/v1/analyze` per quell'analisi |
+| `GET` | `/analyses/{id}/artifacts[/...]` | sessione o API key | Artefatti (screenshot, DOM, HAR) |
+| `GET` | `/analyses/history?url=` | sessione o API key | Storico dello stesso URL |
+| `POST` | `/analyses/delete` | sessione | Cancellazione (con artefatti) |
+| `GET/POST/DELETE` | `/lists` | sessione | Whitelist/blacklist |
+| — | `/auth/*` | sessione | Login, logout, gestione utenti |
+| `GET` | `/health` | nessuna | Health check + job in esecuzione |
 
-### Avvio
+### Autenticazione
 
-```bash
-uvicorn graph_engine.api.app:app --reload
-```
+- **API key** (`X-API-Key`, variabile `API_KEY`, più chiavi separate da
+  virgola — una per servizio chiamante): obbligatoria su `/api/v1/*`
+  (503 se non configurata, 401 se errata). Sulle route del ciclo di vita
+  delle analisi (sottomissione e letture) vale in alternativa al cookie
+  di sessione. Confronto a tempo costante (`hmac.compare_digest`).
+- **Sessione** (cookie HttpOnly, 12h, utenti in SQLite): dashboard e
+  tutte le altre API.
 
-L'app va avviata dalla root del progetto (i path `data/` sono relativi).
+### `GET /api/v1/analyze` — API sincrona
 
-### Architettura del package
-
-```
-graph_engine/api/
-    __init__.py
-    app.py               — FastAPI app factory (create_app)
-    routes.py            — 6 endpoint, factory con db_path/artifact_root iniettabili
-    pipeline_runner.py   — run_full_analysis(): orchestrazione L0→L5, lifecycle status
-    schemas.py           — modelli Pydantic request/response (distinti dal dominio)
-    fast_profile.py      — budget/timeout del profilo fast Trellix (vedi sotto)
-    allowlist.py         — tabella allowlist/blacklist con matching eTLD+1
-    trellix_verdict.py   — mapping binario + signature + response builder
-    routes_trellix.py    — GET /trellix/analyze (wrapper sincrono Trellix)
-    static/dashboard/    — dashboard di monitoraggio (HTML/CSS/JS statici, montata su /dashboard)
-```
-
-### Test
-
-I test API usano `httpx.AsyncClient` + `ASGITransport` (nessun server reale).
-La pipeline è interamente mockata (nessun browser Playwright, nessuna rete):
-
-- **`FakePlaywright`** sostituisce `async_playwright()`
-- **`FakeExplorer`** sostituisce `StateGraphExplorer`
-- **`_fake_l2` / `_fake_l3`** sostituiscono gli analyzer OSINT e Active
-- L1 (lexical) è sync e non ha bisogno di mock async
-- `ingest()` (L0) **non** è mockato — è puro e offline
-
-I test verificano:
-- La race 202→GET 404 è chiusa
-- Il lifecycle status (queued → done) funziona
-- L'error path salva lo stato `error` con evidence `pipeline_error`
-- Gli stati parziali prodotti da L4 sopravvivono a un fallimento di L5
-  (il `target_id` API è iniettato in `explorer.run()` fin dall'inizio)
-- Gli endpoint history, artifacts e health rispondono correttamente
-
-### Limitazioni
-
-- **Multi-worker**: se si usano più worker uvicorn, i job girano nel worker
-  che ha ricevuto la richiesta. Lo stato su SQLite è la fonte di verità
-  condivisa, ma non c'è bilanciamento del carico tra worker.
-- **Nessuna autenticazione**: l'API è pensata per uso interno. Autenticazione
-  e autorizzazione vanno aggiunte prima di esporla su rete.
-- **Nessuna cancellazione**: non esiste un endpoint `DELETE /analyses/{id}`.
-
-## Wrapper Trellix
-
-Il wrapper espone un endpoint **sincrono** compatibile con Trellix IVX:
-`GET /trellix/analyze?url=...`. Trellix invia URL a un endpoint sincrono e
-si aspetta una risposta binaria `safe`/`malicious` entro ~60 secondi —
-un profilo radicalmente diverso da quello dell'API REST asincrona.
-
-### Principio guida: fire-and-continue, mai bloccare
-
-Il wrapper **non deve mai bloccare Trellix** oltre la sua deadline. Il
-pattern è **fire-and-continue**:
-
-1. L'analisi parte come background task (`asyncio.create_task`)
-2. La route attende al massimo 48s con `asyncio.wait([task], timeout=48)`
-   — **NON** `asyncio.wait_for`, che cancellerebbe il task
-3. Se il task non completa entro la finestra, la risposta è
-   `safe` + signature `Analysis-Incomplete — Benign By Default` con un
-   reason che dichiara esplicitamente che l'analisi continua in background
-4. Il task **continua** in background e persiste il risultato su SQLite;
-   la richiesta successiva per lo stesso URL (cache 24h) lo troverà
-
-La scelta "in dubbio → safe" è deliberata: meglio un falso negativo che
-bloccare un sito legittimo su un'analisi incompleta.
-
-### Flow della route
+Il servizio chiamante passa l'URL in query string e attende il verdetto
+finale. Il formato di risposta è identico a quello della precedente
+integrazione Trellix IVX (drop-in).
 
 ```
-GET /trellix/analyze?url=<double-encoded>
+GET /api/v1/analyze?url=<url, anche percent-encodato>
     │
-    ├─ 0. Auth Bearer opzionale (TRELLIX_API_TOKEN)
-    │     — confronto constant-time (secrets.compare_digest)
-    │     — se la variabile non è configurata, nessuna auth
-    │
-    ├─ 1. unquote() aggiuntivo (Trellix invia URL doppio-encodati)
-    │
-    ├─ 2. Allowlist/blacklist → risposta immediata (confidence 1.0)
-    │
-    ├─ 3. Cache 24h: get_latest_for_url_hash + status=done + verdict
+    ├─ 0. Auth X-API-Key (503 senza API_KEY, 401 se errata)
+    ├─ 1. URL = tutto ciò che segue "url=" nella query grezza
+    │     + decodifica percent-encoding iterativa (max 2048 caratteri)
+    ├─ 2. Whitelist/blacklist → risposta immediata (confidence 1.0)
+    ├─ 3. Cache 24h: ultima analisi per url_hash, done + verdict
     │     → risposta immediata dal DB
-    │
-    └─ 4. Fire-and-continue con budget FAST_BUDGET
-          (vedi fast_profile.py)
+    ├─ 4. Analisi già in corso per lo stesso url_hash → ci si aggancia;
+    │     altrimenti target "queued" + AnalysisJobs.start(...)
+    ├─ 5. await asyncio.shield(task) — una disconnessione cancella solo
+    │     la richiesta, mai l'analisi (il risultato resta in cache)
+    └─ 6. Risposta dal risultato persistito di QUELLA analisi (per id)
 ```
 
-### Verdetto binario
+Nessuna deadline imposta dal modulo: il budget interno dell'esplorazione
+resta quello pieno del runner.
 
-| Classification | Verdetto Trellix | Azione |
+#### Verdetto binario (`api/verdict_response.py`)
+
+| Classification | Verdetto | Azione |
 |---|---|---|
 | `benign` | `safe` | `allow` |
-| `suspicious` | `safe` | `allow` |
+| `suspicious` (confidence < 0.6) | `safe` | `allow` |
+| `suspicious` (confidence ≥ 0.6) | `malicious` | `block` |
 | `phishing` | `malicious` | `block` |
 
-La signature testuale ha una catena di priorità:
+La signature testuale ha una catena di priorità (solo su `malicious`):
 1. **Brand impersonation** — brand noto trovato nell'evidenza L1
    `typosquat` o in `verdict.brand` → `Phishing: {brand} Impersonation`
 2. **Gate bypass** — evidenza `gate_solved` → `Suspicious Gate Bypass Detected`
@@ -808,91 +758,61 @@ La signature testuale ha una catena di priorità:
    `kit_family` con "aitm"/"harvest" → `Credential Harvesting Detected`
 4. **Firma generica** basata sulla classificazione
 
-Nota: i form fields NON sono persistiti come evidenza
-(`pipeline_runner._run_classification` li inizializza a `[]`), quindi il
-rilevamento credenziali usa solo i segnali L1 persistiti.
-
-### Profilo fast (`fast_profile.py`)
-
-Trellix concede ~60s totali per l'intera risposta. Il profilo fast
-dimensiona la pipeline per terminare entro ~45s:
-
-| Fase | Budget |
-|---|---|
-| L0+L1 (sync, locali) | ~1s |
-| L2+L3 (rete, in parallelo) | ≤ 5s (timeout espliciti) |
-| L4 BFS Playwright | `FAST_BUDGET = Budget(max_depth=3, max_nodes=8, timeout_s=25)` |
-| L5 (prefilter/fallback) | ~1s |
-
-Altri parametri del profilo:
-- `FAST_TOP_N_ACTIONS = 1` — un solo candidato click per stato (default: 3)
-- `FAST_CAPTCHA_WAIT_S = 4` — metà dell'attesa standard (default: 8)
-- `FAST_L2_TIMEOUT_S = 5.0`, `FAST_L3_TIMEOUT_S = 5.0` — timeout di rete
-  dimezzati (default: ctlogs.dev/RDAP 15s, DNS 5s, JARM 10s)
-- `TRELLIX_RESPONSE_TIMEOUT_S = 48` — attesa massima del wrapper (12s di
-  margine sulla deadline di 60s)
-
-La classificazione Foundry NON rientra nella garanzia di tempo: se
-configurata può sforare la finestra → il wrapper risponde onestamente
-"Analysis-Incomplete" e il task continua in background.
-
-Per supportare il profilo fast, le funzioni L2/L3 accettano un parametro
-`timeout`/`timeout_s` opzionale (backward-compatible, default invariati):
-
-- `osint/certificate_transparency.py`: `query_ctlogs(..., timeout=CTLOGS_TIMEOUT)`
-- `osint/rdap.py`: `query_rdap(..., timeout=RDAP_TIMEOUT)`
-- `osint/dns_resolve.py`: `resolve_dns(..., timeout=_DNS_TIMEOUT)`
-- `osint/analyzer.py`: `analyze(..., timeout_s=None)`
-- `active/analyzer.py`: `analyze(..., timeout_s=None)` (solo JARM)
-- `api/pipeline_runner.py`: `run_full_analysis(..., l2_timeout_s=None, l3_timeout_s=None, captcha_wait_s=8)`
+Rami non conclusivi (sempre `safe`/`allow`, confidence 0.1):
+`Analysis-Failed` (pipeline in errore) e `Analysis-Incomplete — Benign
+By Default` (analisi senza classificazione o non ancora conclusa, es.
+letta in polling con `/analyses/{id}/verdict`).
 
 ### Allowlist/blacklist (`allowlist.py`)
 
-Tabella SQLite `allowlist_blacklist` con matching sul **dominio
-registrabile** (eTLD+1) — la stessa normalizzazione usata da L1 (typosquat)
-e L2 (RDAP):
-
-```sql
-CREATE TABLE IF NOT EXISTS allowlist_blacklist (
-    domain    TEXT PRIMARY KEY,
-    list_type TEXT NOT NULL CHECK (list_type IN ('whitelist', 'blacklist')),
-    note      TEXT,
-    added_by  TEXT,
-    added_at  TEXT NOT NULL
-);
-```
-
-- `check_domain(domain)` → `{"list_type": ..., "note": ...}` o `None`
-  (cercare `login.example.com` matcha l'entry `example.com`)
-- `add_entry(domain, list_type, ...)` → `INSERT OR REPLACE` (idempotente)
-- `remove_entry(domain)` → `True`/`False`
-
-Un hit allowlist/blacklist bypassa completamente l'analisi: risposta
-immediata con confidence 1.0 e signature `Whitelist-Override` /
-`Blacklist-Override`.
+Due tabelle SQLite: `allowlist_blacklist` (match sul **dominio
+registrabile**, eTLD+1 — la stessa normalizzazione di L1/L2) e
+`allowlist_blacklist_url` (match sulla URL canonica L0 senza query e
+frammento). `check_url_and_domain()` dà la precedenza al match più
+specifico (URL > dominio). Un hit bypassa completamente l'analisi, sia su
+`/api/v1/analyze` (signature `Whitelist-Override` / `Blacklist-Override`,
+confidence 1.0) sia su `POST /analyses` (target `done` con verdetto
+forzato).
 
 ### Architettura del package
 
 ```
 graph_engine/api/
-    ...
-    fast_profile.py     — budget e timeout del profilo fast Trellix
-    allowlist.py        — tabella allowlist/blacklist (matching eTLD+1)
-    trellix_verdict.py  — VERDICT_MAP, build_signature, build_trellix_response
-    routes_trellix.py   — build_trellix_router() — GET /trellix/analyze
+    __init__.py
+    app.py               — app factory (create_app), middleware auth, lifespan
+    routes.py            — /analyses*, /lists, /health
+    routes_external.py   — GET /api/v1/analyze (API sincrona)
+    jobs.py              — AnalysisJobs: concorrenza, dedup in-flight, task
+    pipeline_runner.py   — run_full_analysis(): orchestrazione L0→L5, lifecycle
+    verdict_response.py  — mapping binario + signature + response builder
+    schemas.py           — modelli Pydantic request/response
+    allowlist.py         — whitelist/blacklist (dominio eTLD+1 e URL)
+    auth.py, auth_routes.py, auth_cli.py — utenti, sessioni, API key
+    browser_pool.py      — Chromium condiviso
+    artifact_cleanup.py  — rimozione artefatti alla cancellazione
+    static/dashboard/    — dashboard (HTML/CSS/JS statici, su /dashboard)
 ```
 
 ### Test
 
-I test del wrapper sono in `tests/graph_engine/test_trellix/`:
+I test API usano `httpx.AsyncClient` + `ASGITransport` (nessun server
+reale). La pipeline è mockata (nessun browser Playwright, nessuna rete):
+`FakePlaywright`, `FakeExplorer`, `_fake_l2` / `_fake_l3`; oppure si
+sostituisce `graph_engine.api.jobs.run_full_analysis`.
 
-- `test_allowlist.py` — CRUD + matching su dominio esatto/sottodominio
-- `test_verdict_mapping.py` — mapping ternario→binario, signature con/senza
-  brand, `timed_out=True` forza sempre `safe`/`allow`
-- `test_routes_trellix.py` — whitelist/cache hit bypassano
-  `run_full_analysis`, timeout fire-and-continue (il task completa DOPO la
-  risposta e il risultato è su SQLite), URL doppio-encodato
-- `test_auth.py` — token richiesto quando configurato, assente altrimenti
+- `tests/graph_engine/test_api/` — route REST, auth/sessioni, runner,
+  registro dei job, browser pool, cancellazione artefatti
+- `tests/graph_engine/test_external_api/` — API key (503/401/chiavi
+  multiple, API key sulle route di polling), route sincrona (allowlist,
+  cache, attesa del completamento, URL encodati, dedup in-flight,
+  sopravvivenza alla disconnessione), mapping del verdetto, allowlist
+
+### Limitazioni
+
+- **Un solo worker**: sessioni, registro dei job e dedup vivono nel
+  processo. Con più worker uvicorn la dedup e il limite di concorrenza
+  varrebbero per singolo worker.
+- **Nessuna cancellazione di un'analisi in corso**.
 
 ## Dashboard di monitoraggio
 
@@ -952,10 +872,10 @@ più permessa nei moduli.
 - Classe `Settings(BaseSettings)` (pydantic-settings) con `env_file=".env"`,
   `env_file_encoding="utf-8"`, `extra="ignore"` — variabili ignote non
   causano errori.
-- Tutti i campi sono `Optional[str] = None`: senza alcuna configurazione
+- Tutti i campi (tranne `max_concurrent_analyses`) sono `Optional[str] = None`: senza alcuna configurazione
   il progetto funziona degradato esattamente come prima (provider di
-  reputazione extra disabilitati, L5 con fallback euristico, endpoint
-  Trellix aperto).
+  reputazione disabilitato, L5 con fallback euristico); l'API esterna
+  senza `API_KEY` risponde 503.
 - I nomi di campo sono snake_case e si mappano alle variabili d'ambiente
   MAIUSCOLE: `azure_foundry_endpoint` ← `AZURE_FOUNDRY_ENDPOINT`, ecc.
 - I valori stringa vengono strippati degli spazi accidentali (preserva il
@@ -976,12 +896,13 @@ più permessa nei moduli.
 | `AZURE_VISION_ENDPOINT` | `azure_vision_endpoint` | arricchimento L5 (OCR + Brand Detection) | richiede anche `AZURE_VISION_KEY` (`vision_configured`); riusa la risorsa Cognitive Services già attiva (italynorth) |
 | `AZURE_VISION_KEY` | `azure_vision_key` | arricchimento L5 (OCR + Brand Detection) | richiede anche `AZURE_VISION_ENDPOINT`; chiave della risorsa (header `Ocp-Apim-Subscription-Key` per la REST legacy v3.2, `AzureKeyCredential` per la SDK moderna) |
 | `URLHAUS_API_KEY` | `urlhaus_api_key` | provider URLhaus (L2) | campo singolo (`urlhaus_configured`); endpoint fisso `urlhaus-api.abuse.ch`, chiave gratuita da https://auth.abuse.ch/ |
-| `TRELLIX_API_TOKEN` | `trellix_api_token` | auth Bearer su `/trellix/analyze` | campo singolo (`trellix_auth_required`) |
+| `API_KEY` | `api_key` | auth `X-API-Key` su `/api/v1/*` (e polling `/analyses`) | più chiavi separate da virgola (`api_keys`); senza → 503 |
+| `MAX_CONCURRENT_ANALYSES` | `max_concurrent_analyses` | limite di pipeline concorrenti | intero, default 4 |
 
 Le property `foundry_configured` / `vision_configured` richiedono **ENTRAMBE** le variabili della coppia
 (una sola non basta); `service_principal_configured` richiede **TUTTE e
-tre** le variabili AAD; `urlhaus_configured` e `trellix_auth_required`
-sono True con il singolo valore impostato (e non vuoto).
+tre** le variabili AAD; `urlhaus_configured` è True con il singolo
+valore impostato (e non vuoto).
 
 ### Attivazione
 
@@ -998,7 +919,7 @@ AZURE_CLIENT_SECRET=<secret>             #   senza terna → DefaultAzureCredent
 AZURE_VISION_ENDPOINT=https://<risorsa>.cognitiveservices.azure.com  # → OCR + Brand Detection sugli screenshot
 AZURE_VISION_KEY=<chiave-risorsa>        #   (risorsa Cognitive Services riusata)
 URLHAUS_API_KEY=<auth-key>               # → provider URLhaus attivo in L2 (gratuita, https://auth.abuse.ch/)
-TRELLIX_API_TOKEN=<token>                # → /trellix/analyze richiede Bearer
+API_KEY=<chiave-client-1>,<chiave-client-2>  # → /api/v1/analyze (obbligatoria)
 ```
 
 ### Aggiungere un futuro provider a chiave

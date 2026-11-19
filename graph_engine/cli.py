@@ -332,7 +332,7 @@ async def _print_history(history_input: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="IVX GraphEngine — BFS state-graph explorer",
+        description="GraphEngine — BFS state-graph explorer",
     )
     parser.add_argument(
         "url",

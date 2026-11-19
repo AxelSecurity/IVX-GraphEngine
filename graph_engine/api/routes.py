@@ -6,7 +6,6 @@ di puntare a directory temporanee senza toccare il filesystem reale.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from pathlib import Path
@@ -25,7 +24,8 @@ from graph_engine.api.allowlist import (
     remove_url_entry,
 )
 from graph_engine.api.artifact_cleanup import remove_artifact_dirs
-from graph_engine.api.pipeline_runner import DEFAULT_ARTIFACT_ROOT, run_full_analysis
+from graph_engine.api.jobs import get_jobs
+from graph_engine.api.pipeline_runner import DEFAULT_ARTIFACT_ROOT
 from graph_engine.api.schemas import (
     AnalysesDeleteRequest,
     AnalysesDeleteResponse,
@@ -46,10 +46,10 @@ from graph_engine.api.schemas import (
     ListRemoveResponse,
     ListsResponse,
     TargetSummary,
-    TrellixVerdictResponse,
+    ExternalVerdictResponse,
     VerdictSummary,
 )
-from graph_engine.api.trellix_verdict import build_trellix_response
+from graph_engine.api.verdict_response import build_verdict_response
 from graph_engine.budget import Budget
 from graph_engine.models import AnalysisTarget, Classification, TargetStatus, Verdict
 from graph_engine.storage.repository import (
@@ -123,17 +123,6 @@ def build_router(
 
     router = APIRouter()
 
-    def _on_task_done(task: asyncio.Task) -> None:
-        """Consuma l'eccezione del background task per evitare
-        ``Task exception was never retrieved``.  Lo stato 'error' è già
-        stato persistito su SQLite dal runner."""
-        try:
-            exc = task.exception()
-        except asyncio.CancelledError:
-            return
-        if exc is not None:
-            logger.error("Background analysis failed: %s", exc)
-
     # ──────────────────────────────────────────────────────────────────────
     # POST /analyses — submit a new analysis (202 Accepted)
     # ──────────────────────────────────────────────────────────────────────
@@ -147,7 +136,7 @@ def build_router(
         """Avvia una nuova analisi in background.
 
         Il target viene creato e salvato come ``queued`` **prima** di
-        lanciare ``asyncio.create_task`` — un GET immediato sull'id
+        avviare la pipeline — un GET immediato sull'id
         restituito non darà mai 404.
 
         Bypass whitelist/blacklist: se la URL (o il suo dominio
@@ -212,22 +201,19 @@ def build_router(
                 timeout_s=payload.budget.timeout_s,
             )
 
-        # Avvia la pipeline in background (NON await — rispondiamo subito)
-        # Browser condiviso dal lifespan dell'app (app.state.browser_pool):
-        # nessun launch Chromium per richiesta.  Nei test con router
-        # standalone (nessun lifespan eseguito) il getattr dà None e la
-        # pipeline degrada al browser effimero — invariato.
-        task = asyncio.create_task(
-            run_full_analysis(
-                url,
-                budget=budget,
-                classify=payload.classify,
-                target=target,
-                db_path=db_path,
-                browser_pool=getattr(request.app.state, "browser_pool", None),
-            )
+        # Avvia la pipeline in background (NON await — rispondiamo
+        # subito) tramite il registro dei job: limite di concorrenza e
+        # riferimento forte al task.  Browser condiviso dal lifespan
+        # dell'app (app.state.browser_pool); senza lifespan (test) il
+        # getattr dà None e la pipeline usa un browser effimero.
+        get_jobs(request.app).start(
+            url,
+            target,
+            budget=budget,
+            classify=payload.classify,
+            db_path=db_path,
+            browser_pool=getattr(request.app.state, "browser_pool", None),
         )
-        task.add_done_callback(_on_task_done)
 
         logger.info("Analysis %s queued for %s", target.id, url)
         return AnalysisCreatedResponse(
@@ -414,26 +400,26 @@ def build_router(
         )
 
     # ──────────────────────────────────────────────────────────────────────
-    # GET /analyses/{target_id}/trellix — JSON restituito a Trellix IVX
+    # GET /analyses/{target_id}/verdict — JSON del contratto esterno
     # ──────────────────────────────────────────────────────────────────────
 
     @router.get(
-        "/analyses/{target_id}/trellix",
-        response_model=TrellixVerdictResponse,
+        "/analyses/{target_id}/verdict",
+        response_model=ExternalVerdictResponse,
     )
-    async def get_analysis_trellix_response(target_id: str):
-        """Il JSON che la route Trellix IVX restituisce per questa analisi.
+    async def get_analysis_verdict_response(target_id: str):
+        """Il JSON che ``GET /api/v1/analyze`` restituisce per questa analisi.
 
-        Rigenerato con la STESSA funzione (``build_trellix_response``)
-        usata da ``GET /trellix/analyze``: la dashboard mostra esattamente
-        ciò che Trellix ha ricevuto o riceverebbe in questo momento —
-        per un'analisi ancora in corso include il ramo Analysis-Incomplete.
+        Rigenerato con la STESSA funzione (``build_verdict_response``)
+        della route sincrona: è anche la risposta da leggere a fine
+        polling per chi usa ``POST /analyses``.  Per un'analisi ancora
+        in corso include il ramo Analysis-Incomplete.
         """
         data = await get_target_by_id(target_id, db_path=db_path)
         if data is None:
             raise HTTPException(status_code=404, detail="Analisi non trovata")
 
-        return build_trellix_response(data)
+        return build_verdict_response(data)
 
     # ──────────────────────────────────────────────────────────────────────
     # GET /analyses/{target_id}/artifacts — listing ricorsivo
