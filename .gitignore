@@ -12,3 +12,6 @@ data/*.db-shm
 
 # Istruzioni locali per Claude Code (non da committare)
 CLAUDE.md
+
+# Benchmark L4 su URL reali (lista e risultati restano locali)
+benchmarks/

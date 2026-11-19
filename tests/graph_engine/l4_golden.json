@@ -1,0 +1,131 @@
+{
+  "beacon": {
+    "states": [
+      [
+        0,
+        "/beacon/",
+        "16a6e338bc840d215f1a56ec31e3811db63013e50009f5d6c49d3670f9658408"
+      ],
+      [
+        1,
+        "/beacon/next",
+        "9e7e8dcda4a5f5ed1e3f33761b30cba5c0fbfbc57745fef454a6e223cc4b909c"
+      ]
+    ],
+    "transition_kinds": {
+      "click": 1
+    }
+  },
+  "fetch_render": {
+    "states": [
+      [
+        0,
+        "/fr/",
+        "75f2d367e0c725d27694742ef3d0a703f9bb76464184913d7ea0a62330100025"
+      ]
+    ],
+    "transition_kinds": {}
+  },
+  "gate": {
+    "states": [
+      [
+        0,
+        "/gate/",
+        "c3fff156eeddff7cab64875c369dc7fd5c35dda79951cde68b26c901b359cc53"
+      ],
+      [
+        1,
+        "/gate/",
+        "4f619a12d2a884afaa6e56d1d34c5586040f2dcd4d846a81ed86254695e25cec"
+      ],
+      [
+        2,
+        "/gate/next",
+        "b69bd43d5fbfe913cc81b2f842c7c538951ff98840a69b260da5e78cc6ad034f"
+      ]
+    ],
+    "transition_kinds": {
+      "click": 1,
+      "gate_solved": 1
+    }
+  },
+  "js_redirect": {
+    "states": [
+      [
+        0,
+        "/jsr/",
+        "69a824b2d8ad2eb0355a7b28895df47ee513309926c2292667778ae70371539f"
+      ],
+      [
+        1,
+        "/jsr/landing",
+        "b69bd43d5fbfe913cc81b2f842c7c538951ff98840a69b260da5e78cc6ad034f"
+      ]
+    ],
+    "transition_kinds": {
+      "js_location": 1
+    }
+  },
+  "meta_refresh": {
+    "states": [
+      [
+        0,
+        "/meta/",
+        "1069effa16f6fc83b27e7f91cad1669f79b219dc8c7da037c97a8ebd28940546"
+      ],
+      [
+        1,
+        "/meta/target",
+        "b69bd43d5fbfe913cc81b2f842c7c538951ff98840a69b260da5e78cc6ad034f"
+      ]
+    ],
+    "transition_kinds": {
+      "js_location": 1,
+      "meta_refresh": 1
+    }
+  },
+  "multipage": {
+    "states": [
+      [
+        0,
+        "/mp/",
+        "7046ee0407d57eebc849f098d61e1f203416f3a4e0b7bdcecb42d29b0dae76b2"
+      ],
+      [
+        1,
+        "/mp/step2",
+        "4f269b857fb33e3c3d26884438445290377a691e0adf56ad5dec525f8fcf8432"
+      ],
+      [
+        2,
+        "/mp/login",
+        "b69bd43d5fbfe913cc81b2f842c7c538951ff98840a69b260da5e78cc6ad034f"
+      ]
+    ],
+    "transition_kinds": {
+      "click": 2
+    }
+  },
+  "spa": {
+    "states": [
+      [
+        0,
+        "/spa/",
+        "e28b00f5e08e3e0b53ecf1dcb3753f79e368882efaddcd98ca774d8509d4dc72"
+      ],
+      [
+        1,
+        "/spa/",
+        "c1334c54f7007c76548ec59c7f29fd8e6f3035d89a816b494c1c0b0c8290b4d7"
+      ],
+      [
+        2,
+        "/spa/",
+        "5fbbd8feb7a844b9348c47b8f4912a7aa79bbad7db4b92c510f463e5db564a6e"
+      ]
+    ],
+    "transition_kinds": {
+      "click": 2
+    }
+  }
+}
