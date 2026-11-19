@@ -391,7 +391,7 @@ class StateGraphExplorer:
                             # The DOM changed (gate iframe gone / replaced) —
                             # record a new State + Transition.
                             post_html = await page.content()
-                            post_hash = normalise_and_hash(post_html)
+                            post_hash = await asyncio.to_thread(normalise_and_hash, post_html)
                             post_url = page.url
 
                             if post_hash != state.dom_hash:
@@ -947,7 +947,7 @@ class StateGraphExplorer:
 
         # --- capture HTML and compute hash -----------------------------------
         html_str = await page.content()
-        dom_hash = normalise_and_hash(html_str)
+        dom_hash = await asyncio.to_thread(normalise_and_hash, html_str)
 
         state = State(
             target_id=self.target.id,  # type: ignore[union-attr]
@@ -1123,12 +1123,15 @@ class StateGraphExplorer:
         try:
             # Replay the full transition path to reach *from_state*'s DOM.
             # This correctly handles states reached via click where the URL
-            # never changed (SPA, multi-step forms).
-            await self._replay_to_state(new_page, from_state)
+            # never changed (SPA, multi-step forms).  If the replay fell
+            # back (the page is NOT on from_state's DOM), clicking here
+            # would attribute an unrelated page to from_state: skip.
+            if not await self._replay_to_state(new_page, from_state):
+                return None
 
             # Pre-click snapshot.
             pre_html = await new_page.content()
-            pre_hash = normalise_and_hash(pre_html)
+            pre_hash = await asyncio.to_thread(normalise_and_hash, pre_html)
             pre_url = new_page.url
 
             # Click.
@@ -1150,7 +1153,7 @@ class StateGraphExplorer:
             # Post-click snapshot.
             post_url = new_page.url
             post_html = await new_page.content()
-            post_hash = normalise_and_hash(post_html)
+            post_hash = await asyncio.to_thread(normalise_and_hash, post_html)
 
             # --- no observable change → discard branch -----------------------
             if post_url.rstrip("/") == pre_url.rstrip("/") and post_hash == pre_hash:
