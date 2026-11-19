@@ -291,7 +291,13 @@ checkbox, radio, file. Serve come segnale: "questa pagina chiede email,
 password, numero di carta, CVV, Codice Fiscale".
 
 L'explorer lo esegue alla creazione di OGNI stato (navigazione, gate
-superato, click) e conserva il risultato in
+superato, click), anche dentro gli **iframe** (`scan_child_frames`: max
+5 frame, iframe dei CAPTCHA esclusi; ogni campo porta `frame_url`), e
+raccoglie il testo visibile degli iframe in
+`StateGraphExplorer.frame_texts_by_state` (molti kit caricano il form
+di login in un iframe). Il prompt mostra una sezione "Contenuto degli
+iframe" e il prefiltro non considera vuota una pagina il cui testo sta
+in un iframe. I campi finiscono in
 `StateGraphExplorer.form_fields_by_state`; la pipeline lo passa a L5,
 dove finisce nel bundle (`form_fields` per stato), nel conteggio dei
 campi del prefilter e nel fallback euristico.

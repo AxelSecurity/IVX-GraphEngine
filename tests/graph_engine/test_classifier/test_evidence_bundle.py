@@ -1041,3 +1041,31 @@ class TestPromptCompression:
         bundle_to_prompt_text(bundle)
 
         assert bundle == before
+
+
+class TestIframeContentInBundle:
+    async def test_frame_text_and_fields_reach_the_prompt(self):
+        state = _state("h-iframe", 0, url="https://kit.example/")
+        sid = str(state.id)
+        bundle = await build_evidence_bundle(
+            target_url="https://kit.example/",
+            canonical_url=None,
+            states=[state],
+            transitions=[],
+            evidence=[],
+            form_fields_by_state={sid: [{
+                "tag": "input", "type": "password", "name_or_id": "pass",
+                "nearby_label_text": "Password",
+                "frame_url": "https://kit.example/frame",
+            }]},
+            visible_text_by_state={sid: "Sign in to your Account"},
+            titles_by_state={sid: "Sign in"},
+            analyze_screenshots=False,
+            frame_texts_by_state={sid: [
+                {"url": "https://kit.example/frame", "text": "Webmail login Email Password"},
+            ]},
+        )
+        text = bundle_to_prompt_text(bundle)
+        assert "Contenuto degli iframe:" in text
+        assert "[https://kit.example/frame] Webmail login" in text
+        assert "(dentro iframe https://kit.example/frame)" in text

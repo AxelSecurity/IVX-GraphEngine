@@ -169,6 +169,7 @@ async def _fake_classification(
     target, states, transitions, evidence,
     lexical_risk_score=None, passive_risk_score=None,
     form_fields_by_state=None,
+    frame_texts_by_state=None,
 ) -> Verdict:
     """Classificazione finta — restituisce sempre suspicious con conf 0.5."""
     return Verdict(

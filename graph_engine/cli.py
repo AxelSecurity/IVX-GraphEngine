@@ -177,6 +177,9 @@ async def _main(args: argparse.Namespace) -> None:
                     form_fields_by_state=getattr(
                         explorer, "form_fields_by_state", None
                     ),
+                    frame_texts_by_state=getattr(
+                        explorer, "frame_texts_by_state", None
+                    ),
                 )
                 if verdict:
                     logging.info(

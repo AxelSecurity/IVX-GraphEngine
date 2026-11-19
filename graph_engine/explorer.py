@@ -23,7 +23,7 @@ from playwright.async_api import Browser, BrowserContext, Page
 
 from graph_engine.actions import enumerate_actionable
 from graph_engine.budget import Budget
-from graph_engine.classifier.form_inventory import scan_form_fields
+from graph_engine.classifier.form_inventory import scan_child_frames, scan_form_fields
 from graph_engine.config import settings
 from graph_engine.dom_hash import normalise_and_hash
 from graph_engine.gate_solver import detect_captcha, try_pass_gate
@@ -285,6 +285,9 @@ class StateGraphExplorer:
         # Campi form visibili per stato (str(state.id) → scan_form_fields):
         # inventario PASSIVO (sola lettura, nessun fill/click) per L5.
         self.form_fields_by_state: dict[str, list[dict]] = {}
+        # Testo visibile degli iframe per stato (str(state.id) →
+        # [{"url", "text"}]): i kit che caricano il form in un iframe.
+        self.frame_texts_by_state: dict[str, list[dict]] = {}
 
         # Internal BFS state
         self._visited: set[str] = set()  # dom_hash set
@@ -1775,17 +1778,23 @@ class StateGraphExplorer:
             await page.screenshot(path=str(path), full_page=True, clip=clip)
 
     async def _scan_forms(self, state: State, page: Page) -> None:
-        """Inventario passivo dei campi form di *state* (mai fill/click).
+        """Inventario passivo di *state* (mai fill/click): campi form del
+        documento principale e degli iframe, testo degli iframe.
 
-        Best-effort: un errore lascia la lista vuota, non blocca il BFS.
+        Best-effort: un errore lascia le liste vuote, non blocca il BFS.
         """
         try:
             fields = await scan_form_fields(page)
         except Exception:
             fields = []
-        self.form_fields_by_state[str(state.id)] = (
-            fields if isinstance(fields, list) else []
-        )
+        fields = fields if isinstance(fields, list) else []
+        try:
+            frame_fields, frame_texts = await scan_child_frames(page)
+        except Exception:
+            frame_fields, frame_texts = [], []
+        self.form_fields_by_state[str(state.id)] = fields + frame_fields
+        if frame_texts:
+            self.frame_texts_by_state[str(state.id)] = frame_texts
 
     async def _save_artifacts(
         self,

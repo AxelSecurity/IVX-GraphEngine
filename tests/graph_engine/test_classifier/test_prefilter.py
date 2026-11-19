@@ -394,6 +394,17 @@ class TestPrefilterStrongSignals:
             assert prefilter(bundle) is None, marker
 
 
+class TestIframeTextCountsAsContent:
+    def test_page_with_only_iframe_text_is_not_sparse(self):
+        """Contenuto solo dentro un iframe (form di login del kit): NON è
+        una pagina vuota → delega a Foundry invece di 'dati insufficienti'."""
+        bundle = _sparse_l4_bundle()
+        bundle["states"][0]["frame_texts"] = [
+            {"url": "https://kit.example/frame", "text": "Webmail login"}
+        ]
+        assert prefilter(bundle) is None
+
+
 class TestTlsFailureRule:
     """Regola deterministica TLS (regressione 2026-08-28:
     www.facebook-login-redirect.blogspot.com rispondeva safe/0.05

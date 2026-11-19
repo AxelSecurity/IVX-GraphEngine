@@ -7,8 +7,24 @@ mutates page state.
 
 from __future__ import annotations
 
+import asyncio
 
 from playwright.async_api import Page
+
+# Iframe dei CAPTCHA/anti-bot: il loro contenuto ("Verify you are
+# human", checkbox) non dice nulla sulla pagina e confonderebbe L5.
+_SKIP_FRAME_MARKERS = (
+    "challenges.cloudflare.com",
+    "hcaptcha.com",
+    "google.com/recaptcha",
+    "recaptcha.net",
+)
+_MAX_FRAMES = 5
+_FRAME_EVAL_TIMEOUT_S = 2.0
+_MAX_FRAME_TEXT_CHARS = 1500
+
+_FRAME_TEXT_SCRIPT = """() => (document.body ? document.body.innerText : '')
+    .replace(/\\s+/g, ' ').trim().slice(0, """ + str(_MAX_FRAME_TEXT_CHARS) + """)"""
 
 
 async def scan_form_fields(page: Page) -> list[dict]:
@@ -27,6 +43,51 @@ async def scan_form_fields(page: Page) -> list[dict]:
     """
     raw: list[dict] = await page.evaluate(_SCAN_SCRIPT)
     return raw
+
+
+async def scan_child_frames(page: Page) -> tuple[list[dict], list[dict]]:
+    """Campi form e testo visibile degli IFRAME della pagina (sola lettura).
+
+    Molti kit caricano il form di login dentro un iframe: lo scan del solo
+    documento principale non lo vede.  Per ogni frame figlio (max
+    ``_MAX_FRAMES``, iframe dei CAPTCHA esclusi) restituisce:
+
+    - i campi form, con in più ``frame_url``;
+    - ``{"url", "text"}`` col testo visibile (troncato), solo per i frame
+      con testo o campi.
+
+    Best-effort: un frame che non risponde entro ``_FRAME_EVAL_TIMEOUT_S``
+    o che si stacca durante la lettura viene saltato.
+    """
+    fields: list[dict] = []
+    texts: list[dict] = []
+    examined = 0
+    for frame in page.frames:
+        if frame == page.main_frame:
+            continue
+        url = frame.url or ""
+        if any(marker in url for marker in _SKIP_FRAME_MARKERS):
+            continue
+        if examined >= _MAX_FRAMES:
+            break
+        examined += 1
+        try:
+            frame_fields = await asyncio.wait_for(
+                frame.evaluate(_SCAN_SCRIPT), _FRAME_EVAL_TIMEOUT_S
+            )
+            text = await asyncio.wait_for(
+                frame.evaluate(_FRAME_TEXT_SCRIPT), _FRAME_EVAL_TIMEOUT_S
+            )
+        except Exception:
+            continue
+        frame_fields = frame_fields if isinstance(frame_fields, list) else []
+        text = text if isinstance(text, str) else ""
+        for field in frame_fields:
+            if isinstance(field, dict):
+                fields.append(dict(field, frame_url=url))
+        if text or frame_fields:
+            texts.append({"url": url, "text": text})
+    return fields, texts
 
 
 # ---------------------------------------------------------------------------

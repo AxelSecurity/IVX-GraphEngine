@@ -703,3 +703,71 @@ class TestScreenshotHeightCap:
 
         assert _png_dimensions(str(long_png)) == (1280, 8000)
         assert _png_dimensions(str(short_png)) == (1280, 3000)
+
+
+# ---------------------------------------------------------------------------
+# Iframe — campi form e testo dei frame figli arrivano all'inventario
+# ---------------------------------------------------------------------------
+
+_IFRAME_HOST_PAGE = """\
+<!DOCTYPE html><html><head><title>Sign in to your Account</title></head>
+<body><h1>Sign in to your Account</h1>
+<iframe src="/frame" width="600" height="400"></iframe>
+<iframe src="https://challenges.cloudflare.com/turnstile/x" width="300" height="65"></iframe>
+</body></html>"""
+
+_IFRAME_LOGIN = """\
+<!DOCTYPE html><html><body><h2>Webmail login</h2>
+<label for="u">Email address</label><input id="u" name="user" type="email">
+<label for="p">Password</label><input id="p" name="pass" type="password">
+</body></html>"""
+
+
+class _IframeHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        body = (_IFRAME_LOGIN if self.path == "/frame" else _IFRAME_HOST_PAGE).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class TestIframeInventory:
+    async def test_login_form_inside_iframe_is_collected(self):
+        from playwright.async_api import async_playwright
+
+        from graph_engine.budget import Budget
+        from graph_engine.explorer import StateGraphExplorer
+
+        server = HTTPServer(("127.0.0.1", 0), _IframeHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    explorer = StateGraphExplorer(browser)
+                    await explorer.run(
+                        f"http://127.0.0.1:{server.server_port}/",
+                        budget=Budget(max_depth=1, max_nodes=2, timeout_s=30),
+                        capture_artifacts=False,
+                        top_n_actions=0,
+                        captcha_wait_s=0,
+                    )
+                finally:
+                    await browser.close()
+        finally:
+            server.shutdown()
+
+        root = next(s for s in explorer.states if s.depth == 0)
+        fields = explorer.form_fields_by_state[str(root.id)]
+        assert sorted(f["type"] for f in fields) == ["email", "password"]
+        assert all(f["frame_url"].endswith("/frame") for f in fields)
+
+        texts = explorer.frame_texts_by_state[str(root.id)]
+        assert len(texts) == 1  # l'iframe Turnstile è escluso
+        assert "Webmail login" in texts[0]["text"]

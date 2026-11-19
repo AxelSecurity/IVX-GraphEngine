@@ -79,12 +79,14 @@ async def _run_classification(
     lexical_risk_score: Optional[float] = None,
     passive_risk_score: Optional[float] = None,
     form_fields_by_state: Optional[dict[str, list[dict]]] = None,
+    frame_texts_by_state: Optional[dict[str, list[dict]]] = None,
 ) -> Optional[Verdict]:
     """Build evidence bundle, run prefilter + classifier, return Verdict.
 
     Usata sia dalla CLI che dall'API.  ``form_fields_by_state`` è
     l'inventario passivo dei campi raccolto dall'explorer durante L4
-    (``StateGraphExplorer.form_fields_by_state``).
+    (``StateGraphExplorer.form_fields_by_state``, iframe compresi);
+    ``frame_texts_by_state`` il testo visibile degli iframe.
     """
     from graph_engine.classifier.evidence_bundle import build_evidence_bundle
     from graph_engine.classifier.prefilter import prefilter
@@ -134,6 +136,7 @@ async def _run_classification(
         titles_by_state=titles_by_state,
         lexical_risk_score=lexical_risk_score,
         passive_risk_score=passive_risk_score,
+        frame_texts_by_state=frame_texts_by_state,
     )
     bundle["target_id"] = str(target.id)
 
@@ -444,6 +447,9 @@ async def run_full_analysis(
                 passive_risk_score=l2_result["passive_risk_score"],
                 form_fields_by_state=getattr(
                     explorer, "form_fields_by_state", None
+                ),
+                frame_texts_by_state=getattr(
+                    explorer, "frame_texts_by_state", None
                 ),
             )
 

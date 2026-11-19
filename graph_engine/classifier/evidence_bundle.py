@@ -35,6 +35,7 @@ _STRONG_EVIDENCE_KEYS = ("typosquat", "reputation_hit", "cloaking_detected")
 _MAX_URL_CHARS = 300
 _MAX_VISIBLE_TEXT_CHARS = 1000
 _MAX_OCR_CHARS = 600
+_MAX_FRAME_TEXT_CHARS = 500
 _MAX_FORM_FIELDS = 25
 _MAX_FORM_LABEL_CHARS = 60
 _MAX_DETAILED_INTERMEDIATE_STATES = 12
@@ -92,6 +93,7 @@ async def build_evidence_bundle(
     lexical_risk_score: Optional[float] = None,
     passive_risk_score: Optional[float] = None,
     analyze_screenshots: bool = True,
+    frame_texts_by_state: Optional[dict[str, list[dict]]] = None,
 ) -> dict:
     """Produce un riepilogo compatto e strutturato dell'esplorazione.
 
@@ -105,6 +107,9 @@ async def build_evidence_bundle(
         script/style/markup, truncated to ~1500 chars) — per ogni stato.
     titles_by_state:
         Mapping ``state_id_str → document.title`` — per ogni stato.
+    frame_texts_by_state:
+        Mapping ``state_id_str → [{"url", "text"}]`` — testo visibile
+        degli iframe (kit che caricano il form in un iframe).
     analyze_screenshots:
         Se True, per ogni stato con ``screenshot_ref`` viene eseguito
         l'arricchimento Azure AI Vision (OCR + Brand Detection) e il
@@ -197,6 +202,7 @@ async def build_evidence_bundle(
             "title": titles_by_state.get(sid, ""),
             "visible_text": visible_text_by_state.get(sid, ""),
             "form_fields": form_fields_by_state.get(sid, []),
+            "frame_texts": (frame_texts_by_state or {}).get(sid, []),
             # Arricchimento Azure AI Vision — campi SEMPRE presenti
             # (anche vuoti) ma MAI fusi con visible_text: la provenienza
             # del testo resta distinguibile per il modello.
@@ -334,9 +340,13 @@ def bundle_to_prompt_text(bundle: dict) -> str:
                 label = f.get("nearby_label_text", "")
                 label = _truncate(label, _MAX_FORM_LABEL_CHARS)
                 label_str = f'  → "{label}"' if label else ""
+                frame_str = (
+                    f"  (dentro iframe {_truncate(f['frame_url'], _MAX_URL_CHARS)})"
+                    if f.get("frame_url") else ""
+                )
                 lines.append(
                     f"    {f['tag']}[type={f['type']}]"
-                    f"  name_or_id={f['name_or_id']}{label_str}"
+                    f"  name_or_id={f['name_or_id']}{label_str}{frame_str}"
                 )
             if len(fields) > _MAX_FORM_FIELDS:
                 lines.append(
@@ -363,6 +373,19 @@ def bundle_to_prompt_text(bundle: dict) -> str:
                     f"    …[altri {len(text) - _MAX_VISIBLE_TEXT_CHARS} "
                     "caratteri omessi]"
                 )
+        frame_texts = st.get("frame_texts") or []
+        if frame_texts:
+            # Testo dei documenti caricati negli iframe: provenienza
+            # distinta dal DOM principale (non compare in visible_text).
+            lines.append("  Contenuto degli iframe:")
+            budget = _MAX_FRAME_TEXT_CHARS
+            for ft in frame_texts:
+                if budget <= 0:
+                    break
+                ftext = (ft.get("text") or "").strip()
+                furl = _truncate(ft.get("url") or "", _MAX_URL_CHARS)
+                lines.append(f"    [{furl}] {ftext[:budget]}")
+                budget -= len(ftext)
         ocr_text = st.get("ocr_text", "")
         if ocr_text:
             # Provenienza DIVERSA dal visible_text: OCR sullo screenshot

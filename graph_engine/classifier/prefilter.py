@@ -118,6 +118,8 @@ def prefilter(bundle: dict) -> Optional[Verdict]:
         (st.get("visible_text", "") or "")
         + " "
         + (st.get("ocr_text", "") or "")
+        + " "
+        + " ".join((ft.get("text") or "") for ft in (st.get("frame_texts") or []))
         for st in graph_states
     ).strip()
 
