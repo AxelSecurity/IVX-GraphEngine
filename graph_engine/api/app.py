@@ -12,6 +12,7 @@ Oppure programmatico::
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -24,6 +25,7 @@ from graph_engine.api import auth
 from graph_engine.api.auth_routes import build_auth_router
 from graph_engine.api.browser_pool import BrowserPool
 from graph_engine.api.jobs import AnalysisJobs
+from graph_engine.api.retention import retention_loop
 from graph_engine.api.pipeline_runner import DEFAULT_ARTIFACT_ROOT
 from graph_engine.api.routes import build_router
 from graph_engine.api.routes_external import build_external_router
@@ -82,7 +84,7 @@ def _api_key_allowed(method: str, path: str) -> bool:
     return method == "GET" and path.startswith("/analyses/")
 
 
-def _make_lifespan(enable_browser_pool: bool):
+def _make_lifespan(enable_browser_pool: bool, artifact_root: Path):
     """Costruisce il lifespan di FastAPI.
 
     All'avvio crea (se serve) l'amministratore bootstrap della
@@ -98,19 +100,27 @@ def _make_lifespan(enable_browser_pool: bool):
         await auth.ensure_bootstrap_admin(app.state.db_path)
         logger.info("Autenticazione pronta (admin bootstrap garantito)")
 
-        if not enable_browser_pool:
-            yield
-            return
+        # Retention: cancella periodicamente artefatti e cache OSINT
+        # vecchi (graph_engine.api.retention) — il DB non viene toccato.
+        from graph_engine.osint.cache import _CACHE_ROOT
 
-        pool = BrowserPool()
-        await pool.start()
-        app.state.browser_pool = pool
-        logger.info("Browser condiviso pronto per le richieste")
+        retention_task = asyncio.create_task(
+            retention_loop(artifact_root, _CACHE_ROOT)
+        )
+
+        pool = None
+        if enable_browser_pool:
+            pool = BrowserPool()
+            await pool.start()
+            app.state.browser_pool = pool
+            logger.info("Browser condiviso pronto per le richieste")
         try:
             yield
         finally:
-            await pool.stop()
-            logger.info("Browser condiviso chiuso")
+            retention_task.cancel()
+            if pool is not None:
+                await pool.stop()
+                logger.info("Browser condiviso chiuso")
 
     return lifespan
 
@@ -140,7 +150,7 @@ def create_app(
             "di URL di phishing. Job asincroni con stato persistito su "
             "SQLite — nessuna coda esterna."
         ),
-        lifespan=_make_lifespan(enable_browser_pool),
+        lifespan=_make_lifespan(enable_browser_pool, artifact_root),
     )
     # Riferimento per lifespan e test: il middleware di sessione non
     # accede al DB (sessioni in memoria), le route /auth sì.

@@ -102,6 +102,12 @@ class Settings(BaseSettings):
     # per MAX_CONCURRENT_ANALYSES: 1 = esplorazione sequenziale.
     l4_parallel_actions: int = 3
 
+    # ── Retention dei file su disco ─────────────────────────────────
+    # Giorni dopo cui screenshot/DOM/HAR di un'analisi vengono
+    # cancellati (il DB resta: verdetto, grafo e storico non si
+    # perdono).  0 = mai.  Vedi graph_engine.api.retention.
+    artifact_retention_days: int = 30
+
     # ── Bootstrap amministratore dashboard ──────────────────────────
     # Al primo avvio, se la tabella utenti è vuota, viene creato
     # l'admin con queste credenziali.  Se mancano, l'admin viene

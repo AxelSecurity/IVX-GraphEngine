@@ -958,6 +958,7 @@ più permessa nei moduli.
 | `API_KEY` | `api_key` | auth `X-API-Key` su `/api/v1/*` (e polling `/analyses`) | più chiavi separate da virgola (`api_keys`); senza → 503 |
 | `MAX_CONCURRENT_ANALYSES` | `max_concurrent_analyses` | limite di pipeline concorrenti | intero, default 4 |
 | `L4_PARALLEL_ACTIONS` | `l4_parallel_actions` | azioni L4 in parallelo per stato | intero, default 3 (1 = sequenziale) |
+| `ARTIFACT_RETENTION_DAYS` | `artifact_retention_days` | retention artefatti su disco (`api/retention.py`) | intero, default 30 (0 = mai); il DB non viene toccato |
 
 Le property `foundry_configured` / `vision_configured` richiedono **ENTRAMBE** le variabili della coppia
 (una sola non basta); `service_principal_configured` richiede **TUTTE e

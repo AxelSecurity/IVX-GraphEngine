@@ -147,6 +147,11 @@ Note operative:
 - **Persistenza**: tutto ciò che è prezioso (DB SQLite `graph_engine.db`,
   artefatti di esplorazione, cache OSINT) vive in `./data`, montato come
   volume in `/app/data` — sopravvive a riavvii e ricreazioni del container
+- **Retention**: un job giornaliero interno cancella screenshot/DOM/HAR
+  più vecchi di `ARTIFACT_RETENTION_DAYS` (default 30, `0` = mai) e la
+  cache OSINT scaduta; il DB resta intatto (verdetti e storico non si
+  perdono). Il backup periodico di `./data/graph_engine.db` resta a
+  carico dell'infrastruttura
 - **Permessi di `./data` al primo deploy**: automatici — l'entrypoint del
   container parte come root solo per sistemare la directory dati (UID
   10001) e poi cede i privilegi prima di eseguire uvicorn. Se `./data`
