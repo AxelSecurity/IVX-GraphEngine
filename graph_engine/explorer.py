@@ -296,6 +296,9 @@ class StateGraphExplorer:
         # Azioni di uno stato eseguite in parallelo (vedi _run_actions).
         self._parallel_actions: int = max(1, int(settings.l4_parallel_actions))
         self._action_slots: Optional[asyncio.Semaphore] = None
+        # Esito della scorciatoia URL per stato (vedi _replay_by_url):
+        # True = raggiungibile con un goto diretto, False = serve il replay.
+        self._reach_by_url: dict[uuid.UUID, bool] = {}
 
         # Artifact capture
         self._capture_artifacts_flag: bool = True
@@ -373,6 +376,7 @@ class StateGraphExplorer:
 
         self._visited.clear()
         self._page_ctx.clear()
+        self._reach_by_url.clear()
         self.states.clear()
         self.transitions.clear()
         self.evidence.clear()
@@ -973,9 +977,77 @@ class StateGraphExplorer:
             except Exception:
                 pass
 
+    async def _page_shows(self, page: Page, state: State) -> bool:
+        """True se *page* mostra già *state* (stesso URL e stesso dom_hash)."""
+        try:
+            if page.url.rstrip("/") != state.url.rstrip("/"):
+                return False
+            if await page.evaluate("() => document.readyState") != "complete":
+                return False
+            html_str = await page.content()
+        except Exception:
+            return False
+        return await asyncio.to_thread(normalise_and_hash, html_str) == state.dom_hash
+
+    async def _replay_by_url(
+        self, page: Page, state: State, path: list[Transition],
+    ) -> bool:
+        """Scorciatoia: ``goto(state.url)`` verificato dal dom_hash.
+
+        Tentata solo per stati raggiunti CAMBIANDO URL (lo stato padre ha
+        un URL diverso) — un click in una SPA non è raggiungibile così.
+        Il context conserva i cookie (gate già superati, sessione del
+        kit), quindi spesso basta una navigazione invece del replay dalla
+        radice.  L'esito è ricordato per stato: un tentativo fallito non
+        si ripete.
+        """
+        if not path or self._reach_by_url.get(state.id) is False:
+            return False
+        parent = self._find_state_by_id(path[-1].from_state)
+        if parent is None or parent.url.rstrip("/") == state.url.rstrip("/"):
+            return False
+        ctx = self._ctx(page)
+        ctx.our_goto_active = True
+        try:
+            await page.goto(state.url, wait_until="domcontentloaded")
+        except Exception:
+            self._reach_by_url[state.id] = False
+            return False
+        finally:
+            ctx.our_goto_active = False
+        reached = await self._wait_for_dom_hash(page, state.dom_hash, cap_s=1.5)
+        self._reach_by_url[state.id] = reached
+        return reached
+
+    def _record_replay_divergence(self, state: State) -> None:
+        """Evidenza diagnostica: il replay completo non ha riprodotto il DOM."""
+        self.evidence.append(
+            Evidence(
+                target_id=self.target.id,  # type: ignore[union-attr]
+                scope=EvidenceScope.state,
+                scope_id=state.id,
+                layer="L4",
+                key="replay_divergence",
+                value=f"Replay to state {state.id} ended on a different DOM",
+                weight=0.0,
+                produced_by="StateGraphExplorer",
+            )
+        )
+
     async def _replay_to_state_impl(self, page: Page, state: State) -> bool:
-        """Inner implementation — see ``_replay_to_state``."""
+        """Inner implementation — see ``_replay_to_state``.
+
+        Ordine: (1) la pagina mostra già lo stato → niente da fare;
+        (2) scorciatoia URL verificata; (3) replay completo dalla radice,
+        con verifica finale del DOM (``replay_divergence`` se diverso).
+        """
+        if await self._page_shows(page, state):
+            return True
+
         path = self._build_transition_path(state)
+
+        if await self._replay_by_url(page, state, path):
+            return True
 
         if not path:
             # Root — simple navigation.
@@ -1092,9 +1164,16 @@ class StateGraphExplorer:
                 await self._wait_for_dom_hash(
                     page, self._expected_hash(t), cap_s=_CLICK_WAIT_CAP_S,
                 )
-            # URL-based transitions (http_3xx, meta_refresh, js_location) are
-            # already reflected in the current page URL — the browser followed
-            # them automatically.  No explicit replay needed.
+            else:
+                # URL-based transitions (http_3xx, meta_refresh,
+                # js_location): the browser follows them on its own while
+                # replaying — wait (bounded) for the destination DOM.
+                await self._wait_for_dom_hash(
+                    page, self._expected_hash(t), cap_s=_CLICK_WAIT_CAP_S,
+                )
+
+        if not await self._page_shows(page, state):
+            self._record_replay_divergence(state)
         return True
 
     # ------------------------------------------------------------------

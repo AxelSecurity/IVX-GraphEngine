@@ -713,3 +713,99 @@ class TestParallelActions:
         )
         assert [s.dom_hash for s in new_states] == ["fast"]
         assert any("budget" in e.value for e in explorer.evidence)
+
+
+class TestReplayShortcuts:
+    """_replay_to_state: già sul posto → nulla; stato raggiunto cambiando
+    URL → goto diretto verificato dal dom_hash; altrimenti replay
+    completo dalla radice (e la scorciatoia fallita non si riprova)."""
+
+    _HTML = {
+        "https://k.example/": "<html><body><h1>root</h1></body></html>",
+        "https://k.example/step2": "<html><body><h1>step2</h1></body></html>",
+    }
+
+    def _setup(self, served_html=None):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from graph_engine.dom_hash import normalise_and_hash
+        from graph_engine.models import Transition, TransitionKind
+
+        served = dict(self._HTML)
+        served.update(served_html or {})
+        explorer = StateGraphExplorer(MagicMock())
+        explorer.target = AnalysisTarget(input_url="https://k.example/")
+        root = State(target_id=explorer.target.id, url="https://k.example/",
+                     dom_hash=normalise_and_hash(self._HTML["https://k.example/"]))
+        child = State(target_id=explorer.target.id, url="https://k.example/step2",
+                      dom_hash=normalise_and_hash(self._HTML["https://k.example/step2"]),
+                      depth=1)
+        explorer.states.extend([root, child])
+        explorer.transitions.append(Transition(
+            target_id=explorer.target.id, from_state=root.id, to_state=child.id,
+            kind=TransitionKind.click, trigger={"selector": "#next"},
+        ))
+
+        page = MagicMock()
+        page.url = "about:blank"
+        gotos = []
+
+        async def _goto(url, **kwargs):
+            gotos.append(url)
+            page.url = url
+
+        async def _content():
+            return served.get(page.url, "<html></html>")
+
+        async def _evaluate(script, *args):
+            return "complete" if "readyState" in script else None
+
+        async def _click(selector, **kwargs):
+            page.url = "https://k.example/step2"
+
+        page.goto = _goto
+        page.content = _content
+        page.evaluate = _evaluate
+        page.click = _click
+        page.on = MagicMock()
+        page.remove_listener = MagicMock()
+        page.main_frame = MagicMock()
+        return explorer, root, child, page, gotos
+
+    async def test_already_there_skips_navigation(self):
+        explorer, _root, child, page, gotos = self._setup()
+        page.url = child.url
+        assert await explorer._replay_to_state(page, child) is True
+        assert gotos == []
+
+    async def test_url_shortcut_single_goto(self):
+        explorer, _root, child, page, gotos = self._setup()
+        assert await explorer._replay_to_state(page, child) is True
+        assert gotos == ["https://k.example/step2"]
+        assert explorer._reach_by_url[child.id] is True
+
+    async def test_failed_shortcut_falls_back_and_is_remembered(self, monkeypatch):
+        from graph_engine import explorer as explorer_mod
+
+        # Il goto diretto mostra un DOM diverso (es. sessione del kit
+        # richiesta): serve il replay completo dalla radice.
+        explorer, _root, child, page, gotos = self._setup(
+            {"https://k.example/step2": "<html><body>expired</body></html>"}
+        )
+        monkeypatch.setattr(explorer_mod, "_CLICK_WAIT_CAP_S", 0.3)
+
+        async def _short_wait(page_, expected, cap_s):
+            return await explorer_mod.StateGraphExplorer._wait_for_dom_hash(
+                explorer, page_, expected, min(cap_s, 0.4)
+            )
+
+        explorer._wait_for_dom_hash = _short_wait
+        await explorer._replay_to_state(page, child)
+        assert gotos[:2] == ["https://k.example/step2", "https://k.example/"]
+        assert explorer._reach_by_url[child.id] is False
+        assert any(e.key == "replay_divergence" for e in explorer.evidence)
+
+        gotos.clear()
+        page.url = "about:blank"
+        await explorer._replay_to_state(page, child)
+        assert gotos == ["https://k.example/"]  # scorciatoia non ritentata
