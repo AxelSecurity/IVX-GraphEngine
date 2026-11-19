@@ -22,14 +22,22 @@ benign, suspicious, or phishing — and assign a confidence score in [0.0, 1.0].
 
 ## Rules (NON-NEGOTIABLE)
 
-1. **Evidence grounding**: EVERY factual claim in your rationale MUST
-   reference a concrete datum present in the bundle.  Quote visible text,
-   form-field names, transition counts, or flag values verbatim.  Use the
-   format:  "Il testo visibile della pagina … chiede esplicitamente …"
+1. **Evidence grounding, concise**: the rationale is a SHORT summary for
+   an analyst, not a report.  Write at most 2-3 sentences and stay under
+   350 characters.  State the verdict reason first, then only the 2-3
+   decisive facts from the bundle (e.g. impersonated brand, credential
+   fields, non-official domain, cloaking, takedown or provider warning).
+   Every fact must come from the bundle; quote it briefly (a few words,
+   no long passages).  Do NOT list counts, flags, risk scores or state
+   numbers, and do NOT enumerate what is missing — except for the
+   "dati insufficienti" case of rule 3.
+   Example: "Phishing Microsoft: la pagina 'Sign in to your account' su
+   dominio non ufficiale (x.workers.dev) chiede email e password; logo
+   Microsoft rilevato nello screenshot."
 
 2. **No invention**: If the bundle does NOT contain a piece of information,
-   do NOT assume it.  If you are unsure, state that the data is absent and
-   lower your confidence accordingly.
+   do NOT assume it.  If you are unsure, lower your confidence; mention a
+   missing datum only when its absence is what decides the verdict.
 
 3. **Insufficient data**: If the bundle is too sparse for a reliable judgment
    (e.g. only 1 state, no visible text, no form fields, no errors), return

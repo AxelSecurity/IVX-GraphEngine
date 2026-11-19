@@ -319,6 +319,17 @@ in un iframe. I campi finiscono in
 dove finisce nel bundle (`form_fields` per stato), nel conteggio dei
 campi del prefilter e nel fallback euristico.
 
+### Motivazione sintetica
+
+Il system prompt (`classifier/system_prompt.txt`, regola 1) chiede una
+motivazione breve per l'analista: al massimo 2–3 frasi e circa 350
+caratteri, con il motivo del verdetto e solo le 2–3 prove decisive
+citate brevemente dal bundle (niente elenchi di conteggi, flag o dati
+mancanti, salvo il caso "dati insufficienti"). Prima la motivazione era
+in media di circa 1.360 caratteri. In più, `_cap_rationale` taglia su
+una parola a 600 caratteri ciò che il modello dovesse comunque restituire
+oltre il limite.
+
 ### Rate limit Foundry
 
 Il deployment ha una quota di token al minuto: con più analisi in

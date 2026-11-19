@@ -123,7 +123,7 @@ async def classify(bundle: dict) -> Verdict:
         produced_by="foundry",
         brand=data.get("brand") or None,
         kit_family=data.get("kit_family") or None,
-        rationale=data.get("rationale") or None,
+        rationale=_cap_rationale(data.get("rationale")),
         final_url=data.get("final_url") or None,
         exfil_endpoint=data.get("exfil_endpoint") or None,
     )
@@ -132,6 +132,25 @@ async def classify(bundle: dict) -> Verdict:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+# Tetto di sicurezza alla motivazione del modello: il prompt chiede ~350
+# caratteri, ma la risposta API resta compatta anche se il modello sfora.
+_MAX_RATIONALE_CHARS = 600
+
+
+def _cap_rationale(text) -> str | None:
+    """Motivazione ripulita e, se troppo lunga, tagliata su una parola."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    text = " ".join(text.split())
+    if len(text) <= _MAX_RATIONALE_CHARS:
+        return text
+    cut = text[: _MAX_RATIONALE_CHARS - 1]
+    space = cut.rfind(" ")
+    if space > _MAX_RATIONALE_CHARS // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:.") + "…"
+
 
 
 def _new_thread_id(client) -> str:
