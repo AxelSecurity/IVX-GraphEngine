@@ -29,7 +29,10 @@ import hashlib
 import json
 import logging
 import os
+import random
+import re
 import threading
+import weakref
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any
 
@@ -162,7 +165,101 @@ def _build_user_message(bundle: dict) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Rate limit: tentativi ripetuti + tetto alle chiamate concorrenti
+# ---------------------------------------------------------------------------
+# Il deployment ha una quota di token al minuto (TPM): con più analisi in
+# parallelo i prompt arrivano a raffica e Azure rifiuta il run con
+# ``rate_limit_exceeded``.  Invece di ripiegare subito sul fallback
+# euristico si riprova con attesa crescente (o quella indicata da Azure),
+# e al massimo ``FOUNDRY_MAX_CONCURRENT`` run girano insieme.
+_RATE_LIMIT_MAX_ATTEMPTS = 4          # 1 tentativo + 3 ripetizioni
+_RATE_LIMIT_BASE_DELAY_S = 10.0       # 10s, 20s, 40s
+_RATE_LIMIT_MAX_DELAY_S = 60.0
+_RATE_LIMIT_JITTER_S = 3.0
+_RETRY_AFTER_RE = re.compile(r"retry after (\d+(?:\.\d+)?) seconds?", re.IGNORECASE)
+
+# Un semaforo per event loop (i test usano loop diversi; l'API uno solo).
+_foundry_slots: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+class _FoundryRateLimited(Exception):
+    """Run rifiutato per quota (rate_limit_exceeded / HTTP 429)."""
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def _parse_retry_after(text: str | None) -> float | None:
+    if not text:
+        return None
+    match = _RETRY_AFTER_RE.search(text)
+    return float(match.group(1)) if match else None
+
+
+def _as_rate_limit(exc: Exception) -> _FoundryRateLimited | None:
+    """Riconosce un rate limit dell'SDK (HTTP 429) e lo normalizza."""
+    if isinstance(exc, _FoundryRateLimited):
+        return exc
+    if getattr(exc, "status_code", None) == 429:
+        retry_after = None
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None) or {}
+        try:
+            retry_after = float(headers.get("retry-after") or headers.get("Retry-After"))
+        except (TypeError, ValueError):
+            retry_after = _parse_retry_after(str(exc))
+        return _FoundryRateLimited(str(exc), retry_after=retry_after)
+    return None
+
+
+def _retry_delay(attempt: int, retry_after: float | None) -> float:
+    """Attesa prima del tentativo successivo (attempt parte da 0)."""
+    if retry_after is not None:
+        delay = retry_after
+    else:
+        delay = _RATE_LIMIT_BASE_DELAY_S * (2 ** attempt)
+    return min(delay, _RATE_LIMIT_MAX_DELAY_S) + random.uniform(0, _RATE_LIMIT_JITTER_S)
+
+
+def _foundry_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _foundry_slots.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(max(1, int(settings.foundry_max_concurrent)))
+        _foundry_slots[loop] = sem
+    return sem
+
+
 async def _call_foundry_agent(prompt: str) -> str:
+    """Esegue il run Foundry con tetto di concorrenza e retry sul rate limit.
+
+    Ogni tentativo è un run completo su un thread NUOVO (isolamento
+    invariato).  L'attesa tra i tentativi avviene FUORI dal semaforo, così
+    lo slot passa ad altre analisi.  Esauriti i tentativi l'eccezione
+    risale e ``classify`` ripiega sul fallback euristico.
+    """
+    for attempt in range(_RATE_LIMIT_MAX_ATTEMPTS):
+        async with _foundry_semaphore():
+            try:
+                return await _run_foundry_in_thread(prompt)
+            except Exception as exc:
+                limited = _as_rate_limit(exc)
+                if limited is None or attempt == _RATE_LIMIT_MAX_ATTEMPTS - 1:
+                    raise
+        delay = _retry_delay(attempt, limited.retry_after)
+        logger.warning(
+            "Foundry rate limit (tentativo %d/%d): nuovo tentativo tra %.0fs",
+            attempt + 1, _RATE_LIMIT_MAX_ATTEMPTS, delay,
+        )
+        await asyncio.sleep(delay)
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+async def _run_foundry_in_thread(prompt: str) -> str:
     """Run the (blocking) Foundry SDK flow in a worker thread.
 
     The AgentsClient SDK is fully synchronous: ``create_and_process``
@@ -312,6 +409,20 @@ def _call_foundry_agent_sync(prompt: str) -> str:
         )
 
         if run.status not in ("completed", "requires_action"):
+            last_error = getattr(run, "last_error", None)
+            error_code = (
+                last_error.get("code") if isinstance(last_error, dict)
+                else getattr(last_error, "code", None)
+            )
+            if error_code == "rate_limit_exceeded":
+                message = (
+                    last_error.get("message") if isinstance(last_error, dict)
+                    else getattr(last_error, "message", "")
+                )
+                raise _FoundryRateLimited(
+                    message or "rate_limit_exceeded",
+                    retry_after=_parse_retry_after(message),
+                )
             # last_error (es. content filter, modello non disponibile,
             # rate limit) è l'unica traccia del PERCHÉ — senza questo
             # log un FAILED resta muto (bug diagnosticato 2026-08-28).

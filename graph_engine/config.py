@@ -108,6 +108,13 @@ class Settings(BaseSettings):
     # perdono).  0 = mai.  Vedi graph_engine.api.retention.
     artifact_retention_days: int = 30
 
+    # ── Classificatore Foundry ──────────────────────────────────────
+    # Run Foundry contemporanei al massimo (le altre analisi attendono
+    # lo slot): evita raffiche di prompt che superano la quota di token
+    # al minuto del deployment.  Sul rate limit il run viene ritentato
+    # con attesa crescente prima di ripiegare sul fallback euristico.
+    foundry_max_concurrent: int = 2
+
     # ── Bootstrap amministratore dashboard ──────────────────────────
     # Al primo avvio, se la tabella utenti è vuota, viene creato
     # l'admin con queste credenziali.  Se mancano, l'admin viene

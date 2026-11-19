@@ -296,6 +296,17 @@ superato, click) e conserva il risultato in
 dove finisce nel bundle (`form_fields` per stato), nel conteggio dei
 campi del prefilter e nel fallback euristico.
 
+### Rate limit Foundry
+
+Il deployment ha una quota di token al minuto: con più analisi in
+parallelo Azure può rifiutare il run (`rate_limit_exceeded` o HTTP 429).
+Al massimo `FOUNDRY_MAX_CONCURRENT` run girano insieme (default 2) e un
+run rifiutato per quota viene ritentato fino a 3 volte, con attesa
+crescente (10, 20, 40 secondi più un margine casuale) o quella indicata
+da Azure. Ogni tentativo usa un thread nuovo; l'attesa avviene fuori
+dal semaforo. Solo dopo l'ultimo tentativo si ripiega sul fallback
+euristico.
+
 ### Client Foundry
 
 Credenziale e `AgentsClient` vengono creati una volta e riusati tra le
@@ -958,6 +969,7 @@ più permessa nei moduli.
 | `API_KEY` | `api_key` | auth `X-API-Key` su `/api/v1/*` (e polling `/analyses`) | più chiavi separate da virgola (`api_keys`); senza → 503 |
 | `MAX_CONCURRENT_ANALYSES` | `max_concurrent_analyses` | limite di pipeline concorrenti | intero, default 4 |
 | `L4_PARALLEL_ACTIONS` | `l4_parallel_actions` | azioni L4 in parallelo per stato | intero, default 3 (1 = sequenziale) |
+| `FOUNDRY_MAX_CONCURRENT` | `foundry_max_concurrent` | run Foundry contemporanei; sul rate limit retry con backoff (10/20/40s o Retry-After) | intero, default 2 |
 | `ARTIFACT_RETENTION_DAYS` | `artifact_retention_days` | retention artefatti su disco (`api/retention.py`) | intero, default 30 (0 = mai); il DB non viene toccato |
 
 Le property `foundry_configured` / `vision_configured` richiedono **ENTRAMBE** le variabili della coppia
