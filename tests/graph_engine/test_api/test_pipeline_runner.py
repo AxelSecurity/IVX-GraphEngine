@@ -6,11 +6,16 @@ import uuid
 
 import pytest
 
+from graph_engine.api.pipeline_runner import (
+    _run_classification as _REAL_RUN_CLASSIFICATION,
+)
 from graph_engine.models import (
     AnalysisTarget,
+    Classification,
     EvidenceScope,
     State,
     TargetStatus,
+    Verdict,
 )
 from graph_engine.storage.repository import get_target_by_id, save_target
 
@@ -494,3 +499,58 @@ class TestL4StartsAfterProfileProbe:
                 timeout=5.0,
             )
         assert cancelled.is_set()
+
+
+class TestFormFieldsReachClassifier:
+    """L'inventario dei campi form raccolto da L4 arriva al bundle L5
+    (prima ogni stato arrivava con form_fields=[])."""
+
+    async def test_explorer_form_fields_forwarded(
+        self, fake_pipeline, tmp_path, monkeypatch,
+    ):
+        from graph_engine.api import pipeline_runner
+        from tests.graph_engine.test_api.conftest import FakeExplorer
+
+        fields = [{"tag": "input", "type": "password", "name_or_id": "pwd",
+                   "nearby_label_text": "Password"}]
+
+        class _FormExplorer(FakeExplorer):
+            async def run(self, *args, **kwargs):
+                target = await super().run(*args, **kwargs)
+                self.form_fields_by_state = {
+                    str(st.id): fields for st in self.states
+                }
+                return target
+
+        captured = {}
+
+        async def _capture_bundle(**kwargs):
+            captured.update(kwargs)
+            return {"states": [], "flags": {}, "evidence_summary": {}}
+
+        monkeypatch.setattr("graph_engine.explorer.StateGraphExplorer", _FormExplorer)
+        # La fixture sostituisce _run_classification: qui serve quella vera.
+        monkeypatch.setattr(
+            pipeline_runner, "_run_classification", _REAL_RUN_CLASSIFICATION,
+        )
+        monkeypatch.setattr(
+            "graph_engine.classifier.evidence_bundle.build_evidence_bundle",
+            _capture_bundle,
+        )
+        monkeypatch.setattr(
+            "graph_engine.classifier.prefilter.prefilter",
+            lambda bundle: Verdict(
+                target_id=bundle["target_id"],
+                classification=Classification.benign,
+                confidence=0.9,
+                produced_by="prefilter",
+            ),
+        )
+
+        await pipeline_runner.run_full_analysis(
+            "https://example.com", db_path=str(tmp_path / "t.db"), classify=True,
+        )
+
+        by_state = captured["form_fields_by_state"]
+        assert by_state, "nessuno stato nel bundle"
+        assert all(v == fields for v in by_state.values())

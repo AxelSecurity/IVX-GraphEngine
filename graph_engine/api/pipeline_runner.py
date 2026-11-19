@@ -78,11 +78,13 @@ async def _run_classification(
     evidence: list[Evidence],
     lexical_risk_score: Optional[float] = None,
     passive_risk_score: Optional[float] = None,
+    form_fields_by_state: Optional[dict[str, list[dict]]] = None,
 ) -> Optional[Verdict]:
     """Build evidence bundle, run prefilter + classifier, return Verdict.
 
-    Estratta da ``cli.py:_run_classification`` per essere riusabile sia
-    dalla CLI che dall'API.
+    Usata sia dalla CLI che dall'API.  ``form_fields_by_state`` è
+    l'inventario passivo dei campi raccolto dall'explorer durante L4
+    (``StateGraphExplorer.form_fields_by_state``).
     """
     from graph_engine.classifier.evidence_bundle import build_evidence_bundle
     from graph_engine.classifier.prefilter import prefilter
@@ -91,13 +93,14 @@ async def _run_classification(
     # foglie — una pagina di phishing con una transizione in uscita
     # (es. un link legittimo verso il sito ufficiale) deve restare nel
     # bundle per il classificatore.
-    form_fields_by_state: dict[str, list[dict]] = {}
+    collected_fields = form_fields_by_state or {}
+    form_fields_by_state = {}
     visible_text_by_state: dict[str, str] = {}
     titles_by_state: dict[str, str] = {}
 
     for s in states:
         sid = str(s.id)
-        form_fields_by_state[sid] = []
+        form_fields_by_state[sid] = list(collected_fields.get(sid, []))
         visible_text_by_state[sid] = ""
         titles_by_state[sid] = ""
 
@@ -439,6 +442,9 @@ async def run_full_analysis(
                 analysis_target, states, transitions, evidence,
                 lexical_risk_score=l1_result["lexical_risk_score"],
                 passive_risk_score=l2_result["passive_risk_score"],
+                form_fields_by_state=getattr(
+                    explorer, "form_fields_by_state", None
+                ),
             )
 
         # ── Final save ────────────────────────────────────────────────────

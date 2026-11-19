@@ -251,6 +251,20 @@ visibili senza MAI compilare, cliccare o inviare. Per ogni campo restituisce
 checkbox, radio, file. Serve come segnale: "questa pagina chiede email,
 password, numero di carta, CVV, Codice Fiscale".
 
+L'explorer lo esegue alla creazione di OGNI stato (navigazione, gate
+superato, click) e conserva il risultato in
+`StateGraphExplorer.form_fields_by_state`; la pipeline lo passa a L5,
+dove finisce nel bundle (`form_fields` per stato), nel conteggio dei
+campi del prefilter e nel fallback euristico.
+
+### Client Foundry
+
+Credenziale e `AgentsClient` vengono creati una volta e riusati tra le
+analisi (token AAD e connessioni HTTP in cache). Non portano stato
+conversazionale: l'isolamento resta garantito dal thread nuovo per ogni
+chiamata (vedi sotto). La cancellazione del thread gira su un worker
+dedicato, fuori dal cammino critico della risposta.
+
 ### Vincolo stateless — NON NEGOZIABILE
 
 Ogni chiamata a `classify()` crea un **nuovo thread** Foundry e lo cancella

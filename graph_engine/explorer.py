@@ -23,6 +23,7 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from graph_engine.actions import enumerate_actionable
 from graph_engine.budget import Budget
+from graph_engine.classifier.form_inventory import scan_form_fields
 from graph_engine.dom_hash import normalise_and_hash
 from graph_engine.gate_solver import detect_captcha, try_pass_gate
 from graph_engine.models import (
@@ -178,6 +179,9 @@ class StateGraphExplorer:
         self.states: list[State] = []
         self.transitions: list[Transition] = []
         self.evidence: list[Evidence] = []
+        # Campi form visibili per stato (str(state.id) → scan_form_fields):
+        # inventario PASSIVO (sola lettura, nessun fill/click) per L5.
+        self.form_fields_by_state: dict[str, list[dict]] = {}
 
         # Internal BFS state
         self._visited: set[str] = set()  # dom_hash set
@@ -397,6 +401,7 @@ class StateGraphExplorer:
                                     dom_hash=post_hash,
                                     depth=state.depth + 1,
                                 )
+                                await self._scan_forms(gate_state, page)
                                 if self._capture_artifacts_flag:
                                     await self._save_artifacts(
                                         gate_state, page, post_html, []
@@ -950,6 +955,7 @@ class StateGraphExplorer:
             dom_hash=dom_hash,
             depth=depth,
         )
+        await self._scan_forms(state, page)
 
         # --- save artifacts --------------------------------------------------
         if self._capture_artifacts_flag:
@@ -1162,6 +1168,7 @@ class StateGraphExplorer:
                 dom_hash=post_hash,
                 depth=from_state.depth + 1,
             )
+            await self._scan_forms(new_state, new_page)
 
             # Capture artifacts using the current page (no re-navigation).
             if self._capture_artifacts_flag:
@@ -1381,6 +1388,19 @@ class StateGraphExplorer:
                 "entries": har_entries,
             }
         }
+
+    async def _scan_forms(self, state: State, page: Page) -> None:
+        """Inventario passivo dei campi form di *state* (mai fill/click).
+
+        Best-effort: un errore lascia la lista vuota, non blocca il BFS.
+        """
+        try:
+            fields = await scan_form_fields(page)
+        except Exception:
+            fields = []
+        self.form_fields_by_state[str(state.id)] = (
+            fields if isinstance(fields, list) else []
+        )
 
     async def _save_artifacts(
         self,

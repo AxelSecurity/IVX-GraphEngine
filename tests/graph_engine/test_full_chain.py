@@ -527,3 +527,74 @@ class TestReplayGotoExceptionIsCaught:
                     await browser.close()
         finally:
             server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Form inventory — i campi visibili di ogni stato arrivano a L5
+# ---------------------------------------------------------------------------
+
+_LOGIN_PAGE = """\
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Sign in</title></head>
+<body>
+  <form action="/collect" method="post">
+    <label for="email">Email address</label>
+    <input id="email" name="email" type="email">
+    <label for="pwd">Password</label>
+    <input id="pwd" name="pwd" type="password">
+    <input type="hidden" name="csrf" value="x">
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>"""
+
+
+class _LoginHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        body = _LOGIN_PAGE.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class TestFormInventoryCollected:
+    async def test_root_state_form_fields_scanned(self):
+        """Lo stato di una pagina di login porta il suo inventario dei
+        campi (email + password; hidden e bottoni esclusi), senza che
+        nessun campo venga compilato."""
+        from playwright.async_api import async_playwright
+
+        from graph_engine.budget import Budget
+        from graph_engine.explorer import StateGraphExplorer
+
+        server = HTTPServer(("127.0.0.1", 0), _LoginHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                try:
+                    explorer = StateGraphExplorer(browser)
+                    await explorer.run(
+                        f"http://127.0.0.1:{server.server_port}/",
+                        budget=Budget(max_depth=1, max_nodes=2, timeout_s=30),
+                        capture_artifacts=False,
+                        top_n_actions=0,
+                    )
+                finally:
+                    await browser.close()
+        finally:
+            server.shutdown()
+
+        root = next(s for s in explorer.states if s.depth == 0)
+        fields = explorer.form_fields_by_state[str(root.id)]
+        types = sorted(f["type"] for f in fields)
+        assert types == ["email", "password"]
+        labels = {f["nearby_label_text"] for f in fields}
+        assert "Password" in labels
