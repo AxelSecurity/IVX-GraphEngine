@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 
 
+from graph_engine.classifier.provider_warning import parse_kit_family
 from graph_engine.models import Classification
 
 # ---------------------------------------------------------------------------
@@ -46,6 +47,7 @@ _SUSPICIOUS_BLOCK_THRESHOLD = 0.6
 # ---------------------------------------------------------------------------
 
 _SIG_BRAND = "Phishing: {brand} Impersonation"
+_SIG_PROVIDER = "Flagged by {provider}: Suspected {kind}"
 _SIG_GATE = "Suspicious Gate Bypass Detected"
 _SIG_CREDENTIAL = "Credential Harvesting Detected"
 _SIG_INCOMPLETE = "Analysis-Incomplete — Benign By Default"
@@ -92,6 +94,16 @@ def build_signature(
     ``kit_family`` del verdetto.
     """
     if mapped == "malicious":
+        # 0. Pagina d'avviso del provider (regola deterministica del
+        #    prefiltro): la firma dice chi ha segnalato il sito.
+        flagged = parse_kit_family(getattr(verdict, "kit_family", None))
+        if flagged is not None:
+            provider, kind = flagged
+            return _SIG_PROVIDER.format(
+                provider=provider,
+                kind="Phishing" if kind == "phishing" else "Malware",
+            )
+
         # 1. Brand impersonation — cerca nelle evidence con key="typosquat" (L1)
         for ev in evidence:
             if isinstance(ev, dict) and ev.get("key") == "typosquat":

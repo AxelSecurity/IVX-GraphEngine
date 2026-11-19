@@ -214,6 +214,15 @@ Il livello L5 trasforma i dati grezzi raccolti durante l'esplorazione L4 in un
    (MISP/OpenCTI) NON fanno parte del motore: le gestisce a monte il
    servizio chiamante, quindi nessun reputation hit decide da solo.
 
+   **Regola 0 — avviso del provider** (`classifier/provider_warning.py`):
+   se il dominio analizzato mostra la pagina d'avviso di sicurezza di
+   Cloudflare ("Suspected Phishing/Malware") o l'interstitial di Google
+   Safe Browsing ("Deceptive site ahead"), il verdetto è `phishing` 0.9
+   senza consultare il modello, con firma `Flagged by <provider>:
+   Suspected <Phishing|Malware>`. Vale solo per il dominio analizzato (non
+   per siti terzi raggiunti con i click) e usa le frasi specifiche
+   dell'avviso, non parole generiche.
+
    Casi intercettati (1 stato senza testo visibile, errore non gestito
    senza altri segnali) → Verdict `suspicious` a confidenza minima
    (0.05; 0.6 con TLS failure sul certificato dell'hostname).

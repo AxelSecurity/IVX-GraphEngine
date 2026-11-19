@@ -29,6 +29,10 @@ from __future__ import annotations
 
 from typing import Optional
 
+from graph_engine.classifier.provider_warning import (
+    detect_provider_warning,
+    kit_family_for,
+)
 from graph_engine.models import Classification, Verdict
 
 # ---------------------------------------------------------------------------
@@ -73,7 +77,13 @@ def _has_strong_signal(bundle: dict) -> bool:
 def prefilter(bundle: dict) -> Optional[Verdict]:
     """Return a deterministic Verdict, or None to delegate to Foundry.
 
-    Cases intercepted (return non-None), only when NO layer produced
+    Rule 0 — provider security warning (always, before everything else):
+    the analysed domain serves the security warning page of a provider
+    (Cloudflare "Suspected Phishing/Malware", Google Safe Browsing
+    interstitial) → ``phishing`` at 0.9: the site has already been flagged
+    by whoever hosts or protects it (see ``provider_warning``).
+
+    Other cases intercepted (return non-None), only when NO layer produced
     signal:
 
     1. Only 1 state AND no visible text was extracted from it
@@ -97,6 +107,25 @@ def prefilter(bundle: dict) -> Optional[Verdict]:
       typosquat at distance 1);
     - anything with real L4 content.
     """
+
+    # ── Rule 0: pagina d'avviso del provider sul dominio analizzato ─────
+    warning = detect_provider_warning(bundle)
+    if warning is not None:
+        kind_it = "phishing" if warning["kind"] == "phishing" else "malware"
+        return Verdict(
+            target_id=bundle.get("target_id", ""),
+            classification=Classification.phishing,
+            confidence=0.9,
+            produced_by="prefilter",
+            kit_family=kit_family_for(warning),
+            rationale=(
+                f"Il dominio analizzato mostra la pagina d'avviso di "
+                f"sicurezza di {warning['provider']} (\"{warning['marker']}\"): "
+                f"il provider ha già segnalato il sito per {kind_it}. "
+                "Verdetto deterministico, senza consultare il modello."
+            ),
+            final_url=warning.get("state_url"),
+        )
 
     # L1/L2/L3 signal takes precedence over L4 sparsity: when other
     # layers already produced real signal, do NOT intercept — the model
