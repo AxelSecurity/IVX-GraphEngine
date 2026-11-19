@@ -28,7 +28,7 @@ from typing import Any
 import httpx
 
 from graph_engine.config import settings
-from graph_engine.osint.cache import TTL_CTLOGS, cache_get, cache_set
+from graph_engine.osint.cache import TTL_CTLOGS, TTL_ERROR, cache_get, cache_set
 
 # ---------------------------------------------------------------------------
 # Limiti
@@ -109,7 +109,10 @@ async def query_ctlogs(
         return cached
 
     result = await _fetch_and_parse_ctlogs(domain, client, timeout=timeout)
-    cache_set(cache_provider, domain, result)
+    cache_set(
+        cache_provider, domain, result,
+        ttl_seconds=TTL_ERROR if "error" in result else None,
+    )
     return result
 
 

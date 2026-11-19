@@ -314,6 +314,12 @@ fallimento su una fonte non blocca mai le altre.
 | **RDAP** | WHOIS moderno (via bootstrap IANA) | `https://data.iana.org/rdap/dns.json` → server TLD-specifico | 24 ore |
 | **DNS** | Risoluzione A/AAAA | `loop.getaddrinfo` (asyncio nativo, nessuna dipendenza esterna) | 1 ora |
 
+Gli **esiti di errore** (timeout, 5xx, rate limit, "nessun record DNS",
+"tutti i server RDAP falliti") restano in cache solo `TTL_ERROR` = 5
+minuti: spesso sono transitori e non devono condizionare per ore le
+analisi successive dello stesso dominio. RDAP applica il timeout
+all'intera query (deadline unica sui server del TLD), non a ogni server.
+
 **ctlogs.dev è l'unico provider CT** (crt.sh rimosso il 2026-08-27:
 502 sistematici nel collaudo live — 3 richieste su 3). L'analyzer
 interroga SEMPRE ctlogs.dev in una di due modalità:

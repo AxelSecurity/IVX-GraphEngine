@@ -23,6 +23,11 @@ TTL_CTLOGS = 21_600     # 6 ore — nuovi certificati possono comparire
 TTL_URLHAUS = 3_600     # 1 ora — feed di minacce, più dinamico
 TTL_DNS = 3_600         # 1 ora — i record DNS possono cambiare, ma non frequentemente
 TTL_IANA_BOOTSTRAP = 2_592_000  # 30 giorni — la mappatura TLD→server RDAP è stabile
+TTL_ERROR = 300         # 5 minuti — esiti di errore (timeout, 5xx, rate
+                        # limit, "nessun record"): spesso transitori, non
+                        # vanno trattati come dati validi per ore.  Il
+                        # TTL breve evita comunque di martellare una
+                        # fonte già in difficoltà con analisi ravvicinate.
 
 # ---------------------------------------------------------------------------
 # Cache root
@@ -65,19 +70,35 @@ def cache_get(provider: str, key: str, ttl_seconds: int) -> Optional[dict]:
         return None
 
     stored_at = data.get("_cached_at", 0)
-    if time.time() - stored_at > ttl_seconds:
+    # Un TTL salvato con il valore (es. ``TTL_ERROR`` per gli esiti di
+    # errore) può solo ACCORCIARE quello richiesto dal chiamante.
+    stored_ttl = data.get("_ttl")
+    effective_ttl = (
+        min(ttl_seconds, stored_ttl)
+        if isinstance(stored_ttl, (int, float))
+        else ttl_seconds
+    )
+    if time.time() - stored_at > effective_ttl:
         return None
 
     return data.get("_payload")
 
 
-def cache_set(provider: str, key: str, value: dict) -> None:
+def cache_set(
+    provider: str,
+    key: str,
+    value: dict,
+    ttl_seconds: Optional[int] = None,
+) -> None:
     """Scrive un valore nella cache.
 
     Args:
         provider: Nome del provider.
         key: Chiave di query.
         value: Dizionario da cachare (viene wrappato con metadati interni).
+        ttl_seconds: TTL massimo specifico di questo valore (es.
+            ``TTL_ERROR`` per un esito di errore).  ``None`` → vale il
+            TTL passato dal chiamante a ``cache_get``.
     """
     cache_dir = _CACHE_ROOT / provider
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -87,6 +108,8 @@ def cache_set(provider: str, key: str, value: dict) -> None:
         "_cached_at": time.time(),
         "_payload": value,
     }
+    if ttl_seconds is not None:
+        envelope["_ttl"] = ttl_seconds
 
     try:
         with open(cache_file, "w", encoding="utf-8") as fh:

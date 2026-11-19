@@ -15,7 +15,7 @@ from typing import Optional
 import httpx
 
 from graph_engine.config import settings
-from graph_engine.osint.cache import TTL_URLHAUS, cache_get, cache_set
+from graph_engine.osint.cache import TTL_ERROR, TTL_URLHAUS, cache_get, cache_set
 from graph_engine.osint.reputation.base import ReputationProvider
 
 URLHAUS_API_URL = "https://urlhaus-api.abuse.ch/v1/url/"
@@ -53,7 +53,12 @@ class UrlhausProvider(ReputationProvider):
             return cached
 
         result = await self._query(url, client, timeout_s)
-        cache_set("urlhaus", url, result)
+        cache_set(
+            "urlhaus", url, result,
+            ttl_seconds=(
+                TTL_ERROR if "error" in result.get("details", {}) else None
+            ),
+        )
         return result
 
     async def _query(

@@ -7,6 +7,8 @@ stesso principio del fix tldextract per i TLD a due componenti.
 
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
@@ -14,7 +16,13 @@ from urllib.parse import urlparse
 import httpx
 
 from graph_engine.lexical.typosquat import _registrable_domain
-from graph_engine.osint.cache import TTL_IANA_BOOTSTRAP, TTL_RDAP, cache_get, cache_set
+from graph_engine.osint.cache import (
+    TTL_ERROR,
+    TTL_IANA_BOOTSTRAP,
+    TTL_RDAP,
+    cache_get,
+    cache_set,
+)
 
 # ---------------------------------------------------------------------------
 # Costanti
@@ -57,7 +65,10 @@ async def query_rdap(
         return cached
 
     result = await _fetch_rdap(reg_domain, client, timeout=timeout)
-    cache_set("rdap", reg_domain, result)
+    cache_set(
+        "rdap", reg_domain, result,
+        ttl_seconds=TTL_ERROR if "error" in result else None,
+    )
     return result
 
 
@@ -142,12 +153,22 @@ async def _fetch_rdap(
     # 3. Preferisci HTTPS e limita il numero di tentativi
     servers = _prioritize_https(servers)[:MAX_RDAP_SERVERS]
 
+    # Deadline COMPLESSIVA sui tentativi: il timeout vale per l'intera
+    # query RDAP, non per ogni server — il caso peggiore resta
+    # ``effective_timeout`` invece di N × timeout con N server lenti.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + effective_timeout
+
     errors: list[str] = []
     for server_url in servers:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            errors.append(f"server {server_url}: skipped (RDAP deadline reached)")
+            continue
         rdap_url = _build_rdap_url(server_url, reg_domain)
 
         try:
-            response = await client.get(rdap_url, timeout=effective_timeout)
+            response = await client.get(rdap_url, timeout=remaining)
             if response.status_code == 404:
                 return {
                     "domain_age_days": None,
