@@ -48,6 +48,8 @@ _SUSPICIOUS_BLOCK_THRESHOLD = 0.6
 
 _SIG_BRAND = "Phishing: {brand} Impersonation"
 _SIG_PROVIDER = "Flagged by {provider}: Suspected {kind}"
+_SIG_MALWARE_DOWNLOAD = "Malware Download Lure: {brand} Impersonation"
+_SIG_MALWARE_DOWNLOAD_GENERIC = "Malware Download Lure"
 _SIG_GATE = "Suspicious Gate Bypass Detected"
 _SIG_CREDENTIAL = "Credential Harvesting Detected"
 _SIG_INCOMPLETE = "Analysis-Incomplete — Benign By Default"
@@ -102,6 +104,15 @@ def build_signature(
             return _SIG_PROVIDER.format(
                 provider=provider,
                 kind="Phishing" if kind == "phishing" else "Malware",
+            )
+
+        # 0b. Esca per scaricare malware (finto installer/viewer/update):
+        #     va distinta dal furto di credenziali per il chiamante.
+        if (getattr(verdict, "kit_family", None) or "").lower() == "malware-download":
+            v_brand = getattr(verdict, "brand", None)
+            return (
+                _SIG_MALWARE_DOWNLOAD.format(brand=v_brand)
+                if v_brand else _SIG_MALWARE_DOWNLOAD_GENERIC
             )
 
         # 1. Brand impersonation — cerca nelle evidence con key="typosquat" (L1)

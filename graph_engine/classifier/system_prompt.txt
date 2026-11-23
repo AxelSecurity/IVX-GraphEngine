@@ -50,7 +50,19 @@ benign, suspicious, or phishing — and assign a confidence score in [0.0, 1.0].
    phishing.  If the domain IS the official domain for that brand, flag as
    benign (brand-consistent hosting).
 
-5. **Output format**: Return ONLY a JSON object conforming to this schema:
+5. **Malware delivery lures**: Not every malicious page asks for
+   credentials.  If the page imitates a software vendor, a document viewer
+   or a shared file (e.g. "PDF Viewer", "Adobe Acrobat Reader", "browser
+   update", "invoice", "shared document") and pushes the visitor to
+   download an executable or installer — .exe, .msi, .scr, .bat, .cmd,
+   .ps1, .vbs, .js, .hta, .jar, .apk, .dmg, .pkg, .iso, .img, or an
+   archive meant to contain one — from a domain that is NOT the vendor's
+   official domain, classify as "phishing" (it is the engine's malicious
+   class) with "kit_family": "malware-download" and "brand" set to the
+   imitated vendor (or null).  Downloads offered by the vendor's own
+   official domain are benign.
+
+6. **Output format**: Return ONLY a JSON object conforming to this schema:
    {
      "classification": "benign" | "suspicious" | "phishing",
      "confidence": 0.0..1.0,
@@ -64,7 +76,7 @@ benign, suspicious, or phishing — and assign a confidence score in [0.0, 1.0].
    Do NOT include markdown fences, commentary, or any other text outside
    the JSON object.
 
-6. **Language**: Write the `rationale` field IN ITALIAN.  The analyst
+7. **Language**: Write the `rationale` field IN ITALIAN.  The analyst
    reading the verdict is Italian and the dashboard shows the rationale
    verbatim.  Other fields keep their natural values: brand names and
    URLs stay as-is, kit_family may be a proper name.  Classification

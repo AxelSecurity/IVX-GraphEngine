@@ -105,3 +105,25 @@ class TestExternalResponse:
         verdict = Verdict(target_id=uuid.uuid4(), classification=Classification.phishing,
                           confidence=0.9, produced_by="foundry", brand="PayPal")
         assert build_signature(verdict, [], mapped="malicious") == "Phishing: PayPal Impersonation"
+
+
+class TestMalwareDownloadSignature:
+    def test_malware_download_lure_has_dedicated_signature(self):
+        verdict = Verdict(target_id=uuid.uuid4(), classification=Classification.phishing,
+                          confidence=0.9, produced_by="foundry",
+                          brand="Adobe", kit_family="malware-download")
+        assert build_signature(verdict, [], mapped="malicious") == (
+            "Malware Download Lure: Adobe Impersonation"
+        )
+
+    def test_without_brand_generic_signature(self):
+        verdict = Verdict(target_id=uuid.uuid4(), classification=Classification.phishing,
+                          confidence=0.9, produced_by="foundry", kit_family="malware-download")
+        assert build_signature(verdict, [], mapped="malicious") == "Malware Download Lure"
+
+    def test_prompt_contains_malware_lure_rule(self):
+        from graph_engine.classifier.foundry_classifier import _load_system_prompt
+
+        prompt = _load_system_prompt()
+        assert "Malware delivery lures" in prompt
+        assert '"kit_family": "malware-download"' in prompt

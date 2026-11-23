@@ -855,7 +855,18 @@ resta quello pieno del runner.
 | `suspicious` (confidence ≥ 0.6) | `malicious` | `block` |
 | `phishing` | `malicious` | `block` |
 
+Esche per scaricare malware: il system prompt (regola 5) chiede di
+classificare come malevola una pagina che imita un produttore di software,
+un visualizzatore o un documento e spinge a scaricare un eseguibile o un
+installer (`.exe`, `.msi`, `.ps1`, `.apk`, …) da un dominio non ufficiale,
+con `kit_family = "malware-download"`; la firma è `Malware Download Lure:
+<brand> Impersonation`.
+
 La signature testuale ha una catena di priorità (solo su `malicious`):
+0. **Avviso del provider** (`kit_family = provider-warning:…`) →
+   `Flagged by <provider>: Suspected <Phishing|Malware>`; **esca per
+   scaricare malware** (`kit_family = malware-download`) →
+   `Malware Download Lure: <brand> Impersonation`
 1. **Brand impersonation** — brand noto trovato nell'evidenza L1
    `typosquat` o in `verdict.brand` → `Phishing: {brand} Impersonation`
 2. **Gate bypass** — evidenza `gate_solved` → `Suspicious Gate Bypass Detected`
