@@ -1,116 +1,234 @@
 # GraphEngine
 
-Uno strumento che prende in input un URL sospetto (es. segnalato come possibile
-phishing) e lo analizza in automatico, seguendolo passo passo — redirect,
-pagine intermedie, eventuali click — fino ad arrivare alla pagina finale.
-Il risultato è un **grafo**: ogni pagina incontrata è un nodo, ogni redirect
-o azione è un collegamento tra due nodi. Alla fine lo strumento dice se il
-sito è probabilmente benigno, sospetto o phishing, e perché.
+Servizio che analizza un URL sospetto e restituisce un verdetto
+**`safe` / `malicious`** con firma e motivazione. Apre l'URL in un browser
+isolato, segue redirect, pagine intermedie e click fino alla pagina finale,
+raccoglie segnali da più fonti e fa decidere un modello AI (Azure AI
+Foundry), affiancato da alcune regole deterministiche.
 
-È un servizio indipendente: lo chiamano altri sistemi via HTTP (API
-sincrona `GET /api/v1/analyze` oppure sottomissione asincrona + polling),
-non viene mai importato direttamente nel loro codice. Le lookup su
-piattaforme di threat intelligence interne (MISP/OpenCTI) restano a
-carico del servizio chiamante.
+È un servizio HTTP indipendente: i sistemi esterni lo chiamano via API
+(`GET /api/v1/analyze`), gli analisti lo usano dalla dashboard web. Le
+lookup su piattaforme di threat intelligence (MISP, OpenCTI, URLhaus) non
+fanno parte del motore: restano al servizio chiamante. Verso OpenCTI il
+motore può solo **scrivere**, su richiesta di un utente dalla dashboard.
 
-## Come funziona, in breve
+Questo è il branch `standalone`. Il branch `main` conserva la versione
+originale, integrata con Trellix IVX.
 
-L'analisi è divisa in livelli (L0-L5), ciascuno con un compito preciso.
-Ogni livello produce **evidenze** (segnali osservati, con un peso di rischio)
-che si accumulano fino al verdetto finale:
+## Indice
+
+- [Come funziona](#come-funziona)
+- [Cosa non fa](#cosa-non-fa)
+- [Avvio con Docker](#avvio-con-docker)
+- [Configurazione](#configurazione)
+- [API per i servizi esterni](#api-per-i-servizi-esterni)
+- [Dashboard](#dashboard)
+- [Esercizio in produzione](#esercizio-in-produzione)
+- [Sviluppo e test](#sviluppo-e-test)
+
+## Come funziona
+
+Ogni analisi attraversa sei livelli. Ognuno produce **evidenze** (segnali
+osservati con un peso), che arrivano tutte al classificatore finale.
 
 | Livello | Cosa fa |
 |---|---|
-| **L0 — Ingestion** | Pulisce l'URL in ingresso: rimuove wrapper di sicurezza (es. link riscritti da gateway email), decodifica, normalizza |
-| **L1 — Lessicale** | Analizza l'URL come testo: somiglianza con domini noti (typosquatting), entropia sospetta, pattern di infrastruttura tipici del phishing |
-| **L2 — OSINT passivo** | Interroga fonti esterne senza toccare il sito: certificati SSL (ctlogs.dev), whois (RDAP), DNS, Le lookup su feed e piattaforme di threat intelligence (MISP, OpenCTI, URLhaus) non fanno parte del motore: le gestisce a monte il servizio chiamante. Trova anche "domini fratelli" della stessa campagna |
-| **L3 — Attivo a bassa intensità** | Richieste HTTP mirate (catena di redirect, favicon, impronta TLS "JARM", confronto risposte con User-Agent diversi per scoprire cloaking) — mai esecuzione di JavaScript |
-| **L4 — Esplorazione del grafo** | Apre un vero browser (Playwright) e naviga il sito seguendo redirect e cliccando sugli elementi più plausibili (bottoni "continua", gate CAPTCHA), costruendo il grafo di stati fino al payload finale |
-| **L5 — Classificazione** | Un filtro deterministico intercetta i casi banali; per il resto un modello AI (Azure Foundry) valuta tutte le evidenze raccolte e produce il verdetto finale con motivazione |
+| **L0 — Ingestion** | Normalizza l'URL: rimuove i wrapper dei gateway di posta (es. Safe Links), riconosce gli URL "defanged" (`hxxp://`, `[.]`), decodifica la codifica, canonicalizza |
+| **L1 — Lessicale** | Analizza l'URL come testo: somiglianza con domini di marchi noti (typosquatting), entropia, pattern tipici dell'infrastruttura di phishing |
+| **L2 — OSINT passivo** | Interroga fonti esterne senza toccare il sito: certificati (ctlogs.dev, con i "domini fratelli" della stessa campagna), whois (RDAP), DNS |
+| **L3 — Attivo leggero** | Richieste HTTP mirate: catena di redirect, favicon, impronta TLS (JARM) e confronto delle risposte con User-Agent diversi per scoprire il cloaking |
+| **L4 — Esplorazione** | Un vero browser (Playwright/Chromium) naviga il sito: segue redirect HTTP, JS e meta refresh, supera gate CAPTCHA semplici, clicca i bottoni più plausibili (fino a 3 per pagina, in parallelo) e costruisce il **grafo degli stati**, con screenshot, DOM, HAR e campi dei form di ogni pagina (anche dentro gli iframe) |
+| **L5 — Classificazione** | Azure AI Vision legge testo e marchi dagli screenshot; regole deterministiche decidono i casi certi; per il resto il modello Foundry valuta tutte le evidenze e restituisce verdetto, marchio imitato e una motivazione breve |
 
-Il risultato di ogni analisi viene salvato in modo permanente (SQLite):
-ogni run è una nuova riga, non si sovrascrive mai nulla, così si può
-consultare lo storico di un URL già visto in passato.
+Le regole deterministiche di L5 coprono due casi:
+- **Avviso del provider:** se il dominio analizzato mostra la pagina
+  d'avviso di Cloudflare ("Suspected Phishing/Malware") o di Google Safe
+  Browsing, il verdetto è subito malevolo, senza consultare il modello.
+- **Pagina vuota o irraggiungibile:** se non c'è contenuto da giudicare, il
+  verdetto è "dati insufficienti", con confidenza minima.
 
-## Cosa NON fa (scelte deliberate)
+Il modello riconosce sia il furto di credenziali (pagine che imitano un
+marchio e chiedono login, carte, dati personali) sia le **esche per
+scaricare malware** (finti viewer, aggiornamenti o installer da domini non
+ufficiali).
 
-- **Non inserisce mai dati nei form.** Il progetto osserva e classifica,
-  non compila né invia credenziali, nemmeno finte ("canary").
-- **Non risolve CAPTCHA reali.** Al massimo aspetta un'auto-risoluzione o
-  clicca una checkbox semplice.
-- **Ogni classificazione AI parte "pulita".** Nessuna memoria tra
-  un'analisi e l'altra: evita che il contesto di un caso precedente
-  influenzi (falsando) il giudizio su un sito nuovo.
+Alcuni accorgimenti di L4 contro le tecniche di evasione:
+- attende i redirect JavaScript ritardati e le pagine che disegnano il form
+  dopo alcuni secondi;
+- confronta il DOM per riconoscere i cambi di stato anche nelle SPA, dove
+  l'URL non cambia;
+- esplora un secondo ramo con il profilo che ha ricevuto contenuti diversi,
+  quando L3 rileva cloaking.
 
-## Come usarlo
+Ogni analisi viene salvata in SQLite e non sovrascrive mai le precedenti,
+quindi lo storico di un URL resta consultabile. I dettagli di ogni livello
+sono in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Cosa non fa
+
+- **Non compila mai i form**: osserva e classifica, non invia credenziali,
+  nemmeno finte.
+- **Non risolve CAPTCHA reali**: al massimo attende l'auto-risoluzione o
+  clicca una checkbox.
+- **Non ricorda le analisi precedenti** quando classifica: ogni chiamata al
+  modello parte da zero, perché un caso precedente non influenzi il giudizio.
+- **Non interroga feed di reputazione** (MISP, OpenCTI, URLhaus): è compito
+  del servizio chiamante.
+
+## Avvio con Docker
+
+Un solo container serve API e dashboard sulla stessa porta. Il deployment è
+single-node su SQLite.
 
 ```bash
-# Setup iniziale
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
+git clone -b standalone https://github.com/AxelSecurity/IVX-GraphEngine.git graph-engine
+cd graph-engine
 
-# Analisi da riga di comando
-python -m graph_engine.cli <url>
-python -m graph_engine.cli <url> --classify        # con classificazione L5 (AI)
-python -m graph_engine.cli <url> --history <url>   # solo storico, nessuna nuova analisi
+cp .env.example .env && chmod 600 .env   # poi compila le variabili (sezione Configurazione)
 
-# Come servizio HTTP (per integrazioni con servizi esterni)
-uvicorn graph_engine.api.app:app --reload
+docker compose build      # include Chromium e le sue librerie
+docker compose up -d
+docker compose ps         # deve risultare (healthy)
+curl http://localhost:8000/health
 ```
 
-## Dashboard di monitoraggio
+- **Dashboard:** `http://localhost:8000/dashboard`, utente `admin`.
+- **Porta diversa:** `HOST_PORT=8080 docker compose up -d`.
+- **Log:** `docker compose logs -f`.
+- **Arresto:** `docker compose down`; i dati restano in `./data`.
+- **Aggiornamento:** `git pull && docker compose up -d --build`.
 
-Una dashboard web mostra tutte le sottomissioni effettuate e, cliccandoci
-sopra, tutti i dettagli estratti — grafo di esplorazione, stati con
-screenshot, evidenze per livello, verdetto. In cima alla vista c'è anche
-il form per **sottomettere nuovi URL** (classificazione L5 e budget
-opzionali), con le stesse regole della POST `/analyses`. È servita dalla
-stessa app FastAPI dell'API (nessun servizio separato, nessuna porta
-aggiuntiva): con l'API già avviata, apri `http://localhost:8000/dashboard`.
+## Configurazione
 
-Dalla voce **"Whitelist/Blacklist"** si gestiscono le liste forzate per
-**domini** (match sul dominio registrabile, eTLD+1) e per **URL** (match
-sulla URL normalizzata senza query/frammento). Un hit forza subito il
-verdetto e salta l'analisi — sia nella dashboard che nella risposta
-dell'API esterna; in caso di conflitto vince il match più specifico (URL > dominio).
+Tutta la configurazione sta nel `.env` accanto a `docker-compose.yml`.
+`.env.example` contiene ogni variabile commentata.
 
-Nel dettaglio di un'analisi con verdetto **malicious** il pulsante
-**"Invia a OpenCTI"** crea su OpenCTI un Report (TLP e autore da `.env`)
-con gli indicatori scelti nell'anteprima: URL analizzato, URL finale e
-dominio (sempre l'host completo, mai la piattaforma di hosting
-condiviso). Ogni analisi si invia una volta sola; dopo l'invio il
-riquadro mostra chi l'ha inviata e il link al Report. Richiede
-`OPENCTI_URL` e `OPENCTI_API_KEY`; il motore resta in sola scrittura,
-le lookup su OpenCTI restano a carico del servizio chiamante.
+**Accesso**
 
-Dalla voce **"Utenti"** (visibile solo agli amministratori) si gestiscono
-gli account della dashboard: creazione, cambio ruolo
-(`admin`/`operator`), cambio password ed eliminazione. Protezioni: non si
-può eliminare il proprio account né eliminare o degradare a `operator`
-l'ultimo amministratore rimasto; cambiare password o ruolo revoca le
-sessioni attive dell'utente (comprese le proprie).
+| Variabile | Default | A cosa serve |
+|---|---|---|
+| `API_KEY` | — (**obbligatoria**) | Chiavi per l'API esterna, separate da virgola (una per servizio chiamante). Senza, `/api/v1/analyze` risponde `503` |
+| `DASHBOARD_ADMIN_USER` / `DASHBOARD_ADMIN_PASSWORD` | `admin` / casuale | Admin creato al primo avvio, solo se non esistono utenti. Senza password, quella generata viene stampata nel log |
 
-### Login e utenti
+**Classificazione (Azure)**
 
-La dashboard **richiede il login**: le credenziali sono multi-utente in
-SQLite (ruoli `admin`/`operator`, password con hash PBKDF2) e la sessione
-vive in un cookie HttpOnly di 12h. Il login protegge anche **tutte le API
-REST** (tranne `/health` e l'API esterna `/api/v1`, che ha la sua API
-key): un 401 riporta alla schermata di accesso. Sulle route di
-sottomissione e polling delle analisi (`POST /analyses`, `GET
-/analyses[/...]`) la API key vale in alternativa al login, per i client
-machine-to-machine.
+| Variabile | Default | A cosa serve |
+|---|---|---|
+| `AZURE_FOUNDRY_ENDPOINT`, `AZURE_FOUNDRY_AGENT_ID` | — | Modello di classificazione. Senza, si usa un fallback euristico |
+| `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` | — | Service principal per Foundry. Senza, si usa `DefaultAzureCredential` |
+| `AZURE_VISION_ENDPOINT`, `AZURE_VISION_KEY` | — | OCR e riconoscimento dei marchi sugli screenshot |
+| `FOUNDRY_MAX_CONCURRENT` | `2` | Run Foundry contemporanei. Sul limite di quota si ritenta fino a 3 volte (10/20/40 s) |
 
-Al primo avvio viene creato l'admin bootstrap: credenziali da
-`DASHBOARD_ADMIN_USER`/`DASHBOARD_ADMIN_PASSWORD` se valorizzate nel
-`.env`, altrimenti utente `admin` con password casuale **stampata nel
-log** (`docker compose logs`). Nota: il bootstrap parte solo a tabella
-utenti **vuota** — cambiare le variabili del `.env` non sovrascrive
-l'admin già esistente.
+**Fonti OSINT**
 
-La gestione ordinaria avviene dalla dashboard (voce "Utenti", solo
-admin); da CLI resta disponibile per l'emergenza (es. password
+| Variabile | Default | A cosa serve |
+|---|---|---|
+| `CTLOGS_API_KEY` | — | Modalità API di ctlogs.dev (domini fratelli). Senza, si usa la modalità anonima |
+
+**OpenCTI (pulsante della dashboard)**
+
+| Variabile | Default | A cosa serve |
+|---|---|---|
+| `OPENCTI_URL`, `OPENCTI_API_KEY` | — | Abilitano "Invia a OpenCTI". La chiave deve poter creare Report e Indicator |
+| `OPENCTI_TLP` | `TLP:AMBER` | Marcatura degli oggetti creati |
+| `OPENCTI_AUTHOR` | `GraphEngine` | Organizzazione autore |
+| `DASHBOARD_PUBLIC_URL` | — | URL pubblico della dashboard, per il link all'analisi nel Report |
+
+**Prestazioni e risorse**
+
+| Variabile | Default | A cosa serve |
+|---|---|---|
+| `MAX_CONCURRENT_ANALYSES` | `4` | Analisi in esecuzione insieme; le altre attendono in coda |
+| `L4_PARALLEL_ACTIONS` | `3` | Azioni esplorate in parallelo per pagina (`1` = sequenziale) |
+| `SCREENSHOT_MAX_HEIGHT` | `8000` | Altezza massima degli screenshot in pixel (Vision rifiuta oltre 16000) |
+| `ARTIFACT_RETENTION_DAYS` | `30` | Giorni dopo cui si cancellano screenshot/DOM/HAR (`0` = mai). Il DB non viene toccato |
+| `LOG_LEVEL` | `INFO` | Livello dei log |
+
+## API per i servizi esterni
+
+L'autenticazione usa l'header **`X-API-Key`**.
+
+| Endpoint | Uso |
+|---|---|
+| `GET /api/v1/analyze?url=<url>` | **Sincrona**: risponde a fine analisi con il verdetto |
+| `POST /analyses` → `GET /analyses/{id}` → `GET /analyses/{id}/verdict` | **Asincrona**: sottomissione (`202` con `id`), polling di `target.status` (`queued` → `running` → `done`/`error`), poi il verdetto nello stesso formato |
+| `GET /analyses/{id}/graph` | Il JSON completo dell'analisi: stati, transizioni, evidenze, verdetto |
+| `GET /health` | Stato del servizio, senza chiave |
+
+```bash
+curl -G https://<host>/api/v1/analyze \
+     -H "X-API-Key: $API_KEY" \
+     --data-urlencode "url=https://esempio-sospetto.com/login?id=42" \
+     --max-time 360
+```
+
+```json
+{
+  "result": {
+    "verdict": "malicious",
+    "confidence": 0.92,
+    "signature": "Phishing: Roundcube Impersonation",
+    "recommended_action": "block",
+    "reason": "Phishing Roundcube: la pagina su dominio non ufficiale (reliable-mail.com) chiede 'Username' e 'Password'; logo 'roundcube' rilevato nello screenshot."
+  }
+}
+```
+
+**Regole della richiesta**
+- L'URL va **codificato e messo come ultimo parametro**: il server prende
+  tutto ciò che segue `url=`.
+- Sono accettati URL defanged e link riscritti dai gateway di posta.
+- Lunghezza massima: 2048 caratteri.
+
+**Decisione e firme**
+- Si decide su `result.verdict`: `malicious` = bloccare.
+- `signature` dice il tipo di minaccia:
+  - `Phishing: <Marchio> Impersonation`
+  - `Malware Download Lure: <Marchio> Impersonation`
+  - `Flagged by <Provider>: Suspected Phishing|Malware`
+  - `Blacklist-Override …`
+  - `No Threats Detected`, ecc.
+- `Analysis-Failed` e `Analysis-Incomplete — Benign By Default` sono `safe`
+  con confidenza 0.1: non conclusivi.
+
+**Tempi e comportamento**
+- **Durata:** di solito 20–60 s; fino a circa 5 minuti sui siti con molti
+  link. Il timeout client consigliato è **360 s**.
+- **Cache:** un URL analizzato con successo nelle ultime 24 ore risponde
+  subito. `POST /analyses` invece avvia sempre un'analisi nuova.
+- **Richieste simultanee:** due richieste sullo stesso URL condividono la
+  stessa analisi.
+- **Disconnessione:** se il client si disconnette, l'analisi continua; la
+  chiamata successiva riceve il risultato.
+- **Whitelist/blacklist:** un URL o dominio in lista riceve subito il
+  verdetto forzato (confidenza 1.0).
+- **Errori:**
+  - `401`: chiave assente o errata;
+  - `422`: parametro `url` non valido;
+  - `503`: `API_KEY` non configurata.
+
+## Dashboard
+
+`/dashboard`, accessibile con login: utenti in SQLite, ruoli `admin` e
+`operator`, sessione di 12 ore.
+
+- **Sottomissioni:** l'elenco delle analisi con filtri e ricerca, il form
+  per sottomettere nuovi URL e la cancellazione multipla.
+- **Dettaglio:** il grafo di esplorazione, gli screenshot di ogni stato, le
+  evidenze per livello, il verdetto con la motivazione e il JSON esatto
+  restituito dall'API.
+- **Invia a OpenCTI:** solo sulle analisi `malicious`. Crea un Report con
+  gli indicatori scelti nell'anteprima (URL analizzato, URL finale, dominio
+  come host completo). Ogni analisi si invia una volta sola; dopo l'invio
+  il riquadro mostra chi l'ha inviata e il link al Report.
+- **Whitelist/Blacklist:** liste per dominio (dominio registrabile) e per
+  URL. Un hit salta l'analisi e forza il verdetto; vince il match più
+  specifico (URL su dominio).
+- **Utenti** (solo admin): creazione, ruolo, password, eliminazione.
+  L'ultimo admin è protetto, e cambiare password o ruolo chiude le sessioni
+  attive dell'utente.
+
+Gestione utenti da riga di comando, per le emergenze (es. password
 dimenticata):
 
 ```bash
@@ -119,158 +237,57 @@ docker compose exec graph-engine python -m graph_engine.api.auth_cli add operato
 docker compose exec graph-engine python -m graph_engine.api.auth_cli passwd admin
 ```
 
-I dettagli di ogni livello, gli schemi dati e le decisioni tecniche sono
-documentati in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+## Esercizio in produzione
 
-## Con Docker (deployment single-node)
+- **Risorse:** 6–8 GB di RAM. Nei test reali il picco è stato 4,8 GB con
+  4 analisi in parallelo. Per ridurre il consumo si abbassano
+  `MAX_CONCURRENT_ANALYSES` o `L4_PARALLEL_ACTIONS`.
+- **Rete in uscita:**
+  - i siti da analizzare;
+  - Azure (`*.services.ai.azure.com`, `*.cognitiveservices.azure.com`,
+    `login.microsoftonline.com`);
+  - `ctlogs.dev`, `data.iana.org` e i server RDAP;
+  - OpenCTI, se usato.
+- **Esposizione:**
+  - dietro un reverse proxy con HTTPS;
+  - timeout del proxy di almeno 360 s;
+  - dashboard raggiungibile solo dalla rete interna.
+- **Dati:** tutto sta in `./data` (DB `graph_engine.db`, artefatti, cache
+  OSINT), montato nel container. I permessi si sistemano da soli al primo
+  avvio e il server gira come utente non-root.
+- **Retention:** un job giornaliero cancella gli artefatti più vecchi di
+  `ARTIFACT_RETENTION_DAYS` e la cache OSINT scaduta. Il **backup di
+  `./data/graph_engine.db`** resta a carico dell'infrastruttura.
+- **Quota Foundry:** con molte analisi in parallelo può scattare il limite
+  di token al minuto del deployment. Il motore ritenta, ma conviene
+  dimensionare la quota (TPM) su Azure.
+- **Log:** solo le righe utili (analisi, avvisi, chiamate esterne). Le
+  librerie Azure restano al livello degli avvisi e i `GET /health` riusciti
+  sono esclusi.
 
-Il servizio gira in un container con `docker-compose.yml` — un solo
-servizio, coerentemente con la decisione presa all'inizio del progetto
-(single-node su SQLite, non orchestrato). Lo stesso container serve sia
-l'API che la dashboard (`/dashboard`), sulla stessa porta.
-
-```bash
-# 1. Copia la configurazione accanto a docker-compose.yml
-#    (radice del progetto, NON dentro data/):
-cp .env.example .env   # poi valorizza le variabili che ti servono
-
-# 2. Build dell'immagine (installa anche chromium Playwright
-#    e le sue librerie di sistema nello stesso layer)
-docker compose build
-
-# 3. Avvio in background
-docker compose up -d
-
-# 4. Verifica che sia in salute
-curl http://localhost:8000/health
-
-# 5. Log in tempo reale
-docker compose logs -f
-
-# 6. Arresto
-docker compose down   # i dati restano nel volume ./data
-```
-
-Note operative:
-- **Porta configurabile**: `HOST_PORT=8080 docker compose up -d` (default 8000)
-- **Persistenza**: tutto ciò che è prezioso (DB SQLite `graph_engine.db`,
-  artefatti di esplorazione, cache OSINT) vive in `./data`, montato come
-  volume in `/app/data` — sopravvive a riavvii e ricreazioni del container
-- **Retention**: un job giornaliero interno cancella screenshot/DOM/HAR
-  più vecchi di `ARTIFACT_RETENTION_DAYS` (default 30, `0` = mai) e la
-  cache OSINT scaduta; il DB resta intatto (verdetti e storico non si
-  perdono). Il backup periodico di `./data/graph_engine.db` resta a
-  carico dell'infrastruttura
-- **Permessi di `./data` al primo deploy**: automatici — l'entrypoint del
-  container parte come root solo per sistemare la directory dati (UID
-  10001) e poi cede i privilegi prima di eseguire uvicorn. Se `./data`
-  non esiste e viene creata come root dal demone Docker, il primo avvio
-  la corregge da solo (il flag `:z` sul volume copre anche SELinux).
-  Nessun chown manuale sull'host
-- **Utente non-root**: il server non gira mai come root nel container
-- **Un solo worker uvicorn**: SQLite ha un solo scrittore; per più
-  throughput la strada è l'async dentro il singolo processo
-- **Browser Chromium condiviso**: il lifespan dell'app mantiene un pool
-  di browser Playwright riusati tra le richieste — nessun launch di
-  Chromium per singola analisi
-- **Autenticazione**: dashboard e API REST richiedono il login (utenti in
-  SQLite, admin bootstrap al primo avvio — credenziali nel log se non
-  valorizzate nel `.env`); l'API esterna richiede `X-API-Key`
-  (`API_KEY` nel `.env`, più chiavi separate da virgola, 503 se
-  assente). Solo `/health` è aperto (probe del container)
-- **Concorrenza**: al massimo `MAX_CONCURRENT_ANALYSES` analisi in
-  esecuzione insieme (default 4); le altre restano `queued` finché si
-  libera uno slot. Dentro ogni analisi L4 esplora fino a
-  `L4_PARALLEL_ACTIONS` azioni (click/redirect) in parallelo (default 3):
-  le pagine Chromium aperte arrivano a circa il prodotto dei due valori
-
-### Integrazione con un servizio esterno
-
-L'API espone due modalità che lavorano sulla **stessa analisi** (stesso
-target, stesso grafo, stesso verdetto in SQLite) — non sono due sistemi
-separati. Entrambe si autenticano con l'header `X-API-Key`:
-
-| Endpoint | Uso |
-|---|---|
-| `GET /api/v1/analyze?url=...` | Risposta **sincrona**: attende il completamento reale dell'analisi e porta sempre il verdetto finale (nessuna deadline imposta dal modulo) |
-| `POST /analyses` + `GET /analyses/{id}` | Avvio asincrono (202 Accepted) e polling dello stato (`queued` → `running` → `done`/`error`) |
-| `GET /analyses/{id}/verdict` | Lo stesso JSON di `/api/v1/analyze` per quell'analisi: da leggere a fine polling |
-| `GET /analyses/{id}/graph` | **Il JSON completo**: target, tutti gli stati del grafo, le transizioni, le evidenze di ogni livello e il verdetto |
-
-Il JSON mostrato dal CLI (`python -m graph_engine.cli <url>`) è lo stesso
-contenuto di `GET /analyses/{id}/graph`.
-
-#### Contratto di `GET /api/v1/analyze`
-
-Il chiamante **passa l'URL in query string** e **attende che la risposta
-contenga il JSON** del verdetto — non c'è un secondo passo. Il formato
-della risposta è **identico** a quello della precedente integrazione
-Trellix IVX (`/trellix/analyze`), così il servizio esterno è un
-sostituto drop-in: cambiano solo il path e la variabile della chiave.
-
-La route è **protetta da API key**: ogni richiesta deve portare
-`X-API-Key` con una delle chiavi di `API_KEY` (se la variabile non è
-configurata la route risponde **503** — configurazione mancante, mai
-aperta; chiave assente o errata → **401**):
+## Sviluppo e test
 
 ```bash
-curl -G http://localhost:8000/api/v1/analyze \
-     -H "X-API-Key: $API_KEY" \
-     --data-urlencode "url=https://example.org/"
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+
+uvicorn graph_engine.api.app:app --reload        # API + dashboard in locale
+python -m graph_engine.cli <url> --classify      # analisi da riga di comando (JSON del grafo)
+python -m graph_engine.cli --history <url>       # storico di un URL
+
+pytest                                           # suite predefinita, senza rete reale
+pytest -m integration                            # test con rete reale
 ```
 
-Tutto ciò che segue `url=` nella query string è l'URL da analizzare
-(anche con `&`, `?` e `=` propri); il percent-encoding, anche multiplo,
-viene decodificato.
+- **Banco di prova di L4:** `tests/graph_engine/l4_fixtures.py` serve otto
+  scenari locali (kit multi-pagina, SPA, gate, redirect JS ritardato,
+  polling, fetch lenta, meta refresh, render ritardato).
+  `test_l4_equivalence.py` verifica che il grafo esplorato resti identico a
+  `l4_golden.json`; il golden si aggiorna solo con un motivo esplicito.
+- **Benchmark di L4 su URL reali:** `scripts/bench_l4.py run <lista> -o
+  out.json` e `compare before.json after.json`. Le liste stanno in
+  `benchmarks/`, che git ignora.
 
-Risposta (200, `Content-Type: application/json`) — verdetto binario avvolto
-nella chiave `result` (`result.verdict` / `result.signature`):
-
-```json
-{
-  "result": {
-    "verdict": "safe",
-    "confidence": 0.95,
-    "signature": "No Threats Detected",
-    "recommended_action": "allow",
-    "reason": "Analisi completata — nessun indicatore di phishing rilevato."
-  }
-}
-```
-
-Campi di `result`:
-
-| Campo | Valori | Significato |
-|---|---|---|
-| `result.verdict` | `safe` \| `malicious` | Il verdetto binario |
-| `result.confidence` | 0.0–1.0 | Fiducia del verdetto (≥0.8-0.9 con verdetto definitivo; 0.1 sui rami non conclusivi: analisi fallita o senza classificazione) |
-| `result.signature` | testo breve | Firma leggibile; su `safe` è sempre benigna (`No Threats Detected` o simile), mai "Phishing: …" |
-| `result.recommended_action` | `allow` \| `block` | Azione raccomandata al chiamante |
-| `result.reason` | testo | Motivazione leggibile (il `rationale` del classificatore, se presente) |
-
-Comportamento:
-
-- **Nessuna deadline** imposta dal modulo: la risposta arriva quando
-  l'analisi è terminata, con il verdetto finale (il budget di
-  esplorazione interno resta comunque limitato).
-- **Cache 24h**: un URL già analizzato con successo nelle ultime 24 ore
-  risponde subito con il verdetto salvato.
-- **Richieste concorrenti sullo stesso URL**: la seconda si aggancia
-  all'analisi già in corso invece di avviarne un'altra, ed entrambe
-  ricevono lo stesso verdetto finale.
-- **Disconnessione del chiamante**: se la connessione cade (es. timeout
-  di un proxy), l'analisi completa comunque in background e il
-  risultato viene restituito dalla chiamata successiva (cache).
-- **Onestà**: un'analisi fallita risponde `"verdict": "safe"`,
-  `"confidence": 0.1`, `"signature": "Analysis-Failed"`; una completata
-  senza classificazione risponde `Analysis-Incomplete — Benign By
-  Default`.
-- **Whitelist/Blacklist**: un hit risponde subito con il verdetto
-  forzato (`Whitelist-Override` / `Blacklist-Override`, confidenza 1.0).
-
-## Test
-
-```bash
-pytest                # suite predefinita (nessuna chiamata di rete reale)
-pytest -m integration # test con rete reale (httpbin.org)
-```
+Architettura, schemi dati e decisioni tecniche:
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
