@@ -388,3 +388,19 @@ class UserUpdateResponse(AuthUserResponse):
     """Risposta della PATCH /auth/users/{username} — ruolo allo stato finale."""
 
     ok: bool = True
+
+
+# ---------------------------------------------------------------------------
+# Request — POST /analyses/{id}/opencti (esportazione su OpenCTI)
+# ---------------------------------------------------------------------------
+
+
+class OpenCtiExportRequest(BaseModel):
+    """Body della POST /analyses/{id}/opencti.
+
+    ``indicators``: chiavi degli indicatori scelti nell'anteprima
+    (``None`` = tutti quelli proposti).
+    """
+
+    indicators: Optional[list[str]] = Field(default=None, max_length=20)
+

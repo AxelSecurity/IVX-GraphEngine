@@ -75,6 +75,15 @@ sulla URL normalizzata senza query/frammento). Un hit forza subito il
 verdetto e salta l'analisi — sia nella dashboard che nella risposta
 dell'API esterna; in caso di conflitto vince il match più specifico (URL > dominio).
 
+Nel dettaglio di un'analisi con verdetto **malicious** il pulsante
+**"Invia a OpenCTI"** crea su OpenCTI un Report (TLP e autore da `.env`)
+con gli indicatori scelti nell'anteprima: URL analizzato, URL finale e
+dominio (sempre l'host completo, mai la piattaforma di hosting
+condiviso). Ogni analisi si invia una volta sola; dopo l'invio il
+riquadro mostra chi l'ha inviata e il link al Report. Richiede
+`OPENCTI_URL` e `OPENCTI_API_KEY`; il motore resta in sola scrittura,
+le lookup su OpenCTI restano a carico del servizio chiamante.
+
 Dalla voce **"Utenti"** (visibile solo agli amministratori) si gestiscono
 gli account della dashboard: creazione, cambio ruolo
 (`admin`/`operator`), cambio password ed eliminazione. Protezioni: non si

@@ -602,3 +602,44 @@ async def count_running(db_path: str = DEFAULT_DB_PATH) -> int:
         ) as cur:
             row = await cur.fetchone()
     return row[0] if row else 0
+
+
+async def get_opencti_export(
+    target_id: str, db_path: str = DEFAULT_DB_PATH,
+) -> dict | None:
+    """Esportazione OpenCTI già fatta per *target_id*, o ``None``."""
+    async with _connect(db_path, rows=True) as conn:
+        async with conn.execute(
+            "SELECT * FROM opencti_export WHERE target_id = ?", (target_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "report_id": row["report_id"],
+        "report_url": row["report_url"],
+        "indicators": json.loads(row["indicators"]),
+        "exported_by": row["exported_by"],
+        "exported_at": row["exported_at"],
+    }
+
+
+async def save_opencti_export(
+    target_id: str,
+    report_id: str,
+    report_url: str,
+    indicators: list[str],
+    exported_by: str | None,
+    db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    """Registra l'esportazione OpenCTI di *target_id*."""
+    async with _connect(db_path) as conn:
+        await conn.execute(
+            """INSERT OR REPLACE INTO opencti_export
+               (target_id, report_id, report_url, indicators, exported_by, exported_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (target_id, report_id, report_url, json.dumps(indicators),
+             exported_by, datetime.now(timezone.utc).isoformat()),
+        )
+        await conn.commit()
+

@@ -38,6 +38,9 @@ _CONFIG_FIELDS = (
     "azure_vision_key",
     "ctlogs_api_key",
     "api_key",
+    "opencti_url",
+    "opencti_api_key",
+    "dashboard_public_url",
     "dashboard_admin_user",
     "dashboard_admin_password",
 )
@@ -121,6 +124,18 @@ class Settings(BaseSettings):
     # con attesa crescente prima di ripiegare sul fallback euristico.
     foundry_max_concurrent: int = 2
 
+    # ── Esportazione su OpenCTI (pulsante della dashboard) ──────────
+    # Solo SCRITTURA, su richiesta di un utente: crea un Report con gli
+    # indicatori di un'analisi malevola (graph_engine.api.opencti_export).
+    # Le lookup su OpenCTI restano a monte, sul servizio chiamante.
+    opencti_url: Optional[str] = None
+    opencti_api_key: Optional[str] = None
+    opencti_tlp: str = "TLP:AMBER"
+    opencti_author: str = "GraphEngine"
+    # URL pubblico della dashboard (es. https://graphengine.example.org):
+    # se presente, il Report contiene il link all'analisi.
+    dashboard_public_url: Optional[str] = None
+
     # ── Log ─────────────────────────────────────────────────────────
     # Livello dei log applicativi (DEBUG, INFO, WARNING, ERROR).  Le
     # librerie Azure restano comunque almeno a WARNING e i /health
@@ -171,6 +186,11 @@ class Settings(BaseSettings):
     def ctlogs_configured(self) -> bool:
         """True se la API key ctlogs.dev è presente (endpoint fisso)."""
         return bool(self.ctlogs_api_key)
+
+    @property
+    def opencti_configured(self) -> bool:
+        """True se URL e chiave OpenCTI sono entrambi presenti."""
+        return bool(self.opencti_url and self.opencti_api_key)
 
     @property
     def api_keys(self) -> list[str]:

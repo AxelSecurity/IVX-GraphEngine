@@ -1292,6 +1292,12 @@ function buildDetailHtml(id, graph, artifacts, extResp) {
       </div>
     </div>` : ""}
 
+    ${extResp?.result?.verdict === "malicious" ? `
+    <div class="section">
+      <div class="section-title">OpenCTI</div>
+      <div class="card opencti-box" id="opencti-box"><span class="opencti-note">Verifica stato…</span></div>
+    </div>` : ""}
+
     ${states.length > 0 ? `
     <div class="section">
       <div class="section-title">Grafo di esplorazione <span class="count-pill">${states.length} nodi · ${transitions.length} archi</span></div>
@@ -1561,6 +1567,7 @@ function buildGraphSvg(states, transitions) {
 
 function wireDetail(targetId, graph) {
   document.getElementById("back-link")?.addEventListener("click", () => navigate("#/"));
+  if (document.getElementById("opencti-box")) loadOpenCti(targetId);
 
   const copyBtn = document.getElementById("copy-verdict-btn");
   if (copyBtn) {
@@ -1626,3 +1633,108 @@ render();
   }
   render();
 })();
+
+
+// ---------------------------------------------------------------------------
+// OpenCTI — invio manuale delle analisi malevole come Report con indicatori
+// ---------------------------------------------------------------------------
+
+const openctiDialog = document.createElement("div");
+openctiDialog.className = "modal-overlay hidden";
+openctiDialog.innerHTML = `
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="opencti-dialog-title">
+    <div class="modal-title opencti-title" id="opencti-dialog-title">Invia a OpenCTI</div>
+    <div class="modal-body" id="opencti-dialog-body"></div>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="opencti-cancel">Annulla</button>
+      <button class="btn-primary" id="opencti-confirm">Crea Report</button>
+    </div>
+  </div>`;
+document.body.appendChild(openctiDialog);
+
+let openctiTarget = null;
+
+function renderOpenCtiExported(box, exp) {
+  box.innerHTML = `
+    <span class="opencti-done">✓ Inviata a OpenCTI</span>
+    <span class="opencti-note">il ${formatDate(exp.exported_at)}${exp.exported_by ? ` da <b>${escapeHtml(exp.exported_by)}</b>` : ""} · ${exp.indicators.length} indicatori</span>
+    <a class="btn-ghost opencti-link" href="${escapeHtml(exp.report_url)}" target="_blank" rel="noopener noreferrer">Apri il Report</a>`;
+}
+
+async function loadOpenCti(targetId) {
+  const box = document.getElementById("opencti-box");
+  let status;
+  try {
+    status = await fetchJSON(`/analyses/${targetId}/opencti`);
+  } catch (e) {
+    box.innerHTML = `<span class="opencti-note error">Stato OpenCTI non disponibile (${escapeHtml(e.message)}).</span>`;
+    return;
+  }
+  if (status.exported) {
+    renderOpenCtiExported(box, status.exported);
+    return;
+  }
+  if (!status.configured) {
+    box.innerHTML = `<span class="opencti-note">OpenCTI non configurato: imposta <b>OPENCTI_URL</b> e <b>OPENCTI_API_KEY</b> nel .env per abilitare l'invio.</span>`;
+    return;
+  }
+  box.innerHTML = `
+    <span class="opencti-note">Crea su OpenCTI un Report (${escapeHtml(status.tlp)}) con gli indicatori di questa analisi.</span>
+    <button class="btn-primary" id="opencti-open" type="button">Invia a OpenCTI</button>`;
+  document.getElementById("opencti-open").addEventListener("click", () => openOpenCtiDialog(targetId, status));
+}
+
+function openOpenCtiDialog(targetId, status) {
+  openctiTarget = targetId;
+  const rows = status.indicators.map((ind, i) => `
+    <label class="opencti-ind">
+      <input type="checkbox" value="${escapeHtml(ind.key)}" checked>
+      <span class="opencti-type">${ind.type === "url" ? "URL" : "Dominio"}</span>
+      <span class="opencti-value">${escapeHtml(ind.value)}</span>
+    </label>`).join("");
+  document.getElementById("opencti-dialog-body").innerHTML = `
+    Verrà creato un <b>Report</b> marcato <b>${escapeHtml(status.tlp)}</b> con gli indicatori selezionati:
+    <div class="opencti-list">${rows}</div>
+    <div class="opencti-msg" id="opencti-msg"></div>`;
+  const confirm = document.getElementById("opencti-confirm");
+  confirm.disabled = false;
+  confirm.textContent = "Crea Report";
+  openctiDialog.classList.remove("hidden");
+}
+
+function closeOpenCtiDialog() {
+  openctiDialog.classList.add("hidden");
+  openctiTarget = null;
+}
+
+document.getElementById("opencti-cancel").addEventListener("click", closeOpenCtiDialog);
+openctiDialog.addEventListener("click", (e) => { if (e.target === openctiDialog) closeOpenCtiDialog(); });
+
+document.getElementById("opencti-confirm").addEventListener("click", async () => {
+  if (!openctiTarget) return;
+  const keys = [...openctiDialog.querySelectorAll(".opencti-list input:checked")].map((el) => el.value);
+  const msg = document.getElementById("opencti-msg");
+  if (keys.length === 0) {
+    msg.textContent = "Seleziona almeno un indicatore.";
+    return;
+  }
+  const confirm = document.getElementById("opencti-confirm");
+  confirm.disabled = true;
+  confirm.textContent = "Invio in corso…";
+  msg.textContent = "";
+  const targetId = openctiTarget;
+  try {
+    await fetchJSON(`/analyses/${targetId}/opencti`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ indicators: keys }),
+    });
+    closeOpenCtiDialog();
+    if (document.getElementById("opencti-box")) loadOpenCti(targetId);
+  } catch (e) {
+    msg.textContent = `Invio non riuscito: ${e.message}`;
+    confirm.disabled = false;
+    confirm.textContent = "Riprova";
+  }
+});
+

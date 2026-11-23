@@ -16,6 +16,9 @@ _ALL_CONFIG_FIELDS = (
     "azure_foundry_endpoint",
     "azure_foundry_agent_id",
     "api_key",
+    "opencti_url",
+    "opencti_api_key",
+    "dashboard_public_url",
     "dashboard_admin_user",
     "dashboard_admin_password",
 )

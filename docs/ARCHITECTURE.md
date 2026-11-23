@@ -879,6 +879,24 @@ Rami non conclusivi (sempre `safe`/`allow`, confidence 0.1):
 By Default` (analisi senza classificazione o non ancora conclusa, es.
 letta in polling con `/analyses/{id}/verdict`).
 
+### Invio a OpenCTI (`opencti_export.py`)
+
+Azione manuale della dashboard, solo per le analisi con verdetto
+`malicious` (lo stesso della risposta API) e una volta per analisi
+(tabella `opencti_export`). `GET /analyses/{id}/opencti` restituisce
+stato e anteprima degli indicatori; `POST /analyses/{id}/opencti` (solo
+sessione della dashboard, la API key non vale; lock per analisi contro il
+doppio click) crea via GraphQL (OpenCTI 6.x):
+
+- marcatura `OPENCTI_TLP`, autore `OPENCTI_AUTHOR` (Organization), label
+  `graphengine`, famiglia (`phishing`/`malware-download`) e marchio;
+- un Indicator STIX per indicatore scelto, con `createObservables`;
+- il Report che li contiene (nome = firma del verdetto + host, motivazione
+  nella descrizione, link alla dashboard se `DASHBOARD_PUBLIC_URL`).
+
+Il motore resta in sola scrittura: le lookup su OpenCTI sono a carico del
+servizio chiamante.
+
 ### Allowlist/blacklist (`allowlist.py`)
 
 Due tabelle SQLite: `allowlist_blacklist` (match sul **dominio
@@ -1016,6 +1034,9 @@ più permessa nei moduli.
 | `L4_PARALLEL_ACTIONS` | `l4_parallel_actions` | azioni L4 in parallelo per stato | intero, default 3 (1 = sequenziale) |
 | `FOUNDRY_MAX_CONCURRENT` | `foundry_max_concurrent` | run Foundry contemporanei; sul rate limit retry con backoff (10/20/40s o Retry-After) | intero, default 2 |
 | `SCREENSHOT_MAX_HEIGHT` | `screenshot_max_height` | tetto all'altezza dello screenshot (px); prima di chiamare Vision si verificano i limiti dell'immagine | intero, default 8000 (0 = pagina intera) |
+| `OPENCTI_URL` / `OPENCTI_API_KEY` | `opencti_url` / `opencti_api_key` | pulsante "Invia a OpenCTI" della dashboard (`api/opencti_export.py`) | entrambe richieste (`opencti_configured`) |
+| `OPENCTI_TLP` / `OPENCTI_AUTHOR` | `opencti_tlp` / `opencti_author` | marcatura e autore degli oggetti creati | default `TLP:AMBER` / `GraphEngine` |
+| `DASHBOARD_PUBLIC_URL` | `dashboard_public_url` | link all'analisi nel Report OpenCTI | opzionale |
 | `LOG_LEVEL` | `log_level` | livello dei log (`api/app.py: configure_logging`); librerie Azure sempre ≥ WARNING, `/health` riusciti esclusi dal log di accesso | stringa, default `INFO` |
 | `ARTIFACT_RETENTION_DAYS` | `artifact_retention_days` | retention artefatti su disco (`api/retention.py`) | intero, default 30 (0 = mai); il DB non viene toccato |
 

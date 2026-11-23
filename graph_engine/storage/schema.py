@@ -116,6 +116,21 @@ CREATE TABLE IF NOT EXISTS verdict (
 );
 
 -- ============================================================================
+-- OpenCTI export — un'analisi esportata al massimo una volta (pulsante
+-- della dashboard): report creato, chi e quando
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS opencti_export (
+    target_id       TEXT PRIMARY KEY REFERENCES analysis_target(id)
+                            ON DELETE CASCADE,
+    report_id       TEXT    NOT NULL,
+    report_url      TEXT    NOT NULL,
+    indicators      TEXT    NOT NULL,          -- JSON list
+    exported_by     TEXT,
+    exported_at     TEXT    NOT NULL           -- ISO-8601 datetime
+);
+
+-- ============================================================================
 -- PRAGMA — enforce foreign keys  (SQLite requires per-connection PRAGMA)
 -- ============================================================================
 -- Called explicitly in repository.connect() — cannot be in DDL.

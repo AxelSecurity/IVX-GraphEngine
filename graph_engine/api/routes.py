@@ -6,6 +6,7 @@ di puntare a directory temporanee senza toccare il filesystem reale.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -24,6 +25,12 @@ from graph_engine.api.allowlist import (
 )
 from graph_engine.api.artifact_cleanup import remove_artifact_dirs
 from graph_engine.api.jobs import get_jobs
+from graph_engine.api.opencti_export import (
+    OpenCtiError,
+    OpenCtiNotConfigured,
+    build_indicators,
+    export_analysis,
+)
 from graph_engine.api.pipeline_runner import DEFAULT_ARTIFACT_ROOT
 from graph_engine.api.schemas import (
     AnalysesDeleteRequest,
@@ -46,13 +53,17 @@ from graph_engine.api.schemas import (
     ListsResponse,
     TargetSummary,
     ExternalVerdictResponse,
+    OpenCtiExportRequest,
     VerdictSummary,
 )
 from graph_engine.api.verdict_response import build_verdict_response
 from graph_engine.budget import Budget
 from graph_engine.models import AnalysisTarget, Classification, TargetStatus, Verdict
+from graph_engine.config import settings
 from graph_engine.storage.repository import (
     count_running,
+    get_opencti_export,
+    save_opencti_export,
     count_targets,
     delete_targets,
     get_history_for_url_hash,
@@ -420,6 +431,75 @@ def build_router(
             raise HTTPException(status_code=404, detail="Analisi non trovata")
 
         return build_verdict_response(data)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # OpenCTI — esportazione manuale delle analisi malevole (dashboard)
+    # ──────────────────────────────────────────────────────────────────────
+
+    # Un'esportazione alla volta per analisi: un doppio click non crea due
+    # Report.
+    opencti_locks: dict[str, asyncio.Lock] = {}
+
+    @router.get("/analyses/{target_id}/opencti")
+    async def get_opencti_status(target_id: str):
+        """Stato dell'esportazione e anteprima degli indicatori."""
+        data = await get_target_by_id(target_id, db_path=db_path)
+        if data is None:
+            raise HTTPException(status_code=404, detail="Analisi non trovata")
+        external = build_verdict_response(data)
+        return {
+            "configured": settings.opencti_configured,
+            "eligible": external["result"]["verdict"] == "malicious",
+            "exported": await get_opencti_export(target_id, db_path=db_path),
+            "indicators": build_indicators(data["target"]),
+            "tlp": settings.opencti_tlp,
+        }
+
+    @router.post("/analyses/{target_id}/opencti")
+    async def export_to_opencti(
+        target_id: str, payload: OpenCtiExportRequest, request: Request,
+    ):
+        """Crea su OpenCTI un Report con gli indicatori dell'analisi.
+
+        Solo per analisi con verdetto ``malicious`` (lo stesso della
+        risposta API esterna) e una sola volta per analisi.  Riservato
+        agli utenti della dashboard: la API key non vale su questa route.
+        """
+        data = await get_target_by_id(target_id, db_path=db_path)
+        if data is None:
+            raise HTTPException(status_code=404, detail="Analisi non trovata")
+        external = build_verdict_response(data)
+        if external["result"]["verdict"] != "malicious":
+            raise HTTPException(
+                status_code=409,
+                detail="Solo le analisi con verdetto malicious si inviano a OpenCTI",
+            )
+        lock = opencti_locks.setdefault(target_id, asyncio.Lock())
+        async with lock:
+            existing = await get_opencti_export(target_id, db_path=db_path)
+            if existing is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Analisi già inviata a OpenCTI: {existing['report_url']}",
+                )
+            try:
+                exported = await export_analysis(
+                    data, external, selected_keys=payload.indicators,
+                )
+            except OpenCtiNotConfigured as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+            except OpenCtiError as exc:
+                raise HTTPException(status_code=502, detail=str(exc))
+            user = getattr(request.state, "user", None) or {}
+            await save_opencti_export(
+                target_id,
+                exported["report_id"],
+                exported["report_url"],
+                exported["indicators"],
+                user.get("username"),
+                db_path=db_path,
+            )
+        return exported
 
     # ──────────────────────────────────────────────────────────────────────
     # GET /analyses/{target_id}/artifacts — listing ricorsivo

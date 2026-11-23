@@ -24,6 +24,9 @@ ALL_ENV_VARS = {
     "azure_vision_endpoint": "AZURE_VISION_ENDPOINT",
     "azure_vision_key": "AZURE_VISION_KEY",
     "api_key": "API_KEY",
+    "opencti_url": "OPENCTI_URL",
+    "opencti_api_key": "OPENCTI_API_KEY",
+    "dashboard_public_url": "DASHBOARD_PUBLIC_URL",
     "dashboard_admin_user": "DASHBOARD_ADMIN_USER",
     "dashboard_admin_password": "DASHBOARD_ADMIN_PASSWORD",
 }

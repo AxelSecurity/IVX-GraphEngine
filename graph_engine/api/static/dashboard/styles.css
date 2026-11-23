@@ -1100,3 +1100,66 @@ select { cursor: pointer; }
 }
 .login-form button:hover:not(:disabled) { filter: brightness(1.1); }
 .login-form button:disabled { opacity: 0.6; cursor: default; }
+
+/* ----------------------------------------------------- OpenCTI export */
+
+.btn-primary {
+  background: var(--accent);
+  border: none;
+  color: #0a0d14;
+  border-radius: var(--radius-sm);
+  padding: 9px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: filter 0.15s, opacity 0.15s;
+}
+.btn-primary:hover:not(:disabled) { filter: brightness(1.1); }
+.btn-primary:disabled { opacity: 0.6; cursor: default; }
+
+.opencti-box {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 14px 18px;
+}
+.opencti-note { font-size: 13px; color: var(--text-dim); flex: 1 1 260px; }
+.opencti-note.error { color: var(--phishing); }
+.opencti-note b { color: var(--text); }
+.opencti-done { font-weight: 700; color: var(--benign); }
+.opencti-link { text-decoration: none; }
+.opencti-title { color: var(--accent); }
+
+.opencti-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+.opencti-ind {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.opencti-type {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  min-width: 58px;
+}
+.opencti-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  color: var(--text);
+  word-break: break-all;
+}
+.opencti-msg { margin-top: 10px; color: var(--phishing); font-size: 12.5px; min-height: 1em; }
+
